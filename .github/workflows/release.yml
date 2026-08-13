@@ -193,6 +193,20 @@ jobs:
 
           **Linux** is the platform this is developed on and gets the most use.
           NOTES
-          gh release create "${GITHUB_REF_NAME}" release/* \
-            --title "IXD ${GITHUB_REF_NAME}" \
-            --notes-file notes.md
+          # Converge rather than fail. Re-running a release — because one
+          # platform needed fixing, or the tag was moved — met "a release with
+          # the same tag name already exists" and stopped, leaving the release
+          # holding the *previous* build's binaries with no sign that anything
+          # was wrong. Whichever way round it is, the assets end up matching
+          # the code the tag points at.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "the release exists; replacing its assets and notes"
+            gh release upload "${GITHUB_REF_NAME}" release/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" \
+              --title "IXD ${GITHUB_REF_NAME}" \
+              --notes-file notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" release/* \
+              --title "IXD ${GITHUB_REF_NAME}" \
+              --notes-file notes.md
+          fi
