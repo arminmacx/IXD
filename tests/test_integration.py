@@ -1551,6 +1551,8 @@ class FakeBackend:
         self.calls = []
     def set_progress(self, percent, visible, handles=()):
         self.calls.append((percent, visible, handles))
+    def set_indeterminate(self, handles=()):
+        self.calls.append(("indeterminate", True, handles))
     def diagnostic(self):
         return ""
 
@@ -1569,6 +1571,14 @@ print("NEW_WINDOW_REDRAWN", len(calls) == 2, len(calls))
 print("NEW_WINDOW_INCLUDED",
       len(calls) == 2 and int(extra.winId()) in calls[1][2]
       and int(extra.winId()) not in calls[0][2])
+
+# A transfer whose length nobody published used to clear the bar, which is
+# what "nothing is running" looks like. Windows has a state for it.
+bar2.set_indeterminate()
+print("INDETERMINATE_ROUTED",
+      calls[-1][0] == "indeterminate" and len(calls[-1][2]) >= 1)
+bar2.set_indeterminate()
+print("INDETERMINATE_NOT_REPEATED", len(calls) == 3, len(calls))
 '''
     root = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -1606,6 +1616,10 @@ print("NEW_WINDOW_INCLUDED",
           "NEW_WINDOW_REDRAWN True" in output, detail)
     check("and it is the new window's own handle",
           "NEW_WINDOW_INCLUDED True" in output, detail)
+    check("a transfer with no published length is drawn indeterminate",
+          "INDETERMINATE_ROUTED True" in output, detail)
+    check("and that state is not re-sent while it holds",
+          "INDETERMINATE_NOT_REPEATED True" in output, detail)
 
 
 def test_a_downloads_window_stands_on_its_own() -> None:

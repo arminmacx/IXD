@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
         # it is given one as soon as there is one.
         self.taskbar = TaskbarProgress()
         self.taskbar.attach(self)
-        self._taskbar_trouble = ""
+        self._taskbar_note = ""
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -396,25 +396,33 @@ class MainWindow(QMainWindow):
             if download.total_size > 0:
                 done += max(0, min(download.downloaded, download.total_size))
                 total += download.total_size
-        if not active or total <= 0:
+        if not active:
             self.taskbar.clear()
-            return
-        self.taskbar.set_progress(done / total, visible=True)
-        self._log_taskbar_trouble()
+        elif total <= 0:
+            # Running, but nobody published a length: segmented and
+            # server-driven media routinely have none, and clearing the bar for
+            # those looked exactly like nothing running.
+            self.taskbar.set_indeterminate()
+        else:
+            self.taskbar.set_progress(done / total, visible=True)
+        self._log_taskbar_state()
 
-    def _log_taskbar_trouble(self) -> None:
-        """Put a refusal from the platform in the log, once per reason.
+    def _log_taskbar_state(self) -> None:
+        """Put what the platform did in the log, once per distinct message.
 
-        Progress on the icon fails silently by design — it is decoration, and
-        nothing about a transfer should depend on it. But "the bar does not
-        show on Windows" is then a report with no evidence behind it, and this
-        is the instrument that settles it.
+        Progress on the icon never fails loudly — it is decoration, and no
+        transfer depends on it. But silence made "the bar does not show on
+        Windows" a report with nothing behind it twice over, so success is
+        recorded as well as refusal. The message carries no percentage, so it
+        is written when the situation changes rather than every second.
         """
         message = self.taskbar.diagnostic()
-        if not message or message == self._taskbar_trouble:
+        if not message or message == self._taskbar_note:
             return
-        self._taskbar_trouble = message
-        self.service.db.log_event(f"Taskbar progress: {message}", level="warning")
+        self._taskbar_note = message
+        drew = message.startswith("ITaskbarList3")
+        self.service.db.log_event(f"Taskbar progress: {message}",
+                                  level="info" if drew else "warning")
 
     def _update_detail(self) -> None:
         if self._selected_id is None:

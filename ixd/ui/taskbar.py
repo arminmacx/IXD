@@ -68,6 +68,25 @@ class TaskbarProgress:
         if IS_MACOS:
             _set_dock_badge(percent, visible)
 
+    def set_indeterminate(self) -> None:
+        """Something is running, but nobody published a length.
+
+        A download whose size the server never states is the ordinary case for
+        segmented and server-driven media, and it used to clear the bar
+        entirely — indistinguishable from nothing running at all. Windows has a
+        state for exactly this; the Linux launcher entry does not, so there it
+        stays hidden rather than showing a made-up fraction.
+        """
+        handles = self._handles() if self._windows is not None else ()
+        state = ("indeterminate", handles)
+        if state == self._last:
+            return
+        self._last = state
+        if self._windows is not None:
+            self._windows.set_indeterminate(handles)
+        if self._unity is not None:
+            self._unity.set_progress(0, False)
+
     def clear(self) -> None:
         self.set_progress(0.0, visible=False)
 
@@ -76,7 +95,14 @@ class TaskbarProgress:
         self._window = window
 
     def diagnostic(self) -> str:
-        """What the platform backend has to say, for the log. '' when quiet."""
+        """What the platform backend did or refused to do, for the log.
+
+        Reported on success as well as on failure. Silence was the problem:
+        "the bar does not show on Windows" arrived twice with nothing in the
+        log either time, because a backend that believed it had succeeded said
+        nothing at all. The message carries no percentage, so it changes when
+        the situation changes rather than on every update.
+        """
         if self._windows is not None:
             return self._windows.diagnostic()
         return ""
@@ -93,19 +119,22 @@ class TaskbarProgress:
         rather than a window.
 
         Top-level and visible is the test. A parented dialog has no button and
-        the call against it is a harmless no-op, so nothing has to be excluded
-        by hand.
+        the call against it is a harmless no-op, so the filter *excludes* the
+        few kinds that are never windows in their own right rather than listing
+        the kinds that are — a window whose type is not on a list of expected
+        ones is a window this would silently refuse to draw on.
         """
         handles: list[int] = []
         try:
             from PySide6.QtCore import Qt
             from PySide6.QtWidgets import QApplication
 
-            wanted = (Qt.WindowType.Window, Qt.WindowType.Dialog)
+            never = (Qt.WindowType.Popup, Qt.WindowType.ToolTip,
+                     Qt.WindowType.SplashScreen, Qt.WindowType.Desktop)
             for widget in QApplication.topLevelWidgets():
                 if not widget.isWindow() or not widget.isVisible():
                     continue
-                if widget.windowType() not in wanted:
+                if widget.windowType() in never:
                     continue
                 handle = int(widget.winId())
                 if handle and handle not in handles:
@@ -198,8 +227,10 @@ class _WindowsTaskbar:
     _IID = "{EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF}"
 
     #: `SetProgressState` flags. NORMAL is the ordinary green fill; NOPROGRESS
-    #: removes it; PAUSED is the yellow one.
+    #: removes it; INDETERMINATE is the marquee, for a transfer whose length
+    #: nobody published; PAUSED is the yellow one.
     _NOPROGRESS = 0x0
+    _INDETERMINATE = 0x1
     _NORMAL = 0x2
     _PAUSED = 0x8
 
@@ -291,8 +322,23 @@ class _WindowsTaskbar:
 
     def set_progress(self, percent: int, visible: bool,
                      handles: tuple[int, ...] = ()) -> None:
+        self._draw(handles, self._NORMAL if visible else self._NOPROGRESS,
+                   percent if visible else None)
+
+    def set_indeterminate(self, handles: tuple[int, ...] = ()) -> None:
+        self._draw(handles, self._INDETERMINATE, None)
+
+    def _draw(self, handles: tuple[int, ...], state: int,
+              percent: int | None) -> None:
+        """Set one state on every window, and say what happened.
+
+        The result goes in `_error` whether it worked or not. A backend that
+        reports only its failures is indistinguishable from one that is not
+        being called, which is the position two "the bar does not show"
+        reports left this in.
+        """
         if not handles:
-            self._error = "no window with a taskbar button to draw progress on"
+            self._error = "no window with a taskbar button to draw on"
             return
         if not self._ensure():
             return
@@ -307,13 +353,18 @@ class _WindowsTaskbar:
                 self._c_void_p, self._HWND, self._ULONGLONG, self._ULONGLONG
             )(self._vtable[9])
 
+            results = []
             for handle in handles:
                 window = self._HWND(handle)
-                if not visible:
-                    set_state(self._pointer, window, self._NOPROGRESS)
-                    continue
-                set_state(self._pointer, window, self._NORMAL)
-                set_value(self._pointer, window,
-                          self._ULONGLONG(percent), self._ULONGLONG(100))
+                hr = set_state(self._pointer, window, state)
+                if percent is not None:
+                    hr2 = set_value(self._pointer, window,
+                                    self._ULONGLONG(percent), self._ULONGLONG(100))
+                    hr = hr if hr < 0 else hr2
+                results.append(f"0x{handle:X}={'ok' if hr >= 0 else f'0x{hr & 0xFFFFFFFF:08X}'}")
+            names = {self._NOPROGRESS: "clear", self._INDETERMINATE: "indeterminate",
+                     self._NORMAL: "normal", self._PAUSED: "paused"}
+            self._error = (f"ITaskbarList3 {names.get(state, state)} on "
+                           f"{len(handles)} window(s): " + ", ".join(results))
         except Exception as exc:      # noqa: BLE001
             self._error = f"taskbar progress failed: {exc}"

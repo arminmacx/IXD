@@ -109,13 +109,6 @@ header.stuck{border-bottom-color:var(--line); background:rgba(13,15,22,.9)}
 .bar em{margin-left:10px;font-style:normal;color:var(--faint);font-size:12px}
 .frame img{display:block;width:100%;height:auto}
 
-/* ---------- marquee of facts ---------- */
-.facts{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin:74px 0 0}
-.fact{padding:22px 20px;border:1px solid var(--line);border-radius:14px;background:var(--glass);text-align:center}
-.fact b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em}
-.fact span{color:var(--faint);font-size:13px}
-@media(max-width:760px){.facts{grid-template-columns:repeat(2,1fr)}}
-
 /* ---------- sections ---------- */
 section{padding:96px 0;position:relative;z-index:1}
 .eyebrow{color:var(--accent);font-size:13px;font-weight:650;letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px}
@@ -282,12 +275,6 @@ footer{border-top:1px solid var(--line);padding:44px 0;margin-top:40px}
     </div>
   </div>
 
-  <div class="facts reveal">
-    <div class="fact"><b>0</b><span>external binaries</span></div>
-    <div class="fact"><b>1</b><span>runtime dependency</span></div>
-    <div class="fact"><b>1,113</b><span>offline tests</span></div>
-    <div class="fact"><b>3</b><span>platforms</span></div>
-  </div>
 </div>
 
 <!-- features -->
@@ -355,7 +342,7 @@ footer{border-top:1px solid var(--line);padding:44px 0;margin-top:40px}
       <p class="eyebrow">No external binaries</p>
       <h2 class="h2">Everything is implemented here</h2>
       <p class="sub">Nothing shells out. There is no bundled toolchain to keep up to date, nothing to be broken by an upstream release, and one dependency to install.</p>
-      <div class="beta"><b>Beta.</b> Used daily on Linux and Windows. If something does not work, open an issue — the report asks for the log, which is usually the whole answer.</div>
+      <div class="beta"><b>This is a beta.</b></div>
     </div>
     <div class="tbl reveal">
       <div class="row head"><span>Implemented in IXD</span><span>Usually a dependency on</span></div>
