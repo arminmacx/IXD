@@ -1,0 +1,26 @@
+name: Ask for something
+description: A feature, a setting, or a change to how something behaves.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: What are you trying to get done?
+      description: >
+        The problem behind the request, rather than the solution. It often has
+        an answer that is simpler than the feature.
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 / Ubuntu 24.04 / macOS 15"

@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: The macOS build, verified or not
+    url: https://github.com/arminmacx/IXD/discussions
+    about: >
+      The macOS build has never been launched on real hardware. If you have run
+      it on a Mac, say so here — including if it simply worked.

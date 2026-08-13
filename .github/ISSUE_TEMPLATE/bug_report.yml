@@ -1,0 +1,89 @@
+name: Something is not working
+description: A download that fails, a button that does nothing, a file that will not play.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **The log is usually the whole answer.** Open IXD, click **Log** in the
+        toolbar, press **Copy**, and paste it below. It holds both halves —
+        the engine's and the browser extension's, in order — and it has
+        settled questions that no description of the symptom could.
+
+        If the log is switched off (Settings → General → *Keep a log*), turn
+        it on, reproduce the problem once, then copy it.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Help → About, or the name of the file you downloaded.
+      placeholder: "1.0.0 — ixd_1.0.0_amd64.deb"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux — Debian / Ubuntu (.deb)
+        - Linux — other distribution (portable tar.gz)
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Other — say which below
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - A build from the Releases page
+        - Built it myself with the script for my platform
+        - Ran it from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+      placeholder: |
+        1. Opened https://example.com/video/123
+        2. Clicked the panel over the video and chose 1080p
+        3. Expected one .mp4; the download failed at 0% with "…"
+    validations:
+      required: true
+
+  - type: input
+    id: address
+    attributes:
+      label: The page it happened on
+      description: >
+        Only if you are willing to share it, and only a public one. A site that
+        can be opened is far quicker to fix than one that has to be guessed at.
+      placeholder: "https://…"
+
+  - type: textarea
+    id: log
+    attributes:
+      label: The log
+      description: Toolbar → Log → Copy. Paste it here; it is formatted automatically.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: I have removed anything from the log I would rather not publish
+          required: false
+        - label: I can reproduce this, rather than having seen it once
+          required: false

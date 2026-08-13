@@ -1,0 +1,10 @@
+# Runtime
+PySide6==6.11.1          # Qt 6 bindings for the desktop UI
+
+# Build tooling (only needed for packaging/build.py)
+pyinstaller>=6.21.0
+
+# Optional acceleration — the engine works fully without it.
+# Installing it swaps the built-in pure-Python AES for a native
+# implementation, which speeds up encrypted-HLS decryption substantially.
+# cryptography>=43.0

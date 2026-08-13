@@ -1,0 +1,29 @@
+/*
+ * The download panel renders inside a shadow root, which is deliberately
+ * isolated from the host page's stylesheet — its styles live in
+ * video_inject.js so they travel with the markup they belong to.
+ *
+ * All this file has to do is keep the shadow host itself from participating in
+ * the page's layout. Sites commonly set rules like `body > div { margin: … }`
+ * or `* { transition: … }`, and without this reset a zero-sized host element
+ * can still push the page around or animate on insertion.
+ */
+
+#ixd-overlay-root {
+  all: initial !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: visible !important;
+  /* Deliberately no `contain`: `contain: layout` would make this element a
+     containing block for its position:fixed descendants, so the panel would be
+     positioned against a zero-sized box instead of the viewport. */
+  transition: none !important;
+  animation: none !important;
+  z-index: 2147483647 !important;
+}

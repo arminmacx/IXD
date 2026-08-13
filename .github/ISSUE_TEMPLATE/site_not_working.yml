@@ -1,0 +1,63 @@
+name: A site's video will not download
+description: The panel does not appear, offers nothing, or the download fails on one particular site.
+labels: [bug, extraction]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Media extraction is where this application does the most work and where
+        it is most likely to be wrong. Sites change, and a stream that worked
+        last month can stop for reasons nothing in the interface can show.
+
+        **The log settles it.** Toolbar → **Log** → **Copy**. It records what
+        the browser captured, what the site published, and what the server
+        actually answered — including the first bytes of a reply, which is how
+        two whole classes of defect were found.
+
+  - type: input
+    id: site
+    attributes:
+      label: The page
+      description: A public URL that shows the problem, if you are willing to share one.
+      placeholder: "https://…"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What goes wrong
+      options:
+        - No panel appears over the video
+        - The panel appears but lists no qualities
+        - A quality is listed but the download fails
+        - The download finishes but the file will not play
+        - The file plays but has no sound, or the wrong quality
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version and operating system
+      placeholder: "1.0.0 — Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      description: Include how it was installed — a snap or flatpak browser is confined differently.
+      placeholder: "Chrome 140, or Chromium (snap), or Firefox (flatpak)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: The log
+      description: Toolbar → Log → Copy.
+      render: text
+    validations:
+      required: true

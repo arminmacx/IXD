@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvt34tPb1vWpF05ZVfrLPe0TH3Y3XmgXZ9jw+8tXKlpbODfy/Hfg9prTaPlgfd04eeLQAOjQS4ALTuFdwbiDRlivWv//spo9dkVfD0cpcTyAVn+X9Y2FLymOrE5o40tE9GV6Min8ZItP3EfVBzaSRDmtoMQZ+lkXj1HUTB7fWbFLzmslaoxlNhuQ341UPMVWdwmJYCKinLyQhbwDUvxZGywOUhsved6SYN18A8himSIJqfIC1gQOV7r3M3jtYVWh2Z/rm4oovS4ofhT8nRn9VPL7aaiAO3BfmTJIdrv1i0wYvllAVdm543E0rrM8/lmbNinGpd/6JlJqx91CGb2ZQ5QIDAQAB",
+  "name": "Internet Xtreme Downloader",
+  "version": "1.0.0",
+  "description": "Send downloads and videos straight to Internet Xtreme Downloader for accelerated, resumable, multi-threaded transfers.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "downloads",
+    "webRequest",
+    "cookies",
+    "contextMenus",
+    "storage",
+    "notifications",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "Internet Xtreme Downloader",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/video_inject.js"
+      ],
+      "css": [
+        "content/inject.css"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/page_tee.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/icon48.png"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

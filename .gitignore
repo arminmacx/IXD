@@ -1,0 +1,47 @@
+# --- never publish -----------------------------------------------------
+# The extension's private signing key. The *public* half is in
+# manifest.chrome.json, which is all that is needed for the fixed extension
+# ID; this half is what proves the extension is ours.
+packaging/extension-key.pem
+*.pem
+
+# --- build output ------------------------------------------------------
+.venv/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.deb
+*.AppImage
+*.dmg
+*.spec.bak
+
+# --- generated at run time --------------------------------------------
+extension/manifest.json
+native-host/ixd-native-host
+native-host/ixd-native-host.bat
+native-host/com.ixd.downloader*.json
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.log
+
+# --- not ours to redistribute -----------------------------------------
+idm/
+
+# --- working files, kept locally and never published --------------------
+backups/
+# The build diary and the working instructions. They are a real engineering
+# record, but they are notes to whoever is building this — not documentation
+# for anyone using it — and they are backed up separately.
+CLAUDE.md
+instruction.md
+context.md
+session-log.md
+# Field-report screenshots live at the top of the tree; the ones the README
+# uses are in docs/ and are kept.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif

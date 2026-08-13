@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Internet Xtreme Downloader — Extension Settings</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    body { width: auto; max-width: 720px; margin: 0 auto; padding: 26px 22px 40px; }
+    h1 { font-size: 19px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 22px; font-size: 12.5px; }
+    fieldset { border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; margin: 0 0 16px; background: var(--panel); }
+    legend { padding: 0 8px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 0; }
+    .row + .row { border-top: 1px solid rgba(150,170,230,0.08); }
+    .row label { font-size: 13px; }
+    .hint { display: block; color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+    input[type="text"], input[type="number"] { width: 260px; padding: 7px 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font: inherit; }
+    input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--accent); }
+    .actions { display: flex; gap: 10px; margin-top: 6px; }
+    .actions button { flex: 0 0 auto; padding: 9px 20px; }
+    #save-status { align-self: center; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Internet Xtreme Downloader</h1>
+  <p class="sub">Browser integration settings. Transfer settings live in the desktop application.</p>
+
+  <fieldset>
+    <legend>Interception</legend>
+    <div class="row">
+      <label for="enabled">Enable the extension
+        <span class="hint">Master switch for all browser integration.</span>
+      </label>
+      <input id="enabled" type="checkbox">
+    </div>
+    <div class="row">
+      <label for="interceptDownloads">Capture browser downloads
+        <span class="hint">Cancels the browser's own download and hands the URL to the engine.</span>
+      </label>
+      <input id="interceptDownloads" type="checkbox">
+    </div>
+    <div class="row">
+      <label for="injectVideoButtons">Add Download buttons to video pages
+        <span class="hint">Injects a button into the player's action row.</span>
+      </label>
+      <input id="injectVideoButtons" type="checkbox">
+    </div>
+    <div class="row">
+      <label for="notifyOnAdd">Show a notification when a download is captured</label>
+      <input id="notifyOnAdd" type="checkbox">
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Filters</legend>
+    <div class="row">
+      <label for="minSizeBytes">Minimum file size (bytes)
+        <span class="hint">Smaller downloads stay in the browser. 0 captures everything.</span>
+      </label>
+      <input id="minSizeBytes" type="number" min="0" step="1024">
+    </div>
+    <div class="row">
+      <label for="extensions">Only these extensions
+        <span class="hint">Comma-separated, e.g. <code>zip,iso,mp4</code>. Leave empty for all.</span>
+      </label>
+      <input id="extensions" type="text" placeholder="zip, iso, mp4, pdf">
+    </div>
+    <div class="row">
+      <label for="ignoredHosts">Never capture from these hosts
+        <span class="hint">Comma-separated host names.</span>
+      </label>
+      <input id="ignoredHosts" type="text" placeholder="localhost, 127.0.0.1">
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Media</legend>
+    <div class="row">
+      <label for="preferredQuality">Preferred video quality
+        <span class="hint">Used when you pick "Best available".</span>
+      </label>
+      <input id="preferredQuality" type="text" placeholder="1080p">
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Connection</legend>
+    <div class="row">
+      <label>Desktop application
+        <span class="hint" id="conn-detail">Checking…</span>
+      </label>
+      <button id="test" type="button" style="flex:0 0 auto;padding:8px 18px;">Test</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>What this page found</legend>
+    <div class="row">
+      <label>Detection on the tab you were last looking at
+        <span class="hint">The panel, the captured streams and the credentials
+          this extension is holding. "Not running on this page" and "found
+          nothing" look identical from the toolbar and mean different things.</span>
+      </label>
+      <button id="diagnose" type="button" style="flex:0 0 auto;padding:8px 18px;">Check</button>
+    </div>
+    <pre id="diagnostics" hidden style="white-space:pre-wrap;font-size:12px;
+      background:rgba(0,0,0,.25);padding:10px;border-radius:8px;"></pre>
+  </fieldset>
+
+  <div class="actions">
+    <button id="save" class="primary" type="button">Save settings</button>
+    <button id="reset" type="button">Reset to defaults</button>
+    <span id="save-status"></span>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,198 @@
+name: Release
+
+# Builds on all three operating systems and attaches the results to a GitHub
+# Release, so nobody has to build this themselves.
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# or run it by hand from the Actions tab, which uploads the artefacts without
+# publishing a release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Build one platform, or all of them'
+        default: all
+        type: choice
+        options: [all, linux, macos, windows]
+
+permissions:
+  contents: write        # needed to create the release and upload to it
+
+jobs:
+  # A tag builds everything. A manual run can build one platform, which matters
+  # on a private repository where a macOS minute is billed as ten. The matrix
+  # is decided here because a job-level `if:` cannot see the matrix context —
+  # filtering there is rejected when the workflow is parsed, not at run time.
+  plan:
+    name: Decide what to build
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || 'all' }}
+        run: |
+          all='[
+            {"key":"linux","os":"ubuntu-latest","label":"Linux",
+             "script":"./packaging/linux/build.sh"},
+            {"key":"macos","os":"macos-latest","label":"macOS (Apple silicon)",
+             "script":"./packaging/macos/build.sh"},
+            {"key":"windows","os":"windows-latest","label":"Windows",
+             "script":"packaging\\windows\\build.bat"}
+          ]'
+          if [ "$ONLY" = "all" ]; then
+            picked=$(jq -c . <<<"$all")
+          else
+            picked=$(jq -c --arg k "$ONLY" '[.[] | select(.key == $k)]' <<<"$all")
+          fi
+          echo "building: $picked"
+          echo "matrix=$picked" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.label }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false     # one platform failing must not hide the other two
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: '3.14'
+
+      - name: Qt's runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1
+
+      # The same scripts a user runs, so they are exercised on every release
+      # rather than only when somebody reports that one is broken. `IXD_PYTHON`
+      # pins the interpreter set up above instead of leaving the script to
+      # search a runner image that has several.
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: ${{ matrix.script }} --no-install
+        env:
+          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: ${{ matrix.script }}
+        env:
+          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
+          CI: 'true'          # the script skips its final `pause` when set
+
+      # A folder of files is not something to hand somebody. Each platform's
+      # portable build is collapsed into one archive next to its installer.
+      - name: Portable archive (Linux)
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf dist/ixd-linux-x86_64.tar.gz ixd
+
+      - name: Portable archive (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          if [ -d "Internet Xtreme Downloader.app" ]; then
+            ditto -c -k --keepParent "Internet Xtreme Downloader.app" ixd-macos-arm64.zip
+          else
+            tar -czf ixd-macos-arm64.tar.gz ixd
+          fi
+
+      - name: What was produced
+        shell: bash
+        run: ls -lh dist/ || dir dist
+
+      # A build that failed on one platform is the whole reason to keep the
+      # log, so it is kept exactly then.
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-log-${{ runner.os }}
+          if-no-files-found: ignore
+          path: build-*.log
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ixd-${{ runner.os }}
+          if-no-files-found: error
+          path: |
+            dist/*.deb
+            dist/*.dmg
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.AppImage
+
+  publish:
+    name: Publish the release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      # The extension zips and the source bundle are produced by all three
+      # builds, so the same name arrives three times; the first copy wins and
+      # the rest are skipped rather than overwriting it.
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp -n {} release/ \;
+          ls -lh release
+
+      # `gh` is on the runner already, so the release is cut without a
+      # third-party action — the same reasoning as the rest of this project.
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          > **This is a beta.** If something does not work, please open an
+          > issue — the templates ask for the log, which is usually the whole
+          > answer. Toolbar → **Log** → **Copy**.
+
+          ## Downloads
+
+          | Platform | File |
+          |---|---|
+          | Linux (Debian/Ubuntu) | `ixd_*_amd64.deb` |
+          | Linux (portable) | `ixd-linux-x86_64.tar.gz` |
+          | macOS (Apple silicon) | `*.dmg`, or `ixd-macos-arm64.zip` |
+          | Windows | `ixd-*-windows-x64.zip` |
+          | Browser extension | `ixd-extension-chrome-*.zip` |
+
+          Load the extension from `chrome://extensions` → Developer mode →
+          Load unpacked, pointing at the application's `extension` folder
+          (`~/.local/share/ixd/extension` on Linux).
+
+          ### Before you report a problem
+
+          **macOS is unverified.** It builds and packages on a macOS runner and
+          has never been launched on real hardware. A report either way is
+          genuinely useful — including "it just worked". It is also neither
+          signed nor notarised, so the first launch needs right-click → **Open**,
+          or `xattr -dr com.apple.quarantine "Internet Xtreme Downloader.app"`.
+
+          **Windows: the first launch takes a while.** Windows scans the whole
+          folder before it runs anything from it. Later launches are immediate.
+
+          **Linux** is the platform this is developed on and gets the most use.
+          NOTES
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --title "IXD ${GITHUB_REF_NAME}" \
+            --notes-file notes.md
