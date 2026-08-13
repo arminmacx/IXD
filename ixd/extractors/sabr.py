@@ -77,8 +77,9 @@ PART_SABR_CONTEXT_SENDING_POLICY = 59
 #: Field numbers inside a context update.
 _CONTEXT_TYPE = 1
 _CONTEXT_VALUE = 3
-#: …and inside the sending policy: lists of context types to start and stop.
-_POLICY_START = 1
+#: …and inside the sending policy, whose field 1 lists the types to start
+#: sending. Only the withdrawal is acted on: a context is already sent from
+#: the moment it arrives, so being told to start sending one changes nothing.
 _POLICY_STOP = 2
 #: Where an echoed context belongs in the streamer context (field 19 of the
 #: request): repeated `{type, value}`. The value is field 3 in the update the
