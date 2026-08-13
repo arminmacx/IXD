@@ -193,6 +193,11 @@ jobs:
 
           **Linux** is the platform this is developed on and gets the most use.
           NOTES
+          # Which commit these binaries actually are. A tag left
+          # behind while work continued publishes a green build of
+          # stale code, and nothing on the page said so.
+          printf '\nBuilt from `%s` on %s.\n' \
+            "${GITHUB_SHA:0:7}" "$(date -u +%Y-%m-%d)" >> notes.md
           # Converge rather than fail. Re-running a release — because one
           # platform needed fixing, or the tag was moved — met "a release with
           # the same tag name already exists" and stopped, leaving the release
