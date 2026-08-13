@@ -161,7 +161,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > notes.md <<'NOTES'
+          # What this release fixed, if anything was written down for it.
+          #
+          # It goes in the file rather than being pasted onto the page
+          # afterwards, because the branch below *replaces* the notes whenever
+          # a release is re-run — so a hand-edited page would be silently
+          # reverted by the next rebuild of the same tag.
+          : > notes.md
+          written="packaging/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$written" ]; then
+            cat "$written" >> notes.md
+            printf '\n---\n\n' >> notes.md
+          fi
+          cat >> notes.md <<'NOTES'
           > **This is a beta.** If something does not work, please open an
           > issue — the templates ask for the log, which is usually the whole
           > answer. Toolbar → **Log** → **Copy**.

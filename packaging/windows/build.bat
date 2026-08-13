@@ -105,8 +105,8 @@ if not exist "dist\ixd\ixd.exe" (
   call :say "MISSING: dist\ixd\ixd.exe"
   set "OK=0"
 )
-if not exist "dist\ixd-extension-chrome-1.0.0.zip" (
-  call :say "MISSING: dist\ixd-extension-chrome-1.0.0.zip"
+if not exist "dist\ixd-extension-chrome-*.zip" (
+  call :say "MISSING: dist\ixd-extension-chrome-*.zip"
   set "OK=0"
 )
 if "!OK!"=="0" (
@@ -122,8 +122,8 @@ call :say "Registering the browser bridge..."
 call :say ""
 call :say "Done."
 call :say "  Application : dist\ixd\ixd.exe"
-call :say "  To send on  : dist\ixd-1.0.0-windows-x64.zip"
-call :say "  Extension   : dist\ixd-extension-chrome-1.0.0.zip"
+call :say "  To send on  : dist\ixd-*-windows-x64.zip"
+call :say "  Extension   : dist\ixd-extension-chrome-*.zip"
 call :say ""
 call :say "Load the extension: chrome://extensions - Developer mode -"
 call :say "Load unpacked - pick the 'extension' folder here."

@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import gzip
 import io
+import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -36,7 +38,10 @@ DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 APP_NAME = "ixd"
 BUNDLE_NAME = "Internet Xtreme Downloader"
-VERSION = "1.0.0"
+VERSION = re.search(
+    r'__version__ = "([^"]+)"',
+    (ROOT / "ixd" / "__init__.py").read_text(encoding="utf-8"),
+).group(1)
 MAINTAINER = "IXD <noreply@example.com>"
 DESCRIPTION = "Accelerated multi-threaded download manager with browser integration"
 
@@ -151,9 +156,19 @@ def package_extension() -> list[Path]:
         manifest = source / manifest_name
         if not manifest.exists():
             continue
+        # A manifest still carrying the previous release's number ships an
+        # extension the browser will not treat as an update, inside a zip whose
+        # name says otherwise. Caught here rather than found afterwards.
+        body = manifest.read_text(encoding="utf-8")
+        declared = json.loads(body).get("version")
+        if declared != VERSION:
+            raise SystemExit(
+                f"{manifest_name} says version {declared!r}, "
+                f"but this is {VERSION!r} — update the manifest."
+            )
         target = DIST / f"ixd-extension-{browser}-{VERSION}.zip"
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", manifest.read_text(encoding="utf-8"))
+            archive.writestr("manifest.json", body)
             for path in sorted(source.rglob("*")):
                 if path.is_dir() or path.name.startswith("manifest."):
                     continue

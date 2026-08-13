@@ -6,6 +6,7 @@ Invoked by ``packaging/build.py``; can also be run directly:
     pyinstaller packaging/ixd.spec --noconfirm
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +18,13 @@ IS_MACOS = sys.platform == "darwin"
 
 APP_NAME = "ixd"
 BUNDLE_NAME = "Internet Xtreme Downloader"
+
+# Read rather than repeated: a plist announcing the previous release is a
+# version macOS believes and nobody edited.
+VERSION = re.search(
+    r'__version__ = "([^"]+)"',
+    (ROOT / "ixd" / "__init__.py").read_text(encoding="utf-8"),
+).group(1)
 
 datas = [
     (str(ROOT / "packaging" / "icons"), "packaging/icons"),
@@ -122,8 +130,8 @@ if IS_MACOS:
         info_plist={
             "CFBundleName": BUNDLE_NAME,
             "CFBundleDisplayName": BUNDLE_NAME,
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
             # Keeps the app alive in the menu bar with no window open.
