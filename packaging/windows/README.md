@@ -54,8 +54,8 @@ Either way the results are in `dist\`:
 | Artefact | What it is |
 |---|---|
 | `dist\ixd\ixd.exe` | the application |
-| `dist\ixd-1.0.0-windows-x64.zip` | the same, zipped, to send on |
-| `dist\ixd-extension-chrome-1.0.0.zip` | the browser extension |
+| `dist\ixd-<version>-windows-x64.zip` | the same, zipped, to send on |
+| `dist\ixd-extension-chrome-<version>.zip` | the browser extension |
 
 ## The browser bridge
 

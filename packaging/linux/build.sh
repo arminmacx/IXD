@@ -156,17 +156,21 @@ say "Building (a few minutes)..."
 run "$VPY" "$ROOT/packaging/build.py" --package || fail "the build did not complete"
 
 # --- 5. and did it actually produce anything? --------------------------------
+# Matched by shape, not by a version number somebody has to remember to edit
+# here as well: a release that bumped the version failed on the Linux runner
+# for a file the build had just written under its new name.
 missing=0
-for artefact in "dist/ixd/ixd" "dist/ixd-extension-chrome-1.0.0.zip"; do
-    if [ ! -e "$ROOT/$artefact" ]; then say "MISSING: $artefact"; missing=1; fi
-done
+[ -e "$ROOT/dist/ixd/ixd" ] || { say "MISSING: dist/ixd/ixd"; missing=1; }
+if [ -z "$(ls -1 "$ROOT/dist"/ixd-extension-chrome-*.zip 2>/dev/null)" ]; then
+    say "MISSING: dist/ixd-extension-chrome-*.zip"; missing=1
+fi
 [ "$missing" -eq 0 ] || fail "the build reported success but the files are not there"
 
 say ""
 say "Done."
 say "  Application : dist/ixd/ixd"
 say "  Package     : $(ls -1 "$ROOT/dist"/*.deb 2>/dev/null | head -1 | sed "s|$ROOT/||")"
-say "  Extension   : dist/ixd-extension-chrome-1.0.0.zip"
+say "  Extension   : $(ls -1 "$ROOT/dist"/ixd-extension-chrome-*.zip 2>/dev/null | head -1 | sed "s|$ROOT/||")"
 say ""
 say "Load the extension: chrome://extensions → Developer mode → Load unpacked"
 say "→ pick ~/.local/share/ixd/extension"
