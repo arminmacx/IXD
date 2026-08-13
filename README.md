@@ -352,6 +352,21 @@ The only runtime dependency is **PySide6**.
 
 ---
 
+## Donate
+
+IXD is free and always will be. If it is useful to you and you would like to
+support the work, a tip is very welcome.
+
+| | Address |
+|---|---|
+| **ETH** (Ethereum) | `0xcA72e420586989C876a9702cBF33338F601a8D48` |
+| **BNB** (BNB Smart Chain) | `0xcA72e420586989C876a9702cBF33338F601a8D48` |
+| **TRX** (Tron) | `TYdBetYQjGvuUPrW6ghPjj7vM3cBidwZGy` |
+
+Please check the network before sending.
+
+---
+
 ## License
 
 [MIT](LICENSE) © 2026 IXD — use it, change it, ship it, commercially or
