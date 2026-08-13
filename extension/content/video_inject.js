@@ -834,7 +834,8 @@
     menuSource = "";
     for (const target of order) {
       try {
-        const found = await send({ type: "extract", url: target },
+        const found = await send({ type: "extract", url: target,
+                                  userInitiated: true },
                                  EXTRACT_TIMEOUT_MS);
         if (found && (found.formats || []).length) {
           info = found;

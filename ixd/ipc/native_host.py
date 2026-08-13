@@ -81,6 +81,28 @@ def write_message(payload: dict[str, Any]) -> None:
     _WRITER.flush()
 
 
+#: The commands worth starting the application for: ones where the user has
+#: asked for something to happen. Everything else — status polls, the badge,
+#: a page announcing what it found — is answered "not running" and the browser
+#: carries on without it.
+#:
+#: A quit application that comes back on its own is not a running application,
+#: it is one that cannot be quit. The extension polled `stats` every 1.5
+#: seconds, so ending the process merely postponed it.
+STARTS_THE_APPLICATION = frozenset({
+    "add", "add_media", "add_pair", "add_many", "present", "download",
+    "queue_quality", "focus", "swap_link", "resume", "resume_all",
+    "pause", "remove", "browser_stream_begin", "browser_stream_chunk",
+    "browser_stream_end",
+})
+
+#: `extract` is deliberately **not** in that set. The panel prefetches a page's
+#: qualities speculatively when it loads, so listing it would start the
+#: application on every video page merely opened. A request carrying
+#: `user_initiated` starts it instead, which is what the panel sends when
+#: somebody actually clicks.
+
+
 def launch_application() -> bool:
     """Start the desktop app detached and wait for its control socket."""
     command = _application_command()
@@ -150,13 +172,28 @@ def main() -> int:
 
             try:
                 if client is None:
-                    if not is_running() and not launch_application():
-                        write_message({
-                            "ok": False, "id": request_id,
-                            "error": "Internet Xtreme Downloader is not running and "
-                                     "could not be started",
-                        })
-                        continue
+                    if not is_running():
+                        # Only work the user asked for starts the application.
+                        # The extension polls for status on a timer, and any
+                        # command starting it meant a quit application came
+                        # back within seconds — "even end task does not work,
+                        # it runs again", which is exactly what happened.
+                        wanted = (command in STARTS_THE_APPLICATION
+                                  or bool(params.get("user_initiated")))
+                        if not wanted:
+                            write_message({
+                                "ok": False, "id": request_id,
+                                "error": "not running",
+                                "not_running": True,
+                            })
+                            continue
+                        if not launch_application():
+                            write_message({
+                                "ok": False, "id": request_id,
+                                "error": "Internet Xtreme Downloader is not running "
+                                         "and could not be started",
+                            })
+                            continue
                     endpoint = read_endpoint() or {}
                     client = IPCClient(
                         host=endpoint.get("host", "127.0.0.1"),

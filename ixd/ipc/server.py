@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import socketserver
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -79,10 +80,45 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 class IPCServer(socketserver.ThreadingTCPServer):
-    """Threaded loopback JSON server in front of :class:`DownloadService`."""
+    """Threaded loopback JSON server in front of :class:`DownloadService`.
 
-    allow_reuse_address = True
+    Binding this port *is* the single-instance lock: one process owns the
+    control socket and therefore the engine, and everything else hands its work
+    to it. That only holds if a second bind fails.
+
+    ``SO_REUSEADDR`` means two different things. On Unix it permits a bind over
+    a socket left in ``TIME_WAIT`` — a dead predecessor — and still refuses a
+    live listener. On **Windows it permits two live listeners on the same
+    address**, which is Unix's ``SO_REUSEPORT``, and connections go to
+    whichever bound last. So on Windows the lock silently did not lock: a
+    second instance bound the same port, started its own engine on the same
+    database and overwrote the endpoint file.
+
+    Every Windows symptom of 2026-08-13 follows from that one line. A download
+    added by the browser went to whichever instance the endpoint file last
+    named, so the other one — the one with the window — showed the row with no
+    transfer behind it: no download window, and no speed until a pause and
+    resume moved the transfer into *its* engine. Pause marked the row paused
+    and stopped a task that process did not have, while the other kept
+    fetching. Closing the window left the other running.
+    """
+
+    #: False on Windows, where sharing the address is exactly what must not
+    #: happen. Left true elsewhere so a restart is not blocked by TIME_WAIT.
+    allow_reuse_address = not sys.platform.startswith("win")
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        # Windows can be asked for the stronger guarantee: refuse this address
+        # to anyone else for as long as it is held, whatever they request.
+        if sys.platform.startswith("win"):
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                try:
+                    self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+                except OSError:
+                    pass       # an older Windows: the reuse flag above still holds
+        super().server_bind()
 
     def __init__(self, service: "DownloadService", host: str = "",
                  port: int | None = None) -> None:

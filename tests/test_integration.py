@@ -1252,6 +1252,134 @@ service.shutdown()
           "OFF_PERIOD_ABSENT True" in output, detail)
 
 
+def test_only_one_instance_owns_the_engine() -> None:
+    """Binding the control socket is the lock. A second bind must fail.
+
+    Windows field report, 2026-08-13: a download added from the browser did not
+    open its window and showed no speed until it was paused and resumed; Pause
+    said paused while the transfer continued; closing the window left the
+    application running; ending the process brought it back.
+
+    Every one of those follows from two engines on one database.
+    `allow_reuse_address` was true, and on Windows that permits **two live
+    listeners on the same address** — it is Unix's SO_REUSEPORT — so the second
+    instance bound the same port, started its own engine and overwrote the
+    endpoint file. The window belonged to one process and the transfer to the
+    other.
+
+    The flag is measured here rather than asserted, on whichever platform this
+    runs: two servers, one port, and the second must be refused.
+    """
+    print("\n[only one instance owns the engine]")
+    script = '''
+import sys, tempfile, socket
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-one-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.service import DownloadService
+from ixd.ipc.server import IPCServer, is_running
+
+settings = Settings(root / "settings.json")
+settings.set("download_dir", str(root / "out"))
+# A port nothing else on this machine is using.
+probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+port = probe.getsockname()[1]; probe.close()
+settings.set("ipc_port", port)
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+
+first = IPCServer(service)
+first.start()
+print("FIRST_BOUND", first.port == port)
+print("ANSWERS", is_running())
+
+# The second instance. On Windows this used to succeed.
+try:
+    second = IPCServer(service)
+    second.stop()
+    print("SECOND_BOUND", True)
+except OSError as exc:
+    print("SECOND_BOUND", False)
+
+print("REUSE_FLAG", IPCServer.allow_reuse_address)
+print("IS_WINDOWS", sys.platform.startswith("win"))
+first.stop()
+service.shutdown()
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-one-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=120, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("only one instance owns the engine", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
+    check("the first instance takes the port", "FIRST_BOUND True" in output, detail)
+    check("and answers a ping", "ANSWERS True" in output, detail)
+    check("a second instance is refused the same port",
+          "SECOND_BOUND False" in output, detail)
+    check("and the address is not shared on Windows",
+          ("IS_WINDOWS True" in output) <= ("REUSE_FLAG False" in output), detail)
+
+
+def test_a_status_poll_never_starts_the_application() -> None:
+    """A quit application must stay quit.
+
+    The extension polled the application every 1.5 seconds for a number to put
+    on its icon, and the messaging host started the application for *any*
+    command — so ending the process brought it back within seconds. Reported
+    from Windows as "even end task does not work, it runs again".
+
+    Both halves are fixed and both are checked: the host starts the application
+    only for commands the user has asked for, and the extension no longer polls
+    at all.
+    """
+    print("\n[a status poll never starts the application]")
+    from ixd.ipc import native_host
+
+    for passive in ("ping", "stats", "list", "captured", "log"):
+        check(f"“{passive}” does not start the application",
+              passive not in native_host.STARTS_THE_APPLICATION)
+    for wanted in ("add", "add_media", "add_pair", "present", "focus",
+                   "pause", "browser_stream_begin"):
+        check(f"“{wanted}” does",
+              wanted in native_host.STARTS_THE_APPLICATION)
+
+    # The panel looks a page's qualities up speculatively when it loads, so
+    # `extract` starting the application would resurrect it on every video page
+    # merely opened. A click says so, and only that starts it.
+    check("a speculative extraction does not start it",
+          "extract" not in native_host.STARTS_THE_APPLICATION)
+    panel = (Path(__file__).resolve().parents[1]
+             / "extension" / "content" / "video_inject.js").read_text(encoding="utf-8")
+    check("and the panel marks the click as the user's",
+          "userInitiated: true" in panel, "")
+    background = (Path(__file__).resolve().parents[1]
+                  / "extension" / "background.js").read_text(encoding="utf-8")
+    check("which reaches the host as user_initiated",
+          "user_initiated: Boolean(options.userInitiated)" in background, "")
+
+    source = (Path(__file__).resolve().parents[1]
+              / "extension" / "background.js").read_text(encoding="utf-8")
+    check("the extension sets no badge text at all",
+          "setBadgeText" not in source,
+          source[source.find("setBadgeText") - 200:][:300]
+          if "setBadgeText" in source else "")
+    check("and polls nothing on a timer",
+          "BADGE_POLL_MS" not in source and "refreshDownloadBadge" not in source)
+
+
 def test_quit_ends_the_process() -> None:
     """Quitting must end the event loop, not just hide the window.
 
@@ -3182,6 +3310,8 @@ def main() -> int:
                  test_the_old_native_host_registration_is_removed,
                  test_every_platform_has_an_icon_it_will_accept,
                  test_the_log_can_be_switched_off,
+                 test_only_one_instance_owns_the_engine,
+                 test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):
         try:
             test()

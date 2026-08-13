@@ -137,26 +137,55 @@ def _register_browser_integration(service) -> None:
 
 
 def _start_ipc(service):
-    """Bind the control socket, tolerating a busy port."""
-    from .ipc.server import IPCServer
+    """Bind the control socket, which is what makes this the only instance.
+
+    A busy port almost always means another copy of this application already
+    owns the engine and the database. Answering that by binding an *ephemeral*
+    port and publishing it started a second engine on the same state — two
+    processes fetching the same downloads, one showing the window and the other
+    doing the work. So a refusal is checked before it is worked around: if
+    something answers a ping, this process has lost the race and says so.
+
+    A port held by an unrelated program is the only case an ephemeral port is
+    the right answer, and then it is taken.
+    """
+    from .ipc.server import IPCServer, is_running
 
     try:
         server = IPCServer(service)
-    except OSError:
-        # Port in use: fall back to an ephemeral one and publish that instead.
+    except OSError as exc:
+        if is_running():
+            raise AlreadyRunning() from exc
         try:
             server = IPCServer(service, port=0)
-        except OSError as exc:
-            print(f"warning: control socket unavailable ({exc})", file=sys.stderr)
+        except OSError as second:
+            print(f"warning: control socket unavailable ({second})", file=sys.stderr)
             return None
     server.start()
     return server
 
 
+class AlreadyRunning(RuntimeError):
+    """Another instance owns the control socket, so this one must not run.
+
+    Raised rather than returned because every caller has already built a
+    service by this point: it has to be shut down, not merely abandoned, or
+    the database keeps a second writer for the life of the process.
+    """
+
+
 def run_background(urls: list[str], media: bool) -> int:
     """Headless mode: engine + scheduler + control socket, no Qt."""
     service = _build_service()
-    server = _start_ipc(service)
+    try:
+        server = _start_ipc(service)
+    except AlreadyRunning:
+        # The browser's host launches this when it cannot reach an instance,
+        # and two of those can arrive at once. The loser exits rather than
+        # becoming a second engine on one database.
+        service.shutdown()
+        print("Internet Xtreme Downloader is already running")
+        return 0
 
     for url in urls:
         try:
@@ -229,7 +258,21 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
     apply_theme(app, palette)
 
     window = MainWindow(service, palette)
-    server = _start_ipc(service)
+    try:
+        server = _start_ipc(service)
+    except AlreadyRunning:
+        # Another instance took the socket between the check at start-up and
+        # this bind. It owns the engine; this process must not keep a second
+        # one alive on the same database.
+        service.shutdown()
+        print("Internet Xtreme Downloader is already running")
+        try:
+            from .ipc.server import IPCClient
+            with IPCClient(timeout=5.0) as client:
+                client.call("focus")
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
     if server is not None:
         server.register("focus", lambda params: _focus(window))
         # The extension hands a page over; the choosing happens here. The

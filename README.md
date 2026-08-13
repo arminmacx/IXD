@@ -141,7 +141,7 @@ the [Releases](../../releases) page — nothing to compile.
 | Debian / Ubuntu | `ixd_1.0.0_amd64.deb` → `sudo dpkg -i ixd_1.0.0_amd64.deb` |
 | Linux (portable) | `ixd-linux-x86_64.tar.gz` → extract and run `ixd/ixd` |
 | macOS (Apple silicon) | `*.dmg` — unsigned, so right-click → **Open** the first time. **Unverified: never launched on real hardware** |
-| Windows | `ixd-1.0.0-windows-x64.zip` → extract and run `ixd.exe`. The **first** launch takes a while — Windows scans the whole folder before it runs anything from it; later launches are immediate |
+| Windows | `ixd-1.0.0-windows-x64.zip` → extract and run `ixd.exe`. See the note below on the SmartScreen warning; the **first** launch also takes a while, because Windows scans the whole folder before running anything from it |
 
 ### Or build it yourself
 
@@ -190,8 +190,53 @@ python native-host/install_host.py --verify   # launch the host as a browser
                                               # would, and check the reply
 ```
 
+### "Windows protected your PC"
+
+SmartScreen shows that for any program it has not seen before. Click **More
+info** → **Run anyway**.
+
+It is not something this project can switch off from the outside. The warning
+goes away in one of two ways: an executable signed with a code-signing
+certificate (bought from a certificate authority, ~£200–£400 a year, and an EV
+certificate clears it immediately while an OV one still has to earn its
+reputation), or enough people downloading and running the same unsigned binary
+that SmartScreen builds that reputation on its own. Until one of those happens,
+the warning is honest: this binary is new and nobody has vouched for it.
+
 Firefox packaging is on hold: release Firefox requires a signed add-on, so the
 extension loads there only as a temporary add-on via `about:debugging`.
+
+---
+
+## Where it keeps things
+
+Downloads go wherever you point them (Settings → General → Download folder;
+your Downloads folder by default). Everything else lives in one directory:
+
+| | |
+|---|---|
+| **Linux** | `~/.local/share/ixd/` (or `$XDG_DATA_HOME/ixd`) |
+| **Windows** | `%APPDATA%\IXD\` — paste that into Explorer |
+| **macOS** | `~/Library/Application Support/IXD/` |
+
+Inside it:
+
+| Path | What it is |
+|---|---|
+| `state.sqlite3` | the download list, chunk cursors and the log |
+| `settings.json` | every setting, including the control-socket token |
+| `incomplete/` | part files (`*.ixddl`) for downloads still in progress |
+| `logs/` | log files |
+| `extension/` | the unpacked browser extension the browser loads |
+| `theme/` | generated icons |
+| `ipc.json` | how the browser extension finds the running application |
+
+A partly finished download is one file in `incomplete/` plus its row in
+`state.sqlite3` — deleting one without the other leaves the download unable to
+resume. Removing a download from the list cleans up both.
+
+Set `IXD_HOME` to put the whole directory somewhere else, including on a
+removable drive.
 
 ---
 

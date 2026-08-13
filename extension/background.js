@@ -171,91 +171,19 @@ function notify(title, message) {
   }
 }
 
-async function setBadge(text, colour) {
-  try {
-    await chrome.action.setBadgeText({ text });
-    if (colour) await chrome.action.setBadgeBackgroundColor({ color: colour });
-  } catch (error) {
-    /* ignore */
-  }
-}
-
-//: How many downloads the application has running, on the toolbar icon.
+//: No number on the toolbar icon.
 //:
-//: The number a download manager's icon is expected to carry. It is a global
-//: badge — not per tab — because a download belongs to the application, not to
-//: whichever page happened to start it.
+//: It carried the count of running downloads, polled from the application
+//: every 1.5 seconds. Two things were wrong with that. The count was not
+//: wanted — it was asked to be removed. And the poll went through the
+//: messaging host, which started the application for *any* command: quitting
+//: the application brought it back within seconds, so it could not be quit at
+//: all. Ending the process by hand merely postponed it.
 //:
-//: It takes precedence over the per-tab capture count below: a running
-//: transfer is what someone wants to see at a glance, and one icon can only
-//: mean one thing at a time. When nothing is downloading the capture count
-//: comes back.
-let activeDownloads = 0;
-let badgeCheckedAt = 0;
-const BADGE_POLL_MS = 1500;
-
-async function refreshDownloadBadge(force = false) {
-  const now = Date.now();
-  if (!force && now - badgeCheckedAt < BADGE_POLL_MS) return activeDownloads;
-  badgeCheckedAt = now;
-  let running = 0;
-  try {
-    const stats = await callChecked("stats");
-    running = Number(stats && stats.active) || 0;
-  } catch (error) {
-    running = 0;          // the application is not up; say nothing rather than lie
-  }
-  activeDownloads = running;
-  try {
-    if (running > 0) {
-      await chrome.action.setBadgeText({ text: String(running) });
-      await chrome.action.setBadgeBackgroundColor({ color: "#2ea043" });
-    } else {
-      await chrome.action.setBadgeText({ text: "" });
-    }
-  } catch (error) {
-    /* a badge is a nicety, never a dependency */
-  }
-  return running;
-}
-
-//: Show how much has been found on the tab being looked at.
-//:
-//: Without this a page whose player exposes no <video> gives no sign at all
-//: that anything is downloadable — the media was seen, and nothing said so.
-//: The badge is per tab, so it follows the user rather than counting the last
-//: page they happened to load.
-//: The badge asks the browser which tab is in view, and a capture-heavy page
-//: makes that hundreds of times a second. Once every half second is enough for
-//: a number a person reads.
-const badgeDueAt = new Map();
-const BADGE_INTERVAL_MS = 500;
-
-async function showDetectedCount(tabId, force = false) {
-  const now = Date.now();
-  if (!force && (badgeDueAt.get(tabId) || 0) > now) return;
-  badgeDueAt.set(tabId, now + BADGE_INTERVAL_MS);
-  try {
-    // A running transfer owns the icon. Setting a per-tab badge here would
-    // hide the download count on whichever tab the person happens to be
-    // looking at, which is the one they are most likely to look at.
-    if (await refreshDownloadBadge() > 0) {
-      await chrome.action.setBadgeText({ tabId, text: "" });
-      return;
-    }
-    const [active] = await chrome.tabs.query(
-      { active: true, currentWindow: true });
-    if (!active || active.id !== tabId) return;
-    const found = capturedFor(tabId) || [];
-    await chrome.action.setBadgeText({
-      tabId, text: found.length ? String(found.length) : "",
-    });
-    if (found.length) {
-      await chrome.action.setBadgeBackgroundColor({ tabId, color: "#5b8cff" });
-    }
-  } catch (error) {
-    /* a tab that closed mid-flight is not a fault */
-  }
+//: Nothing here sets badge text now, and nothing polls. What a page holds is
+//: shown by the panel on the page, which is where a person is looking.
+async function showDetectedCount(_tabId, _force = false) {
+  /* deliberately nothing: the icon carries no number */
 }
 
 //: Tell the page how much has been found on it.
@@ -342,8 +270,6 @@ chrome.downloads.onCreated.addListener(async (item) => {
     if (settings.notifyOnAdd) {
       notify("Sent to Internet Xtreme Downloader", result.filename || url);
     }
-    await setBadge("+1", "#5B8CFF");
-    setTimeout(() => setBadge(""), 2500);
   } catch (error) {
     notify("Internet Xtreme Downloader unavailable", String(error.message || error));
     // Hand the download back to the browser so the user does not lose it.
@@ -1588,8 +1514,6 @@ chrome.action.onClicked.addListener(handOver);
 // A service worker is not permanently alive, so this is a best effort rather
 // than a clock: it ticks while the worker is up — which is whenever anything
 // is happening — and the number is refreshed on the next message otherwise.
-setInterval(() => { void refreshDownloadBadge(true); }, BADGE_POLL_MS);
-void refreshDownloadBadge(true);
 
 // ---------------------------------------------------------------------------
 // One log, both halves
@@ -1715,6 +1639,10 @@ async function extractCached(url, options = {}) {
     try {
       const info = await callChecked("extract", {
         url,
+        // A click, rather than the panel looking ahead. The messaging host
+        // starts the application for this and not for a prefetch, so opening
+        // a video page cannot resurrect an application that was quit.
+        user_initiated: Boolean(options.userInitiated),
         cookies: await cookieHeaderFor(url),
         userAgent: navigator.userAgent,
         referrer: options.referrer || "",
@@ -1926,6 +1854,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ok: true,
             result: await extractCached(message.url, {
               force: Boolean(message.force),
+              userInitiated: Boolean(message.userInitiated),
               referrer: pageUrl,
               headers: capturedHeadersFor(senderTabId, message.url),
               poToken: tokenFor(senderTabId),
