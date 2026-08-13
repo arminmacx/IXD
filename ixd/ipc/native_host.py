@@ -221,6 +221,12 @@ def main() -> int:
                     client.close()
                 client = None
                 response = {"ok": False, "id": request_id, "error": str(exc)}
+                # Quitting the application breaks this connection mid-flight,
+                # and a bare error reads to the extension like a hiccup worth
+                # retrying. Saying *why* lets it stop asking — and stop holding
+                # this process open to keep asking through.
+                if not is_running():
+                    response["not_running"] = True
 
             write_message(response)
     except (KeyboardInterrupt, BrokenPipeError):

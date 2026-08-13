@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         # it is given one as soon as there is one.
         self.taskbar = TaskbarProgress()
         self.taskbar.attach(self)
+        self._taskbar_trouble = ""
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -399,6 +400,21 @@ class MainWindow(QMainWindow):
             self.taskbar.clear()
             return
         self.taskbar.set_progress(done / total, visible=True)
+        self._log_taskbar_trouble()
+
+    def _log_taskbar_trouble(self) -> None:
+        """Put a refusal from the platform in the log, once per reason.
+
+        Progress on the icon fails silently by design — it is decoration, and
+        nothing about a transfer should depend on it. But "the bar does not
+        show on Windows" is then a report with no evidence behind it, and this
+        is the instrument that settles it.
+        """
+        message = self.taskbar.diagnostic()
+        if not message or message == self._taskbar_trouble:
+            return
+        self._taskbar_trouble = message
+        self.service.db.log_event(f"Taskbar progress: {message}", level="warning")
 
     def _update_detail(self) -> None:
         if self._selected_id is None:

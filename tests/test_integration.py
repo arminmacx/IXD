@@ -1537,6 +1537,38 @@ seen.clear()
 bar.set_progress(0.42); bar.set_progress(0.42); bar.set_progress(0.42)
 wait_for(1)
 print("REPEATS_SUPPRESSED", len(seen) == 1, len(seen))
+
+# Which windows Windows would draw the bar on.
+#
+# It draws on a taskbar *button*, and a window that is not on the taskbar has
+# none — so setting progress on the main window's handle drew nothing whenever
+# that window was hidden, which is precisely when the feature is wanted: the
+# browser starts the application hidden and the download window stands alone.
+from PySide6.QtWidgets import QWidget
+
+class FakeBackend:
+    def __init__(self):
+        self.calls = []
+    def set_progress(self, percent, visible, handles=()):
+        self.calls.append((percent, visible, handles))
+    def diagnostic(self):
+        return ""
+
+bar2 = TaskbarProgress()
+bar2._windows = FakeBackend()
+main = QWidget(); main.setWindowTitle("main"); main.show()
+bar2.attach(main)
+app.processEvents()
+bar2.set_progress(0.5)
+extra = QWidget(); extra.setWindowTitle("download"); extra.show()
+app.processEvents()
+bar2.set_progress(0.5)
+calls = bar2._windows.calls
+print("MAIN_INCLUDED", bool(calls) and int(main.winId()) in calls[0][2])
+print("NEW_WINDOW_REDRAWN", len(calls) == 2, len(calls))
+print("NEW_WINDOW_INCLUDED",
+      len(calls) == 2 and int(extra.winId()) in calls[1][2]
+      and int(extra.winId()) not in calls[0][2])
 '''
     root = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -1568,6 +1600,12 @@ print("REPEATS_SUPPRESSED", len(seen) == 1, len(seen))
     check("that hides it", "CLEAR_HIDES True" in output, detail)
     check("and the same value is not sent twice",
           "REPEATS_SUPPRESSED True" in output, detail)
+    check("Windows draws on the main window when it is up",
+          "MAIN_INCLUDED True" in output, detail)
+    check("a window opening mid-transfer is drawn on, not skipped as a repeat",
+          "NEW_WINDOW_REDRAWN True" in output, detail)
+    check("and it is the new window's own handle",
+          "NEW_WINDOW_INCLUDED True" in output, detail)
 
 
 def test_a_downloads_window_stands_on_its_own() -> None:

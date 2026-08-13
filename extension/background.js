@@ -29,26 +29,108 @@ const DEFAULT_SETTINGS = {
 // ---------------------------------------------------------------------------
 // native messaging transport
 // ---------------------------------------------------------------------------
+//
+// A connected native port is a **process**. `chrome.runtime.connectNative`
+// spawns the host and keeps it alive for as long as the port is open, and this
+// worker is kept awake by a panel that reports what a page is playing every
+// couple of seconds — so the port never closed, and the host never exited.
+//
+// Reported from Windows, where the manifest points straight at `ixd.exe`: the
+// application was quit and Task Manager still listed `ixd.exe`, and only
+// removing the extension from the browser ended it. That process was the host
+// relay, not the application — but there is no way for anybody to tell those
+// apart in a task list, and a download manager that is quit must leave nothing
+// running whatever the name on it.
+//
+// So the port is released when there is nothing to relay: after a few seconds
+// of quiet, and at once when the host reports the application is not running.
+// Reconnecting is transparent — `getPort` rebuilds it on the next call.
 let port = null;
 let nextRequestId = 1;
 const pending = new Map();
 
+//: How long the port may sit idle before the host process is let go. Long
+//: enough that a burst of calls shares one process; short enough that quitting
+//: the application clears the task list within a breath.
+const PORT_IDLE_MS = 5000;
+
+//: How long "the application is not running" is believed for. While it holds,
+//: the calls this extension makes on its own are answered here and no host is
+//: spawned to be told the same thing again. Anything the *user* asked for
+//: ignores it, because starting the application is the point of those.
+const APP_DOWN_MS = 15000;
+
+//: The calls the extension makes by itself: a panel refreshing, a page
+//: announcing what it found, a log line, a status poll. None of them is worth
+//: starting a process for, and together they are every call that arrives on a
+//: timer. `extract` is here too, because the panel prefetches a page's
+//: qualities on load — the same reason the host does not start on it.
+const PASSIVE_COMMANDS = new Set([
+  "ping", "stats", "list", "log", "can_handle", "extract", "browser_media_head",
+]);
+
+let portIdleTimer = null;
+let appDownUntil = 0;
+
+function touchPort() {
+  if (portIdleTimer) clearTimeout(portIdleTimer);
+  portIdleTimer = setTimeout(releasePort, PORT_IDLE_MS);
+}
+
+function releasePort() {
+  if (portIdleTimer) {
+    clearTimeout(portIdleTimer);
+    portIdleTimer = null;
+  }
+  if (!port) return;
+  // A call still in flight is a reply still owed; wait for it rather than
+  // tearing the pipe out from under it.
+  if (pending.size) {
+    touchPort();
+    return;
+  }
+  const closing = port;
+  port = null;
+  try {
+    closing.disconnect();
+  } catch (error) {
+    /* already gone, which is the state we wanted */
+  }
+}
+
 function getPort() {
-  if (port) return port;
+  if (port) {
+    touchPort();
+    return port;
+  }
   port = chrome.runtime.connectNative(HOST_NAME);
 
   port.onMessage.addListener((message) => {
+    // The host answers this when it declines to start the application. Believe
+    // it for a while: the alternative is spawning a process every time a page
+    // ticks, which is the same defect wearing a shorter lifetime.
+    if (message && message.not_running) {
+      appDownUntil = Date.now() + APP_DOWN_MS;
+    } else if (message && message.ok === true) {
+      appDownUntil = 0;
+    }
     const entry = message && message.id != null ? pending.get(message.id) : null;
     if (!entry) return;
     pending.delete(message.id);
     clearTimeout(entry.timer);
     entry.resolve(message);
+    if (appDownUntil > Date.now()) releasePort();
+    else touchPort();
   });
 
   port.onDisconnect.addListener(() => {
     const error = chrome.runtime.lastError;
     const reason = error ? error.message : "native host disconnected";
     port = null;
+    if (portIdleTimer) {
+      clearTimeout(portIdleTimer);
+      portIdleTimer = null;
+    }
     for (const [id, entry] of pending.entries()) {
       clearTimeout(entry.timer);
       entry.reject(new Error(reason));
@@ -56,10 +138,25 @@ function getPort() {
     }
   });
 
+  touchPort();
   return port;
 }
 
+//: Whether a command may be answered here, without a host process, because the
+//: application is known to be down and nobody asked for anything.
+function answerableWhileDown(command, params) {
+  if (port) return false;                       // the process exists already
+  if (Date.now() >= appDownUntil) return false;
+  if (params && params.user_initiated) return false;
+  return PASSIVE_COMMANDS.has(command);
+}
+
 function call(command, params = {}) {
+  if (answerableWhileDown(command, params)) {
+    return Promise.resolve({
+      ok: false, error: "not running", not_running: true,
+    });
+  }
   return new Promise((resolve, reject) => {
     const id = nextRequestId++;
     const timer = setTimeout(() => {

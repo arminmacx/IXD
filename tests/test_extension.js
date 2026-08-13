@@ -1349,6 +1349,107 @@ function panelChecks(done) {
   }, 30);
 }
 
+// ---------------------------------------------------------------------------
+// The native port is a process.
+//
+// Reported from Windows: the application was quit and `ixd.exe` stayed in the
+// task list until the extension was removed from the browser. That process was
+// the native host, held open by a port this worker never closed.
+// ---------------------------------------------------------------------------
+console.log("\n[the native host is let go when there is nothing to relay]");
+pendingAsync.push((async () => {
+  const from = source.indexOf("let port = null;");
+  const to = source.indexOf("async function callChecked");
+  if (from < 0 || to < 0) {
+    check("the transport block was found in background.js", false);
+    return;
+  }
+
+  // Timers are supplied rather than waited on: the idle release is five
+  // seconds, and a suite that sleeps through it is a suite nobody runs.
+  const timers = new Map();
+  let nextTimerId = 1;
+  const setTimeoutStub = (fn, ms) => {
+    const id = nextTimerId++;
+    timers.set(id, { fn, ms });
+    return id;
+  };
+  const clearTimeoutStub = (id) => { timers.delete(id); };
+  const fireIdleTimers = () => {
+    for (const [id, entry] of [...timers]) {
+      if (entry.ms === 5000) { timers.delete(id); entry.fn(); }
+    }
+  };
+
+  let spawned = 0;
+  let disconnected = 0;
+  let live = null;
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      connectNative() {
+        spawned += 1;
+        const posted = [];
+        const onMessage = [];
+        const onDisconnect = [];
+        live = {
+          posted,
+          postMessage: (message) => posted.push(message),
+          disconnect() { disconnected += 1; onDisconnect.forEach((fn) => fn()); },
+          onMessage: { addListener: (fn) => onMessage.push(fn) },
+          onDisconnect: { addListener: (fn) => onDisconnect.push(fn) },
+          reply: (message) => onMessage.forEach((fn) => fn(message)),
+        };
+        return live;
+      },
+    },
+  };
+
+  const transport = new Function(
+    "chrome", "HOST_NAME", "CALL_TIMEOUT_MS", "setTimeout", "clearTimeout",
+    `${source.slice(from, to)};
+     return { call, releasePort, isOpen: () => port !== null };`,
+  )(chromeStub, "com.ixd.downloader", 30000, setTimeoutStub, clearTimeoutStub);
+
+  // One call, answered.
+  const first = transport.call("stats");
+  check("a call spawns the host", spawned === 1 && transport.isOpen());
+  live.reply({ id: live.posted[0].id, ok: true, result: {} });
+  await first;
+  check("and it is still connected while the answer is fresh",
+    transport.isOpen() && disconnected === 0);
+
+  // Quiet.
+  fireIdleTimers();
+  check("going quiet ends the host process",
+    !transport.isOpen() && disconnected === 1);
+
+  // And it comes back on its own.
+  const second = transport.call("stats");
+  check("the next call spawns it again, transparently", spawned === 2);
+  live.reply({ id: live.posted[0].id, ok: false, error: "not running",
+    not_running: true });
+  const answer = await second;
+  check("a 'not running' answer reaches the caller",
+    answer && answer.not_running === true);
+  check("and releases the host at once, without waiting for the idle timer",
+    !transport.isOpen() && disconnected === 2);
+
+  // While it is known down, the extension's own polling costs no process.
+  const passive = await transport.call("extract", { url: "https://e/v" });
+  check("a poll while the application is down starts nothing",
+    spawned === 2 && passive.not_running === true);
+
+  // What the user asked for still starts it — that is the whole point.
+  transport.call("add", { url: "https://e/f.zip" });
+  check("but a download the user asked for does start it", spawned === 3);
+  live.reply({ id: live.posted[0].id, ok: true, result: { id: 1 } });
+  fireIdleTimers();
+
+  transport.call("extract", { url: "https://e/v", user_initiated: true });
+  check("and so does a click on the panel", spawned === 4);
+})());
+
 panelChecks(async () => {
   await Promise.all(pendingAsync);
   console.log(`\n${"=".repeat(60)}`);

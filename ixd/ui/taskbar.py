@@ -44,20 +44,25 @@ class TaskbarProgress:
     """
 
     def __init__(self) -> None:
-        self._last: tuple[bool, int] | None = None
+        self._last: tuple[bool, int, tuple[int, ...]] | None = None
+        self._window = None
         self._windows = _WindowsTaskbar() if IS_WINDOWS else None
         self._unity = _UnityLauncher() if IS_LINUX else None
 
     def set_progress(self, fraction: float, visible: bool = True) -> None:
         """Draw ``fraction`` (0–1), or clear it when ``visible`` is false."""
         percent = max(0, min(100, int(round(fraction * 100))))
-        state = (bool(visible), percent)
+        handles = self._handles() if self._windows is not None else ()
+        # The set of windows is part of the state, not just the number: a
+        # download window that opens mid-transfer is a new taskbar button, and
+        # skipping the draw because the percentage had not moved left it blank.
+        state = (bool(visible), percent, handles)
         if state == self._last:
             return
         self._last = state
 
         if self._windows is not None:
-            self._windows.set_progress(percent, visible)
+            self._windows.set_progress(percent, visible, handles)
         if self._unity is not None:
             self._unity.set_progress(percent, visible)
         if IS_MACOS:
@@ -67,9 +72,55 @@ class TaskbarProgress:
         self.set_progress(0.0, visible=False)
 
     def attach(self, window) -> None:
-        """Give the Windows backend a window handle to draw on."""
+        """Remember the main window, as the handle of last resort."""
+        self._window = window
+
+    def diagnostic(self) -> str:
+        """What the platform backend has to say, for the log. '' when quiet."""
         if self._windows is not None:
-            self._windows.attach(window)
+            return self._windows.diagnostic()
+        return ""
+
+    def _handles(self) -> tuple[int, ...]:
+        """Every window that currently has a taskbar button of its own.
+
+        Windows draws progress on a *button*, and a window that is not on the
+        taskbar has none — so setting it on the main window's handle drew
+        nothing whenever that window was hidden, which is exactly the case the
+        feature exists for: the browser starts the application hidden, the
+        download window opens on its own, and the bar belongs on that. Linux
+        never showed this because its launcher signal names the application
+        rather than a window.
+
+        Top-level and visible is the test. A parented dialog has no button and
+        the call against it is a harmless no-op, so nothing has to be excluded
+        by hand.
+        """
+        handles: list[int] = []
+        try:
+            from PySide6.QtCore import Qt
+            from PySide6.QtWidgets import QApplication
+
+            wanted = (Qt.WindowType.Window, Qt.WindowType.Dialog)
+            for widget in QApplication.topLevelWidgets():
+                if not widget.isWindow() or not widget.isVisible():
+                    continue
+                if widget.windowType() not in wanted:
+                    continue
+                handle = int(widget.winId())
+                if handle and handle not in handles:
+                    handles.append(handle)
+        except Exception:      # noqa: BLE001 - decoration, never fatal
+            pass
+
+        if not handles and self._window is not None:
+            try:
+                handle = int(self._window.winId())
+                if handle:
+                    handles.append(handle)
+            except Exception:  # noqa: BLE001
+                pass
+        return tuple(handles)
 
 
 def _set_dock_badge(percent: int, visible: bool) -> None:
@@ -132,9 +183,14 @@ class _UnityLauncher:
 class _WindowsTaskbar:
     """Windows: ``ITaskbarList3``, through ctypes rather than a dependency.
 
-    The interface is obtained once and kept. ``SetProgressValue`` needs the
-    window handle, so the taskbar cannot be drawn on until a window exists —
-    which is why `attach` is separate from construction.
+    The interface is obtained once and kept, and the progress is drawn on every
+    window handed to `set_progress` — the taskbar draws on a *button*, and which
+    of this application's windows owns one depends on what is open.
+
+    Every HRESULT is checked by hand rather than through ``ctypes.oledll``,
+    which raises on any failure code and would have turned a first call made a
+    moment too early into a permanent, silent nothing. What went wrong is kept
+    in `diagnostic` so a field report can say so instead of guessing.
     """
 
     #: CLSID_TaskbarList and IID_ITaskbarList3, as the registry knows them.
@@ -147,30 +203,39 @@ class _WindowsTaskbar:
     _NORMAL = 0x2
     _PAUSED = 0x8
 
+    #: COM apartments. Qt has already initialised this thread as an STA, so
+    #: `CoInitializeEx` answers S_FALSE — a success. RPC_E_CHANGED_MODE means
+    #: somebody asked for the other kind first, and the apartment that already
+    #: exists is still one this interface can be created in.
+    _COINIT_APARTMENTTHREADED = 0x2
+    _S_FALSE = 1
+    _RPC_E_CHANGED_MODE = -2147417850          # 0x80010106
+
+    #: A first attempt can lose to a shell that is not ready yet, so it is
+    #: retried rather than written off. Not forever: a machine without a
+    #: taskbar service must stop paying for the attempt.
+    _MAX_ATTEMPTS = 5
+
     def __init__(self) -> None:
         self._taskbar = None
-        self._hwnd = 0
-        self._ready = False
+        self._attempts = 0
+        self._error = ""
 
-    def attach(self, window) -> None:
-        try:
-            handle = int(window.winId())
-        except Exception:      # noqa: BLE001
-            return
-        if handle:
-            self._hwnd = handle
+    def diagnostic(self) -> str:
+        return self._error
 
     def _ensure(self) -> bool:
-        if self._ready:
-            return self._taskbar is not None
-        self._ready = True
+        if self._taskbar is not None:
+            return True
+        if self._attempts >= self._MAX_ATTEMPTS:
+            return False
+        self._attempts += 1
         try:
             import ctypes
             from ctypes import POINTER, byref, c_void_p
             from ctypes.wintypes import HWND, ULONGLONG
 
-            ole32 = ctypes.oledll.ole32
-            ole32.CoInitialize(None)
+            ole32 = ctypes.windll.ole32
 
             class GUID(ctypes.Structure):
                 _fields_ = [("Data1", ctypes.c_uint32),
@@ -180,16 +245,23 @@ class _WindowsTaskbar:
 
             def guid(text: str) -> GUID:
                 value = GUID()
-                ole32.CLSIDFromString(ctypes.c_wchar_p(text), byref(value))
+                if ole32.CLSIDFromString(ctypes.c_wchar_p(text), byref(value)) < 0:
+                    raise OSError(f"CLSIDFromString({text}) failed")
                 return value
 
+            initialised = ole32.CoInitializeEx(None, self._COINIT_APARTMENTTHREADED)
+            if initialised < 0 and initialised != self._RPC_E_CHANGED_MODE:
+                self._error = f"CoInitializeEx failed (0x{initialised & 0xFFFFFFFF:08X})"
+                return False
+
             pointer = c_void_p()
-            ole32.CoCreateInstance(
+            created = ole32.CoCreateInstance(
                 byref(guid(self._CLSID)), None,
                 1,                              # CLSCTX_INPROC_SERVER
                 byref(guid(self._IID)), byref(pointer),
             )
-            if not pointer:
+            if created < 0 or not pointer:
+                self._error = f"CoCreateInstance failed (0x{created & 0xFFFFFFFF:08X})"
                 return False
 
             # The vtable, by ordinal: IUnknown occupies 0–2, then
@@ -204,15 +276,25 @@ class _WindowsTaskbar:
             self._c_void_p = c_void_p
 
             hr_init = self._call(ctypes.c_long, c_void_p)(vtable[3])
-            hr_init(pointer)
+            started = hr_init(pointer)
+            if started < 0:
+                self._error = f"ITaskbarList::HrInit failed (0x{started & 0xFFFFFFFF:08X})"
+                return False
+
             self._taskbar = pointer
+            self._error = ""
             return True
-        except Exception:      # noqa: BLE001 - no taskbar is not a fault
+        except Exception as exc:      # noqa: BLE001 - no taskbar is not a fault
             self._taskbar = None
+            self._error = f"taskbar progress unavailable: {exc}"
             return False
 
-    def set_progress(self, percent: int, visible: bool) -> None:
-        if not self._ensure() or not self._hwnd:
+    def set_progress(self, percent: int, visible: bool,
+                     handles: tuple[int, ...] = ()) -> None:
+        if not handles:
+            self._error = "no window with a taskbar button to draw progress on"
+            return
+        if not self._ensure():
             return
         try:
             import ctypes
@@ -220,15 +302,18 @@ class _WindowsTaskbar:
             set_state = self._call(
                 ctypes.c_long, self._c_void_p, self._HWND, ctypes.c_int
             )(self._vtable[10])
-            if not visible:
-                set_state(self._pointer, self._HWND(self._hwnd), self._NOPROGRESS)
-                return
             set_value = self._call(
                 ctypes.c_long,
                 self._c_void_p, self._HWND, self._ULONGLONG, self._ULONGLONG
             )(self._vtable[9])
-            set_state(self._pointer, self._HWND(self._hwnd), self._NORMAL)
-            set_value(self._pointer, self._HWND(self._hwnd),
-                      self._ULONGLONG(percent), self._ULONGLONG(100))
-        except Exception:      # noqa: BLE001
-            pass
+
+            for handle in handles:
+                window = self._HWND(handle)
+                if not visible:
+                    set_state(self._pointer, window, self._NOPROGRESS)
+                    continue
+                set_state(self._pointer, window, self._NORMAL)
+                set_value(self._pointer, window,
+                          self._ULONGLONG(percent), self._ULONGLONG(100))
+        except Exception as exc:      # noqa: BLE001
+            self._error = f"taskbar progress failed: {exc}"
