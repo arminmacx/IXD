@@ -35,7 +35,6 @@ backups/
 # The build diary and the working instructions. They are a real engineering
 # record, but they are notes to whoever is building this — not documentation
 # for anyone using it — and they are backed up separately.
-CLAUDE.md
 instruction.md
 context.md
 session-log.md
