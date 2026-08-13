@@ -134,11 +134,26 @@ def launch_application() -> bool:
     return False
 
 
+#: Started hidden, not headless.
+#:
+#: `--background` runs with no Qt at all, so the instance that owns the engine
+#: has no window and no tray — and once one instance properly owns the control
+#: socket, a later launch of the application could only be told "already
+#: running" and have nowhere to show itself. The browser starting a download
+#: would have locked the user out of their own interface.
+#:
+#: `--hidden` is a normal run with the window not shown: the tray is there, the
+#: window opens on request, and a new download can raise its own window. A
+#: machine with no display falls back to headless on its own, because run_gui
+#: raises ImportError and main catches it.
+_START_HIDDEN = "--hidden"
+
+
 def _application_command() -> list[str]:
     """Locate the installed application binary, or fall back to this source tree."""
     override = os.environ.get("IXD_EXECUTABLE")
     if override and Path(override).exists():
-        return [override, "--background"]
+        return [override, _START_HIDDEN]
 
     root = Path(__file__).resolve().parents[2]
     for candidate in (
@@ -147,10 +162,10 @@ def _application_command() -> list[str]:
         root / "dist" / "Internet Xtreme Downloader.app" / "Contents" / "MacOS" / "ixd",
     ):
         if candidate.exists():
-            return [str(candidate), "--background"]
+            return [str(candidate), _START_HIDDEN]
 
     if (root / "ixd" / "__main__.py").exists():
-        return [sys.executable, "-m", "ixd", "--background"]
+        return [sys.executable, "-m", "ixd", _START_HIDDEN]
     return []
 
 

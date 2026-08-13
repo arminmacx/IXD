@@ -4,6 +4,7 @@ Modes
 -----
 ``python -m ixd``                  launch the GUI (default)
 ``python -m ixd --background``     run headless: engine, scheduler and control socket
+``python -m ixd --hidden``         run with the window hidden, ready to be shown
 ``python -m ixd --native-host``    act as the browser's Native Messaging host
 ``python -m ixd --add URL``        hand a URL to the running instance (or start one)
 
@@ -52,7 +53,9 @@ def _parse_arguments(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("urls", nargs="*", help="URLs to queue on startup")
     parser.add_argument("--background", "--daemon", action="store_true",
-                        help="run without a window (tray/daemon mode)")
+                        help="run without a window at all (headless daemon)")
+    parser.add_argument("--hidden", action="store_true",
+                        help="run with the window hidden, ready to be shown")
     parser.add_argument("--native-host", action="store_true",
                         help="run as the browser native messaging host")
     parser.add_argument("--add", action="append", default=[],
@@ -350,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_background(urls, arguments.media)
 
     try:
-        return run_gui(urls, arguments.media, start_hidden=False)
+        return run_gui(urls, arguments.media, start_hidden=arguments.hidden)
     except ImportError as exc:
         print(
             f"the graphical interface is unavailable ({exc}); "

@@ -1333,6 +1333,88 @@ service.shutdown()
           ("IS_WINDOWS True" in output) <= ("REUSE_FLAG False" in output), detail)
 
 
+def test_a_second_launch_stands_down() -> None:
+    """Two real processes, one database: the second must not run an engine.
+
+    The check at start-up is not enough on its own — two launches can pass it
+    at the same moment, which is exactly what the browser's host does when it
+    starts the application. The bind is the arbiter, and losing it has to end
+    the process rather than leave it running windowless beside the winner.
+
+    Also checked: the instance the *host* starts is a hidden window rather than
+    a headless daemon. Once one instance properly owns the socket, a headless
+    owner would mean a later launch is told "already running" with nowhere to
+    show itself — the browser starting a download would lock the user out of
+    their own interface.
+    """
+    print("\n[a second launch stands down]")
+    from ixd.ipc import native_host
+
+    command = native_host._application_command()
+    check("the host starts a window, not a daemon",
+          "--background" not in command, str(command))
+    check("and starts it hidden", "--hidden" in command, str(command))
+
+    script = '''
+import subprocess, sys, tempfile, time, socket, json, os
+from pathlib import Path
+home = Path(tempfile.mkdtemp(prefix="ixd-race-"))
+env = dict(os.environ)
+env["IXD_HOME"] = str(home)
+env["QT_QPA_PLATFORM"] = "offscreen"
+
+probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+port = probe.getsockname()[1]; probe.close()
+(home).mkdir(parents=True, exist_ok=True)
+(home / "settings.json").write_text(json.dumps({
+    "ipc_port": port, "ipc_token": "race-token",
+    "download_dir": str(home / "out"), "browser_integration": False,
+}))
+
+first = subprocess.Popen([sys.executable, "-m", "ixd", "--background"],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True)
+# Wait for it to own the socket.
+deadline = time.time() + 30
+ready = False
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            ready = True
+            break
+    except OSError:
+        time.sleep(0.3)
+print("FIRST_SERVING", ready)
+
+second = subprocess.run([sys.executable, "-m", "ixd", "--background"],
+                        env=env, capture_output=True, text=True, timeout=60)
+print("SECOND_EXITED", second.returncode == 0)
+print("SECOND_SAID", "already running" in (second.stdout + second.stderr).lower())
+print("FIRST_ALIVE", first.poll() is None)
+first.terminate()
+try:
+    first.wait(timeout=20)
+except subprocess.TimeoutExpired:
+    first.kill()
+'''
+    root = Path(__file__).resolve().parents[1]
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("a second launch stands down", False, "timed out")
+        return
+
+    output = process.stdout
+    detail = (output.strip()[-600:] or "") + (process.stderr[-600:] or "")
+    check("the first instance serves", "FIRST_SERVING True" in output, detail)
+    check("the second exits cleanly", "SECOND_EXITED True" in output, detail)
+    check("saying why", "SECOND_SAID True" in output, detail)
+    check("and the first is left running", "FIRST_ALIVE True" in output, detail)
+
+
 def test_a_status_poll_never_starts_the_application() -> None:
     """A quit application must stay quit.
 
@@ -3311,6 +3393,7 @@ def main() -> int:
                  test_every_platform_has_an_icon_it_will_accept,
                  test_the_log_can_be_switched_off,
                  test_only_one_instance_owns_the_engine,
+                 test_a_second_launch_stands_down,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):
         try:
