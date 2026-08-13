@@ -32,6 +32,7 @@ from ..config import CATEGORY_ORDER
 from ..core.events import EventType
 from ..core.http_client import format_bytes, format_eta, format_speed
 from ..core.models import DownloadStatus, TransferMode
+from .taskbar import TaskbarProgress
 from .theme import DARK, Palette, status_colour
 from .widgets.add_dialog import AddDownloadDialog
 from .widgets.chunk_bars import ChunkBars
@@ -81,6 +82,12 @@ class MainWindow(QMainWindow):
 
         self.bridge = EventBridge(service.events, self)
         self.bridge.event.connect(self._on_engine_event)
+
+        # Progress on the taskbar button, the dock badge or the launcher —
+        # whichever this desktop has. It needs a window handle on Windows, so
+        # it is given one as soon as there is one.
+        self.taskbar = TaskbarProgress()
+        self.taskbar.attach(self)
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -362,8 +369,36 @@ class MainWindow(QMainWindow):
             + (f" · {stats.get('proxy_pool', 0)} proxies" if stats.get("proxy_pool") else "")
         )
 
+        self._update_taskbar(downloads)
         self._update_detail()
         self._update_banner(downloads)
+
+    def _update_taskbar(self, downloads) -> None:
+        """Overall progress on the application's icon.
+
+        The bytes of everything running, against what those downloads will
+        weigh — not the count of them, and not the average of their
+        percentages, either of which jumps about as downloads start and finish.
+        A download whose length nobody published is left out of the sum rather
+        than counted as zero, which would drag the bar down for the whole
+        transfer and then snap it up at the end.
+
+        Nothing running means nothing drawn: an icon that keeps a full bar
+        after the last download finished is worse than one that shows none.
+        """
+        done = total = 0
+        active = False
+        for download in downloads:
+            if not download.status.is_active:
+                continue
+            active = True
+            if download.total_size > 0:
+                done += max(0, min(download.downloaded, download.total_size))
+                total += download.total_size
+        if not active or total <= 0:
+            self.taskbar.clear()
+            return
+        self.taskbar.set_progress(done / total, visible=True)
 
     def _update_detail(self) -> None:
         if self._selected_id is None:

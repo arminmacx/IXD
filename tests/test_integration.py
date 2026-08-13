@@ -1462,6 +1462,195 @@ def test_a_status_poll_never_starts_the_application() -> None:
           "BADGE_POLL_MS" not in source and "refreshDownloadBadge" not in source)
 
 
+def test_the_icon_carries_the_progress() -> None:
+    """Progress on the application's icon, on whatever this desktop has.
+
+    Qt exposes none of these — `QWinTaskbarProgress` was Qt 5 and did not
+    survive into Qt 6 — so each platform is spoken to directly: ITaskbarList3
+    on Windows, the launcher-entry signal on Linux, the dock badge on macOS.
+
+    The Linux one is checked properly, because it can be: the signal is caught
+    off the real session bus by a listener that did not send it. The other two
+    are checked only for the shape of the decision, and are honestly unverified
+    on hardware nobody here has.
+    """
+    print("\n[the icon carries the progress]")
+    script = '''
+import sys, tempfile
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-bar-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6 import QtCore
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, Slot
+from PySide6.QtDBus import QDBusConnection
+from ixd.ui.taskbar import TaskbarProgress
+
+app = QApplication(sys.argv[:1])
+seen = []
+
+class Listener(QObject):
+    @Slot(str, "QVariantMap")
+    def Update(self, app_uri, properties):
+        seen.append((app_uri, dict(properties)))
+
+listener = Listener()
+bus = QDBusConnection.sessionBus()
+print("BUS", bus.isConnected())
+bus.connect("", "/com/canonical/Unity/LauncherEntry",
+            "com.canonical.Unity.LauncherEntry", "Update",
+            listener, QtCore.SLOT("Update(QString,QVariantMap)"))
+
+# D-Bus delivery is asynchronous: a fixed number of processEvents() is a race,
+# and under the load of a whole suite it loses. Wait for the signal instead.
+import time
+def wait_for(count, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline and len(seen) < count:
+        app.processEvents()
+        time.sleep(0.01)
+    # Anything further in flight arrives while we are still spinning.
+    settle = time.time() + 0.4
+    while time.time() < settle:
+        app.processEvents()
+        time.sleep(0.01)
+
+bar = TaskbarProgress()
+bar.set_progress(0.42)
+wait_for(1)
+print("SENT", len(seen))
+if seen:
+    uri, props = seen[-1]
+    print("URI_OK", uri == "application://ixd.desktop")
+    print("PROGRESS", round(float(props.get("progress", -1)), 3))
+    print("VISIBLE", bool(props.get("progress-visible")))
+
+seen.clear()
+bar.clear()
+wait_for(1)
+print("CLEAR_SENT", len(seen))
+print("CLEAR_HIDES", bool(seen) and not seen[-1][1].get("progress-visible"))
+
+seen.clear()
+bar.set_progress(0.42); bar.set_progress(0.42); bar.set_progress(0.42)
+wait_for(1)
+print("REPEATS_SUPPRESSED", len(seen) == 1, len(seen))
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-bar-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=120, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the icon carries the progress", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
+    if "BUS True" not in output:
+        # A build machine with no session bus cannot be asked this. Say so
+        # rather than passing a check that never ran.
+        check("a session bus is available to test against", False,
+              "no session bus; the launcher signal could not be verified here")
+        return
+    check("the launcher signal reaches the bus", "SENT 1" in output, detail)
+    check("addressed to this application", "URI_OK True" in output, detail)
+    check("carrying the fraction", "PROGRESS 0.42" in output, detail)
+    check("and marked visible", "VISIBLE True" in output, detail)
+    check("clearing sends one more", "CLEAR_SENT 1" in output, detail)
+    check("that hides it", "CLEAR_HIDES True" in output, detail)
+    check("and the same value is not sent twice",
+          "REPEATS_SUPPRESSED True" in output, detail)
+
+
+def test_a_downloads_window_stands_on_its_own() -> None:
+    """It must appear when the main window is not up.
+
+    Reported from Windows: adding a download showed the application's icon on
+    the taskbar and no window at all, and clicking that icon to raise the main
+    window finally brought the download window with it.
+
+    That is what a *parented* window does. Windows gives a child no taskbar
+    button of its own, and a child of a hidden parent does not appear — and the
+    parent is hidden whenever the browser started the application or it has
+    been closed to the tray.
+    """
+    print("\n[a download's window stands on its own]")
+    script = '''
+import sys, tempfile
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-win-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.models import Download, DownloadStatus
+from ixd.service import DownloadService
+from ixd.ui.theme import DARK, apply_theme
+from ixd.ui.main_window import MainWindow
+from ixd.ui.widgets.download_window import DownloadWindow
+
+app = QApplication(sys.argv[:1])
+apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = MainWindow(service, DARK)
+window.hide()                      # the application running with no window up
+
+d = Download(url="https://example.invalid/f", filename="film.mp4",
+             dest_dir=str(out), total_size=1000, downloaded=250,
+             status=DownloadStatus.DOWNLOADING)
+d.id = service.db.insert_download(d)
+window.open_download_window(d.id)
+app.processEvents()
+
+opened = DownloadWindow._open[d.id]
+print("MAIN_HIDDEN", not window.isVisible())
+print("NO_PARENT", opened.parent() is None)
+print("TOP_LEVEL", opened.isWindow())
+print("VISIBLE", opened.isVisible())
+print("HAS_ICON", not opened.windowIcon().isNull())
+print("TITLED", opened.windowTitle() == "film.mp4")
+service.db.close()
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-win-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=120, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("a download's window stands on its own", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
+    check("the main window is down", "MAIN_HIDDEN True" in output, detail)
+    check("the download window has no parent", "NO_PARENT True" in output, detail)
+    check("so the desktop lists it in its own right",
+          "TOP_LEVEL True" in output, detail)
+    check("it appears anyway", "VISIBLE True" in output, detail)
+    check("with an icon to label it", "HAS_ICON True" in output, detail)
+    check("and the file's name on it", "TITLED True" in output, detail)
+
+
 def test_quit_ends_the_process() -> None:
     """Quitting must end the event loop, not just hide the window.
 
@@ -3394,6 +3583,8 @@ def main() -> int:
                  test_the_log_can_be_switched_off,
                  test_only_one_instance_owns_the_engine,
                  test_a_second_launch_stands_down,
+                 test_the_icon_carries_the_progress,
+                 test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):
         try:

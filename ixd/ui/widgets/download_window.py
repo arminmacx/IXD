@@ -65,14 +65,32 @@ class DownloadWindow(QDialog):
     @classmethod
     def show_for(cls, service: "DownloadService", download_id: int,
                  palette: Palette = DARK, parent=None) -> "DownloadWindow":
+        """Open — or raise — this download's own window.
+
+        ``parent`` is deliberately **not** passed on. A parented window is a
+        child of the main window: Windows gives it no taskbar button of its
+        own, and if the parent is hidden — which it is when the browser started
+        the application, or when it has been closed to the tray — the child
+        does not appear at all. Reported exactly that way: the icon appeared on
+        the taskbar, no window did, and clicking the icon to raise the main
+        window finally brought the download window with it.
+
+        A download's window outlives whatever opened it, so it is top-level and
+        carries the application's icon itself rather than inheriting one.
+        """
         existing = cls._open.get(download_id)
         if existing is not None and existing.isVisible():
             existing.raise_()
             existing.activateWindow()
             return existing
-        window = cls(service, download_id, palette, parent)
+        window = cls(service, download_id, palette, parent=None)
         cls._open[download_id] = window
         window.show()
+        # Shown, then brought forward: `show()` alone leaves it behind whatever
+        # had focus, which on a busy desktop is indistinguishable from it never
+        # having opened.
+        window.raise_()
+        window.activateWindow()
         return window
 
     def __init__(self, service: "DownloadService", download_id: int,
@@ -84,7 +102,18 @@ class DownloadWindow(QDialog):
         # Not modal: this is meant to be left open while the file arrives, and
         # a modal window would hold the rest of the application still.
         self.setModal(False)
+        # A real top-level window, so the desktop lists it in its own right.
         self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        # Without a parent there is nothing to inherit an icon from, and a
+        # window with no icon is the one thing a taskbar cannot label.
+        from .tray import application_icon      # noqa: PLC0415 - avoids a cycle
+        self.setWindowIcon(application_icon())
         self.setMinimumWidth(560)
 
         layout = QVBoxLayout(self)
