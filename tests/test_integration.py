@@ -1622,6 +1622,145 @@ print("INDETERMINATE_NOT_REPEATED", len(calls) == 3, len(calls))
           "INDETERMINATE_NOT_REPEATED True" in output, detail)
 
 
+def test_the_splash_says_what_is_happening() -> None:
+    """Something on screen while start-up takes its second or two.
+
+    The animation cannot be left to a timer: start-up blocks this same thread,
+    so a timer would fire only once the loop is idle — which is exactly when
+    the splash is no longer needed. The angle comes from elapsed time and
+    `step()` drives the repaint, so it is correct whenever it is drawn.
+
+    What is checked here is that it draws, that the message it shows is the one
+    it was given, and that `finish()` returns and closes rather than spinning
+    for ever — a hang there would be a launch that never completes.
+    """
+    print("\n[the splash says what is happening]")
+    script = '''
+import sys, tempfile, time
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-splash-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.ui.theme import DARK
+from ixd.ui.widgets import splash as splash_module
+
+app = QApplication(sys.argv[:1])
+s = splash_module.SplashScreen(DARK)
+s.show()
+s.step("Starting the transfer engine\u2026")
+first = s.grab()
+print("DREW", first.width() == splash_module.WIDTH and first.height() == splash_module.HEIGHT)
+print("MESSAGE_KEPT", s._message == "Starting the transfer engine\u2026")
+
+# The arc has to be somewhere different a moment later, or it is a picture.
+import hashlib
+def digest(pixmap):
+    image = pixmap.toImage()
+    return hashlib.sha1(image.bits().tobytes()).hexdigest()
+before = digest(first)
+deadline = time.time() + 3.0
+moved = False
+while time.time() < deadline and not moved:
+    time.sleep(0.12)
+    s.step("Starting the transfer engine\u2026")
+    moved = digest(s.grab()) != before
+print("ANIMATES", moved)
+
+# It must not flash, and it must not hang.
+began = time.time()
+s.finish(None)
+took = time.time() - began
+print("HELD_LONG_ENOUGH", took >= splash_module.MINIMUM_MS / 1000 * 0.5, round(took, 2))
+print("FINISHED_AND_CLOSED", not s.isVisible())
+print("RETURNED", took < 8)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-splash-home-")
+    try:
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, timeout=180, env=environment, cwd=str(root))
+    except subprocess.TimeoutExpired:
+        check("the splash finishes rather than hanging", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = done.stdout
+    detail = (output.strip()[-400:]) + (done.stderr[-400:])
+    check("it draws at its own size", "DREW True" in output, detail)
+    check("it shows the step it was given", "MESSAGE_KEPT True" in output, detail)
+    check("the arc actually turns", "ANIMATES True" in output, detail)
+    check("it stays up long enough to be seen", "HELD_LONG_ENOUGH True" in output, detail)
+    check("finish() closes it", "FINISHED_AND_CLOSED True" in output, detail)
+    check("and returns rather than spinning for ever",
+          "RETURNED True" in output, detail)
+
+    # The stages are reported, not guessed at.
+    from ixd.__main__ import _build_service
+    import inspect
+    check("start-up reports its stages",
+          "stage" in inspect.signature(_build_service).parameters)
+
+
+def test_windows_only_imports_exist_on_windows() -> None:
+    """Every name taken from `ctypes.wintypes` is actually defined there.
+
+    From a user's Log:
+
+        Taskbar progress: taskbar progress unavailable: cannot import name
+        'ULONGLONG' from 'ctypes.wintypes'
+
+    `wintypes` has ULARGE_INTEGER and ULONG and nothing called ULONGLONG. The
+    import raised, the blanket `except` around the COM setup swallowed it, and
+    the whole feature was dead on Windows while Linux and macOS worked — for
+    two releases, because the code only ran on the platform nobody here has.
+
+    `ctypes.wintypes` cannot be imported off Windows, but it ships as ordinary
+    Python in the standard library and can be read. So the names this tree asks
+    for are checked against the names that module defines, on any platform.
+    """
+    print("\n[windows-only imports are names that exist]")
+    import ast as _ast
+    import re as _re
+    import sysconfig as _sysconfig
+
+    wintypes = (Path(_sysconfig.get_paths()["stdlib"]) / "ctypes" / "wintypes.py")
+    if not wintypes.exists():
+        check("the standard library's wintypes source is readable", False,
+              str(wintypes))
+        return
+
+    body = wintypes.read_text(encoding="utf-8")
+    defined = set(_re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=", body, _re.M))
+    defined |= set(_re.findall(r"^class\s+([A-Za-z_][A-Za-z0-9_]*)", body, _re.M))
+    check("wintypes defines names to check against", len(defined) > 20, len(defined))
+
+    root = Path(__file__).resolve().parents[1] / "ixd"
+    asked: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*.py")):
+        try:
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom) and node.module == "ctypes.wintypes":
+                for alias in node.names:
+                    asked.append((str(path.relative_to(root.parent)), alias.name))
+
+    check("something imports from ctypes.wintypes at all", bool(asked),
+          "nothing does; this check would pass vacuously")
+    missing = [f"{where}: {name}" for where, name in asked if name not in defined]
+    check("every name asked of ctypes.wintypes exists there",
+          not missing, "; ".join(missing))
+
+    # The specific one that was wrong, so a rename cannot quietly bring it back.
+    check("ULONGLONG in particular is not asked for",
+          all(name != "ULONGLONG" for _, name in asked))
+
+
 def test_no_credential_shaped_literal_ships() -> None:
     """Nothing in the tree looks like a leaked key.
 
@@ -3777,6 +3916,8 @@ def main() -> int:
                  test_the_icon_carries_the_progress,
                  test_it_can_start_with_the_session,
                  test_no_credential_shaped_literal_ships,
+                 test_windows_only_imports_exist_on_windows,
+                 test_the_splash_says_what_is_happening,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):

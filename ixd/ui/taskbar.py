@@ -264,7 +264,15 @@ class _WindowsTaskbar:
         try:
             import ctypes
             from ctypes import POINTER, byref, c_void_p
-            from ctypes.wintypes import HWND, ULONGLONG
+            from ctypes.wintypes import HWND
+
+            # `SetProgressValue` takes two ULONGLONGs, and `ctypes.wintypes`
+            # does **not** define ULONGLONG — it has ULARGE_INTEGER and ULONG
+            # and nothing named that. Importing it raised ImportError, the
+            # blanket `except` here swallowed it, and the whole feature was
+            # dead on Windows while every other platform worked. Found from a
+            # user's Log, which is the only reason it was findable at all.
+            ULONGLONG = ctypes.c_ulonglong
 
             ole32 = ctypes.windll.ole32
 

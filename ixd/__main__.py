@@ -98,12 +98,24 @@ def _send_to_running_instance(urls: list[str], media: bool) -> bool:
         return False
 
 
-def _build_service():
+def _build_service(stage=None):
+    """Bring the engine up, reporting each step to whatever is on screen.
+
+    `stage` is called with the name of what is about to happen. The splash uses
+    it to say something true rather than to animate over a guess; everything
+    else passes nothing and it does nothing.
+    """
     from .service import DownloadService
+
+    def say(message: str) -> None:
+        if stage is not None:
+            stage(message)
 
     config.ensure_dirs()
     service = DownloadService()
+    say("Starting the transfer engine…")
     service.start()
+    say("Checking the browser integration…")
     _register_browser_integration(service)
     _register_autostart(service)
     return service
@@ -272,10 +284,30 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
     app.setDesktopFileName(DESKTOP_FILE_NAME)
     ensure_desktop_entry()
 
-    service = _build_service()
+    # Something on screen while this takes its second or two. Not shown for a
+    # hidden start: there is no window coming, so a splash would announce a
+    # launch the user did not make and then vanish.
+    splash = None
+    if not start_hidden:
+        try:
+            from .ui.widgets.splash import SplashScreen
+
+            splash = SplashScreen(DARK)
+            splash.show()
+            splash.step("Starting…")
+        except Exception:  # noqa: BLE001 - never block a launch on decoration
+            splash = None
+
+    def stage(message: str) -> None:
+        if splash is not None:
+            splash.step(message)
+
+    stage("Opening the download database…")
+    service = _build_service(stage)
     palette = DARK.with_accent(service.settings.get("accent", "#5B8CFF"))
     apply_theme(app, palette)
 
+    stage("Building the interface…")
     window = MainWindow(service, palette)
     try:
         server = _start_ipc(service)
@@ -310,6 +342,12 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
 
     if not start_hidden and not service.settings.get_bool("start_minimized", False):
         window.show()
+
+    if splash is not None:
+        # Held to a minimum on screen, faded out, and the window raised from
+        # under it — a splash that closes the instant the window appears reads
+        # as a flicker rather than as a start.
+        splash.finish(window if window.isVisible() else None)
 
     def cleanup() -> None:
         if server is not None:
