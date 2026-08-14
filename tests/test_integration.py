@@ -1622,6 +1622,71 @@ print("INDETERMINATE_NOT_REPEATED", len(calls) == 3, len(calls))
           "INDETERMINATE_NOT_REPEATED True" in output, detail)
 
 
+def test_no_credential_shaped_literal_ships() -> None:
+    """Nothing in the tree looks like a leaked key.
+
+    GitHub's secret scanning flagged `AIzaSy…` in the YouTube extractor. That
+    particular value was not a credential — youtube.com publishes it in every
+    watch page, the same for every visitor, and `_live_config` already read it
+    from there — so there was nothing to rotate and the copy in the source was
+    a stale duplicate of page data. It is gone, and the page is the only
+    source.
+
+    The point of this check is that it cannot come back quietly, and that the
+    next one is caught here rather than by an email. The patterns are the
+    shapes the scanners look for, not a judgement about what is secret.
+    """
+    print("\n[nothing in the tree is shaped like a credential]")
+    import re as _re
+
+    root = Path(__file__).resolve().parents[1]
+    patterns = {
+        "Google API key": _re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+        "AWS access key": _re.compile(r"AKIA[0-9A-Z]{16}"),
+        "Slack token": _re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
+        "GitHub token": _re.compile(r"gh[pousr]_[0-9A-Za-z]{36}"),
+        # The header plus actual material after it. A test asserting that a
+        # *generated* key is PEM-shaped names the header and holds no key, and
+        # flagging that is how a scanner trains people to ignore it.
+        "private key block": _re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----\s*\n[A-Za-z0-9+/=\s]{200,}"),
+    }
+    #: The extension is signed with a key pair whose *private* half is a build
+    #: input and deliberately present; it is not a credential to any service.
+    allowed = {root / "packaging" / "extension-key.pem"}
+    skip_dirs = {".git", ".venv", "dist", "build", "node_modules", "idm",
+                 "__pycache__", "backups"}
+
+    hits = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path in allowed:
+            continue
+        if set(path.relative_to(root).parts) & skip_dirs:
+            continue
+        if path.suffix.lower() not in {".py", ".js", ".json", ".md", ".yml",
+                                       ".yaml", ".sh", ".bat", ".html", ".txt"}:
+            continue
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for label, pattern in patterns.items():
+            found = pattern.search(body)
+            if found:
+                hits.append(f"{path.relative_to(root)}: {label} "
+                            f"{found.group(0)[:12]}…")
+
+    check("no credential-shaped literal is in the tree",
+          not hits, "; ".join(hits[:4]))
+
+    from ixd.extractors import youtube
+    check("the extractor holds no key of its own",
+          not hasattr(youtube, "DEFAULT_API_KEY"))
+    check("and its client identities start without one",
+          all(not c.api_key for c in youtube.CLIENTS)
+          if hasattr(youtube, "CLIENTS") else True)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -3711,6 +3776,7 @@ def main() -> int:
                  test_a_second_launch_stands_down,
                  test_the_icon_carries_the_progress,
                  test_it_can_start_with_the_session,
+                 test_no_credential_shaped_literal_ships,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):

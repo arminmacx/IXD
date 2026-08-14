@@ -35,7 +35,21 @@ from ..core.protobuf import parse
 from .base import Extractor, register
 
 INNERTUBE_URL = "https://www.youtube.com/youtubei/v1/player"
-DEFAULT_API_KEY = ""
+
+#: The player endpoint's key is **not kept here**.
+#:
+#: It is not a credential. YouTube publishes it in the watch page itself —
+#: `ytcfg.set({"INNERTUBE_API_KEY": …})` — the same value for every visitor,
+#: and `_live_config` already reads it from there and prefers it over anything
+#: else. A copy in this file was therefore a stale duplicate of page data.
+#:
+#: It was also an `AIza…` literal in a public repository, which GitHub's secret
+#: scanning flags as a leaked Google API key. There is nothing to rotate: it is
+#: not ours, it grants access to nothing of ours, and every visitor to
+#: youtube.com is served it. But an alert nobody can act on is an alert that
+#: teaches people to ignore alerts, so the literal is gone and the page is the
+#: only source. The request omits the parameter entirely when the page did not
+#: give one.
 
 _ITAG_HINTS: dict[int, tuple[str, str, str]] = {
     # itag: (extension, vcodec, acodec) for common progressive streams
@@ -56,7 +70,8 @@ class InnerTubeClient:
     user_agent: str
     client_id: int
     extra_context: dict[str, Any] = field(default_factory=dict)
-    api_key: str = DEFAULT_API_KEY
+    #: Filled in from the watch page; empty until one is read.
+    api_key: str = ""
 
     def context(self) -> dict[str, Any]:
         client: dict[str, Any] = {
@@ -706,7 +721,13 @@ class YouTubeExtractor(Extractor):
             # The API pairs the session identity in the body with this header;
             # sending only one of the two is treated as inconsistent.
             headers["X-Goog-Visitor-Id"] = visitor_data
-        url = f"{INNERTUBE_URL}?key={client.api_key}&prettyPrint=false"
+        # `key=` only when the page published one. An empty value is worse
+        # than no parameter: it is a key the endpoint can reject, rather than a
+        # request it reads the client context of.
+        query = "prettyPrint=false"
+        if client.api_key:
+            query = f"key={urllib.parse.quote(client.api_key)}&" + query
+        url = f"{INNERTUBE_URL}?{query}"
         # A client of this call's own when one is supplied. The identities are
         # asked concurrently, and one HTTP client reuses its connections — two
         # threads posting through the same one interleave on the wire.
