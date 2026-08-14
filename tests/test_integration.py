@@ -1622,6 +1622,73 @@ print("INDETERMINATE_NOT_REPEATED", len(calls) == 3, len(calls))
           "INDETERMINATE_NOT_REPEATED True" in output, detail)
 
 
+def test_the_icons_are_registered_as_a_theme() -> None:
+    """PNGs in a directory are not an icon theme until it says it is.
+
+    Under Wayland the compositor draws the icon named by the entry, and that
+    name is resolved through the XDG icon theme. A per-user base directory
+    (`~/.local/share/icons/hicolor`) is its own theme root and needs its own
+    `index.theme`; the system copy under `/usr/share` does not cover it.
+
+    Reported on Linux: the splash showed the icon and the window did not. GTK's
+    own lookup answered `has_icon("ixd") -> False` with all five sizes sitting
+    in place.
+
+    Also checked: a stale `icon-theme.cache` is dealt with. It is authoritative
+    when present, so an icon written after it was built stays invisible.
+    """
+    print("\n[the icons are registered as a theme]")
+    root = Path(tempfile.mkdtemp(prefix="ixd-icons-"))
+    previous = os.environ.get("XDG_DATA_HOME")
+    os.environ["XDG_DATA_HOME"] = str(root)
+    try:
+        from importlib import reload
+        from ixd import desktop
+        reload(desktop)
+
+        if desktop._installed_system_wide():
+            print("  SKIP  a system-wide entry is installed on this machine")
+            return
+
+        hicolor = root / "icons" / "hicolor"
+        (hicolor / "64x64" / "apps").mkdir(parents=True, exist_ok=True)
+        stale = hicolor / "icon-theme.cache"
+        stale.write_bytes(b"stale")
+
+        check("it installs an entry", desktop.ensure_desktop_entry())
+        check("the desktop entry is written",
+              (root / "applications" / "ixd.desktop").exists())
+
+        index = hicolor / "index.theme"
+        check("and an index.theme, so the tree is a theme at all", index.exists())
+        body = index.read_text(encoding="utf-8") if index.exists() else ""
+        check("naming every size it installed",
+              all(f"{size}x{size}/apps" in body for size in desktop.ICON_SIZES), body[:200])
+        check("declared as a theme", body.startswith("[Icon Theme]"), body[:40])
+
+        check("every icon size is in place",
+              all((hicolor / f"{s}x{s}" / "apps" / "ixd.png").exists()
+                  for s in desktop.ICON_SIZES))
+
+        check("and the stale cache is not left to hide them",
+              (not stale.exists()) or stale.read_bytes() != b"stale",
+              "cache still says 'stale'")
+
+        # Written once, not churned: some desktops watch these paths.
+        before = index.read_bytes()
+        desktop.ensure_desktop_entry()
+        check("a second launch does not rewrite it", index.read_bytes() == before)
+    finally:
+        if previous is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = previous
+        shutil.rmtree(root, ignore_errors=True)
+        from importlib import reload as _reload
+        from ixd import desktop as _desktop
+        _reload(_desktop)
+
+
 def test_the_splash_says_what_is_happening() -> None:
     """Something on screen while start-up takes its second or two.
 
@@ -3918,6 +3985,7 @@ def main() -> int:
                  test_no_credential_shaped_literal_ships,
                  test_windows_only_imports_exist_on_windows,
                  test_the_splash_says_what_is_happening,
+                 test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):

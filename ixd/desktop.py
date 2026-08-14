@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -91,6 +92,67 @@ def desktop_entry() -> str:
     )
 
 
+
+#: A directory of PNGs is not an icon theme until it says it is.
+#:
+#: Measured on this machine, Wayland, with the entry installed and all five
+#: sizes written under ``~/.local/share/icons/hicolor``: GTK's own lookup
+#: answered ``has_icon("ixd") -> False``, and the window, dock and switcher
+#: showed a placeholder. Adding this file — nothing else — turned the same
+#: lookup ``True``. The XDG spec requires it; a base directory whose theme has
+#: no index is not searched, and the icons sitting in it may as well not exist.
+#:
+#: The system copy under ``/usr/share/icons/hicolor`` covers the ``.deb``. It
+#: does **not** cover the per-user tree, which is its own base directory.
+_INDEX_THEME = (
+    "[Icon Theme]\n"
+    "Name=Hicolor\n"
+    "Comment=Fallback icon theme\n"
+    "Hidden=true\n"
+    "Directories=" + ",".join(f"{size}x{size}/apps" for size in ICON_SIZES) + "\n"
+    + "".join(
+        f"\n[{size}x{size}/apps]\nSize={size}\nContext=Applications\nType=Threshold\n"
+        for size in ICON_SIZES
+    )
+)
+
+
+def _ensure_icon_theme_index(icons_root: Path) -> None:
+    """Write the theme index when the user's icon tree has none."""
+    index = icons_root / "index.theme"
+    if index.exists():
+        return
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text(_INDEX_THEME, encoding="utf-8")
+
+
+def _refresh_icon_cache(icons_root: Path) -> None:
+    """Keep a stale cache from hiding icons that are now there.
+
+    ``icon-theme.cache`` is authoritative when present: GTK reads it instead of
+    listing the directory, so an icon added after the cache was built is
+    invisible until the cache is rebuilt. Rebuilding is best-effort, and when
+    there is no tool to rebuild with, the stale file is removed instead — it is
+    a cache, regenerated on demand, and absent is correct where wrong is not.
+    """
+    cache = icons_root / "icon-theme.cache"
+    if not cache.exists():
+        return
+    tool = shutil.which("gtk-update-icon-cache")
+    if tool:
+        try:
+            subprocess.run([tool, "-q", "-f", "-t", str(icons_root)],
+                           timeout=20, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        cache.unlink()
+    except OSError:
+        pass
+
+
 def ensure_desktop_entry() -> bool:
     """Install the per-user entry and icons when nothing else provides them.
 
@@ -105,6 +167,8 @@ def ensure_desktop_entry() -> bool:
 
     source = icon_source_dir()
     data_home = _data_home()
+    icons_root = data_home / "icons" / "hicolor"
+    wrote_icon = False
     try:
         for size in ICON_SIZES:
             png = source / f"ixd-{size}.png"
@@ -118,6 +182,12 @@ def ensure_desktop_entry() -> bool:
             # icon cache — some desktops watch these paths.
             if not target.exists() or target.read_bytes() != png.read_bytes():
                 shutil.copyfile(png, target)
+                wrote_icon = True
+
+        # The icons are useless to the desktop without these two.
+        _ensure_icon_theme_index(icons_root)
+        if wrote_icon:
+            _refresh_icon_cache(icons_root)
 
         applications = data_home / "applications"
         applications.mkdir(parents=True, exist_ok=True)
