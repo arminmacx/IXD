@@ -1622,6 +1622,80 @@ print("INDETERMINATE_NOT_REPEATED", len(calls) == 3, len(calls))
           "INDETERMINATE_NOT_REPEATED True" in output, detail)
 
 
+def test_it_can_start_with_the_session() -> None:
+    """Launch at startup, minimised — registered where the session looks.
+
+    A checkbox that stores a preference and never reaches the registry, the
+    autostart directory or LaunchAgents is a setting that appears to work and
+    does nothing. So the entry is written, read back, validated by
+    `desktop-file-validate` — which did not write it — and removed again.
+
+    The whole thing runs against a temporary `XDG_CONFIG_HOME`, so the tester's
+    own session is never registered by a test run.
+    """
+    print("\n[it can start with the session]")
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    root = tempfile.mkdtemp(prefix="ixd-autostart-")
+    previous = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = root
+    try:
+        from ixd import autostart
+        from importlib import reload
+        reload(autostart)
+
+        check("nothing is registered to begin with", not autostart.is_enabled())
+
+        autostart.apply(True)
+        entry = autostart.linux_entry_path()
+        check("enabling writes the entry", entry.exists(), str(entry))
+        check("and it reads back as enabled", autostart.is_enabled())
+
+        body = entry.read_text(encoding="utf-8") if entry.exists() else ""
+        check("it starts the application with the window down",
+              "--hidden" in body, body)
+        check("it names the application, not the binary",
+              "Name=Internet Xtreme Downloader" in body, body)
+        check("and it is not disabled by the desktop's own flag",
+              "X-GNOME-Autostart-enabled=true" in body
+              and "Hidden=false" in body, body)
+
+        # Checked by something that did not write it.
+        validator = _shutil.which("desktop-file-validate")
+        if validator:
+            done = _subprocess.run([validator, str(entry)],
+                                   capture_output=True, text=True, timeout=30)
+            check("desktop-file-validate accepts the entry",
+                  done.returncode == 0, (done.stdout + done.stderr).strip())
+        else:
+            print("  SKIP  desktop-file-validate is not installed")
+
+        autostart.apply(True)
+        check("applying it twice changes nothing", autostart.is_enabled())
+
+        autostart.apply(False)
+        check("disabling removes the entry",
+              not entry.exists() and not autostart.is_enabled())
+        autostart.apply(False)
+        check("and disabling what is already gone is not an error", True)
+
+        # The setting exists and is off until asked for.
+        from ixd.config import DEFAULT_SETTINGS
+        check("the setting ships off by default",
+              DEFAULT_SETTINGS.get("launch_at_startup") is False,
+              repr(DEFAULT_SETTINGS.get("launch_at_startup")))
+    finally:
+        if previous is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = previous
+        shutil.rmtree(root, ignore_errors=True)
+        from ixd import autostart as _restore
+        from importlib import reload as _reload
+        _reload(_restore)
+
+
 def test_a_downloads_window_stands_on_its_own() -> None:
     """It must appear when the main window is not up.
 
@@ -3636,6 +3710,7 @@ def main() -> int:
                  test_only_one_instance_owns_the_engine,
                  test_a_second_launch_stands_down,
                  test_the_icon_carries_the_progress,
+                 test_it_can_start_with_the_session,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container):

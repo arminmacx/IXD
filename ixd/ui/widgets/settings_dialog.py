@@ -574,6 +574,23 @@ class SettingsDialog(QDialog):
         self.autostart.setChecked(self.settings.get_bool("autostart_downloads", True))
         behaviour_form.addRow("", self.autostart)
 
+        # Registered with the session itself — the Run key on Windows, an XDG
+        # autostart entry on Linux, a LaunchAgent on macOS. Always minimised:
+        # a window that opens by itself at every login is why this gets turned
+        # off again.
+        self.launch_at_startup = QCheckBox(
+            "Launch when I sign in, minimised to the tray"
+        )
+        self.launch_at_startup.setChecked(
+            self.settings.get_bool("launch_at_startup", False)
+        )
+        self.launch_at_startup.setToolTip(
+            "The engine is up and the tray icon is there, with no window "
+            "until you ask for one — so a download started from the browser "
+            "does not have to wait for the application to be launched."
+        )
+        behaviour_form.addRow("", self.launch_at_startup)
+
         self.minimize_tray = QCheckBox("Minimise to the system tray")
         self.minimize_tray.setChecked(self.settings.get_bool("minimize_to_tray", True))
         behaviour_form.addRow("", self.minimize_tray)
@@ -1503,6 +1520,7 @@ class SettingsDialog(QDialog):
             "download_dir": self.download_dir.text().strip(),
             "categorize_into_subfolders": self.categorize.isChecked(),
             "autostart_downloads": self.autostart.isChecked(),
+            "launch_at_startup": self.launch_at_startup.isChecked(),
             "minimize_to_tray": self.minimize_tray.isChecked(),
             "close_to_tray": self.close_tray.isChecked(),
             "notify_on_complete": self.notify.isChecked(),
@@ -1543,4 +1561,25 @@ class SettingsDialog(QDialog):
         self.service.engine.global_limiter.set_rate(
             self.settings.get_int("global_speed_limit", 0)
         )
+        self._apply_launch_at_startup()
         self.accept()
+
+    def _apply_launch_at_startup(self) -> None:
+        """Tell the session, and say so if it refuses.
+
+        A checkbox that stores a preference and never reaches the registry or
+        the autostart directory is a setting that appears to work and does
+        nothing — so the failure is shown here rather than left in the log.
+        """
+        wanted = self.launch_at_startup.isChecked()
+        try:
+            from ...autostart import apply as apply_autostart
+
+            apply_autostart(wanted)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            self.service.db.log_event(f"Launch at startup: {exc}", level="error")
+            QMessageBox.warning(
+                self, "Launch at startup",
+                "The setting was saved, but this session refused the "
+                f"registration:\n\n{exc}",
+            )

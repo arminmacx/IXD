@@ -125,6 +125,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hash_algorithms": ["sha256"],
     "hash_chunk_size": 4 << 20,
     # --- behaviour -------------------------------------------------------
+    # Start with the session, always with the window down: a download manager
+    # is only useful if it is already running when a download starts, and a
+    # window that opens by itself at every login is why people turn this off.
+    # The registration is refreshed on every start, so a rebuilt or moved
+    # application does not leave the session launching a path that is gone.
+    "launch_at_startup": False,
     "start_minimized": False,
     "minimize_to_tray": True,
     # Off by default: `QSystemTrayIcon.isVisible()` only says that `show()` was

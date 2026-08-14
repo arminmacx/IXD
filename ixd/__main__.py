@@ -105,7 +105,23 @@ def _build_service():
     service = DownloadService()
     service.start()
     _register_browser_integration(service)
+    _register_autostart(service)
     return service
+
+
+def _register_autostart(service) -> None:
+    """Keep the session's copy of the setting current, silently.
+
+    Same reasoning as the browser manifests: refreshed on every start rather
+    than written once, so a rebuilt or moved application keeps starting with
+    the session instead of pointing it at a path that no longer exists.
+    """
+    try:
+        from . import autostart
+
+        autostart.apply(service.settings.get_bool("launch_at_startup", False))
+    except Exception as exc:  # noqa: BLE001 - never block start-up on this
+        service.db.log_event(f"Launch at startup: {exc}", level="warning")
 
 
 def _register_browser_integration(service) -> None:
