@@ -14,7 +14,7 @@ and no runtime dependency beyond Qt.
 [![Python](https://img.shields.io/badge/python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.11-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-555)](#installation)
-[![Tests](https://img.shields.io/badge/tests-1113%20offline%20assertions-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1147%20offline%20assertions-3fb950)](#testing)
 [![Dependencies](https://img.shields.io/badge/external%20binaries-none-3fb950)](#no-external-binaries)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -138,10 +138,10 @@ the [Releases](../../releases) page — nothing to compile.
 
 | Platform | File |
 |---|---|
-| Debian / Ubuntu | `ixd_1.0.1_amd64.deb` → `sudo dpkg -i ixd_1.0.1_amd64.deb` |
+| Debian / Ubuntu | `ixd_1.0.2_amd64.deb` → `sudo dpkg -i ixd_1.0.2_amd64.deb` |
 | Linux (portable) | `ixd-linux-x86_64.tar.gz` → extract and run `ixd/ixd` |
 | macOS (Apple silicon) | `*.dmg` — unsigned, so right-click → **Open** the first time. **Unverified: never launched on real hardware** |
-| Windows | `ixd-1.0.1-windows-x64.zip` → extract and run `ixd.exe`. See the note below on the SmartScreen warning; the **first** launch also takes a while, because Windows scans the whole folder before running anything from it |
+| Windows | `ixd-1.0.2-windows-x64.zip` → extract and run `ixd.exe`. See the note below on the SmartScreen warning; the **first** launch also takes a while, because Windows scans the whole folder before running anything from it |
 
 ### Or build it yourself
 
@@ -268,7 +268,7 @@ can also be driven directly:
 
 | Host | Produces |
 |---|---|
-| Linux | `dist/ixd/`, `ixd_1.0.1_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
+| Linux | `dist/ixd/`, `ixd_1.0.2_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
 | macOS | `Internet Xtreme Downloader.app`, `.dmg` via `hdiutil` |
 | Windows | `dist/ixd/`, `.zip`, multi-resolution `.ico` |
 
