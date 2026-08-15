@@ -42,6 +42,9 @@ class OriginState:
     bytes_served: int = 0
     #: Content-Type used for the main payload.
     content_type: str = "application/octet-stream"
+    #: What the origin calls the file, sent as `Content-Disposition`. Empty
+    #: means the header is not sent at all, which is the ordinary case.
+    disposition_name: str = ""
     #: Extra routes: path -> (body, content-type). Used for HLS playlists,
     #: encryption keys and individual media segments.
     routes: dict[str, tuple[bytes, str]] = field(default_factory=dict)
@@ -81,6 +84,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _common_headers(self, length: int) -> None:
         self.send_header("Content-Type", self.state.content_type)
+        if self.state.disposition_name:
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{self.state.disposition_name}"',
+            )
         self.send_header("ETag", self.state.etag)
         self.send_header("Last-Modified", "Wed, 21 Oct 2020 07:28:00 GMT")
         if self.state.support_ranges:

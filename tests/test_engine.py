@@ -106,6 +106,68 @@ def test_multithreaded_download() -> None:
         harness.close()
 
 
+def test_the_origins_own_name_beats_the_address() -> None:
+    """Reported from GitHub: files arriving named after a UUID.
+
+    A release asset redirects to a path ending in
+    `74709710-bf21-4cd4-926a-526ff561a1bb`, and the download landed called
+    exactly that, with no extension — while the response had been saying
+    `filename=ixd_1.0.3_amd64.deb` the whole time. The row needs a name the
+    moment it appears, so the URL is guessed from; the defect was that the
+    guess then outranked the answer.
+    """
+    print("\n[the origin's own name beats the address]")
+    payload = make_payload(512 << 10)
+    harness = Harness()
+    try:
+        with TestOrigin(payload) as origin:
+            origin.state.disposition_name = "ixd_1.0.3_amd64.deb"
+            opaque = "/asset/74709710-bf21-4cd4-926a-526ff561a1bb"
+
+            download = harness.engine.add_download(origin.url(opaque))
+            check("the row still gets a name straight away",
+                  download.filename == "74709710-bf21-4cd4-926a-526ff561a1bb",
+                  download.filename)
+            check("and it is marked as a guess", download.auto_named)
+
+            result = harness.wait_for(
+                download.id, {DownloadStatus.COMPLETED, DownloadStatus.ERROR})
+            check("it completes", result.status is DownloadStatus.COMPLETED,
+                  str(result.error))
+            check("the server's name wins",
+                  result.filename == "ixd_1.0.3_amd64.deb", result.filename)
+            check("and it is no longer a guess", not result.auto_named)
+            check("the file on disk carries that name",
+                  os.path.isfile(result.filepath)
+                  and os.path.basename(result.filepath) == "ixd_1.0.3_amd64.deb",
+                  result.filepath)
+            check("nothing was left behind under the guessed name",
+                  not os.path.exists(os.path.join(
+                      result.dest_dir, "74709710-bf21-4cd4-926a-526ff561a1bb")))
+            check("and the category follows the real name",
+                  result.category != "Other", result.category)
+
+            # A name somebody chose is a decision, not a guess.
+            chosen = harness.engine.add_download(
+                origin.url(opaque + "?second"), filename="my own name.deb")
+            settled = harness.wait_for(
+                chosen.id, {DownloadStatus.COMPLETED, DownloadStatus.ERROR})
+            check("a filename that was asked for is never overruled",
+                  settled.filename == "my own name.deb", settled.filename)
+
+            # No Content-Disposition, no extension in the path: the type is
+            # all there is to go on, and it is better than nothing.
+            origin.state.disposition_name = ""
+            origin.state.content_type = "application/zip"
+            bare = harness.engine.add_download(origin.url("/asset/9f2c1e"))
+            done = harness.wait_for(
+                bare.id, {DownloadStatus.COMPLETED, DownloadStatus.ERROR})
+            check("with no name published, the type supplies the extension",
+                  done.filename == "9f2c1e.zip", done.filename)
+    finally:
+        harness.close()
+
+
 def test_pause_resume() -> None:
     print("\n[2] pause mid-flight, then resume and finish correctly")
     payload = make_payload(8 << 20)
@@ -3024,6 +3086,7 @@ def main() -> int:
         test_a_transport_stream_becomes_an_mp4_without_re_encoding,
         test_pausing_a_stalled_transfer_is_immediate,
         test_the_pages_cookies_do_not_travel_to_a_media_cdn,
+        test_the_origins_own_name_beats_the_address,
     ):
         try:
             test()

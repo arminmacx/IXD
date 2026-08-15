@@ -34,7 +34,7 @@ from .models import (
     TransferMode,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS downloads (
@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS downloads (
     url                TEXT    NOT NULL,
     original_url       TEXT    NOT NULL DEFAULT '',
     filename           TEXT    NOT NULL DEFAULT '',
+    -- Whether that filename is a guess of ours rather than a name the user
+    -- typed or the server published. A guess may be replaced once the origin
+    -- says what the file is really called; a choice may not.
+    auto_named         INTEGER NOT NULL DEFAULT 0,
     dest_dir           TEXT    NOT NULL DEFAULT '',
     temp_path          TEXT    NOT NULL DEFAULT '',
     total_size         INTEGER NOT NULL DEFAULT 0,
@@ -143,7 +147,8 @@ CREATE INDEX IF NOT EXISTS idx_events_download ON events(download_id, ts);
 """
 
 _DOWNLOAD_COLUMNS = (
-    "url", "original_url", "filename", "dest_dir", "temp_path", "total_size",
+    "url", "original_url", "filename", "auto_named", "dest_dir", "temp_path",
+    "total_size",
     "downloaded", "status", "mode", "category", "queue_id", "priority",
     "connections", "supports_ranges", "etag", "last_modified", "mime", "referer",
     "user_agent", "cookies", "extra_headers", "expected_hash", "expected_hash_algo",
@@ -152,6 +157,15 @@ _DOWNLOAD_COLUMNS = (
     "format_id", "proxy_id", "network_interface", "speed_limit", "error",
     "created_at", "started_at", "completed_at",
 )
+
+
+def _int(row: Any, column: str, default: int = 0) -> int:
+    """Read an integer column, tolerating a row that predates it."""
+    try:
+        value = row[column]
+    except (IndexError, KeyError):
+        return default
+    return default if value is None else int(value)
 
 
 def _text(row: Any, column: str) -> str:
@@ -243,6 +257,26 @@ class Database:
                 "UPDATE downloads SET connections=0 WHERE status != ?",
                 (DownloadStatus.COMPLETED.value,),
             )
+        if current < 5:
+            # A name derived from a URL is a guess, and a guess has to be
+            # replaceable. Reported from GitHub, whose release assets redirect
+            # to a path ending in a UUID: the download arrived called
+            # `74709710-bf21-4cd4-926a-526ff561a1bb` with no extension, while
+            # the response said `filename=ixd_1.0.3_amd64.deb` all along.
+            #
+            # Existing rows are marked as *chosen* rather than guessed. Their
+            # files are already on disk under those names, and renaming
+            # somebody's finished downloads underneath them is worse than
+            # leaving a bad name alone.
+            existing = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(downloads)").fetchall()
+            }
+            if "auto_named" not in existing:
+                conn.execute(
+                    "ALTER TABLE downloads ADD COLUMN auto_named "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
 
     # ------------------------------------------------------------------
     # connection plumbing
@@ -300,7 +334,8 @@ class Database:
     @staticmethod
     def _download_values(d: Download) -> list[Any]:
         return [
-            d.url, d.original_url or d.url, d.filename, d.dest_dir, d.temp_path,
+            d.url, d.original_url or d.url, d.filename, int(d.auto_named),
+            d.dest_dir, d.temp_path,
             d.total_size, d.downloaded, d.status.value, d.mode.value, d.category,
             d.queue_id, d.priority, d.connections, int(d.supports_ranges), d.etag,
             d.last_modified, d.mime, d.referer, d.user_agent, d.cookies,
@@ -324,7 +359,8 @@ class Database:
             segments = []
         return Download(
             id=row["id"], url=row["url"], original_url=row["original_url"],
-            filename=row["filename"], dest_dir=row["dest_dir"], temp_path=row["temp_path"],
+            filename=row["filename"], auto_named=bool(_int(row, "auto_named")),
+            dest_dir=row["dest_dir"], temp_path=row["temp_path"],
             total_size=row["total_size"], downloaded=row["downloaded"],
             status=DownloadStatus(row["status"]), mode=TransferMode(row["mode"]),
             category=row["category"], queue_id=row["queue_id"], priority=row["priority"],

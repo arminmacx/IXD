@@ -765,10 +765,42 @@ class DownloadTask:
 
         info = self._probe_with_retries()
 
-        if not download.filename:
-            download.filename = sanitize_filename(
+        # What the origin calls the file beats what its address looked like.
+        #
+        # Only a name of ours is replaced: `auto_named` is set exactly when
+        # nobody chose one, so a filename typed into the Add dialog or handed
+        # over by the browser survives whatever the server says. And only
+        # before any bytes are on disk — renaming a resuming download would
+        # orphan the part file it is continuing into.
+        if not download.filename or (download.auto_named and not resuming):
+            better = sanitize_filename(
                 info.filename or filename_from_url(info.url, info.mime)
             )
+            previous = download.filename
+            if better and better != previous:
+                if previous:
+                    self._log(
+                        f"The server calls this “{better}”, not "
+                        f"“{previous}” — renamed."
+                    )
+                download.filename = better
+                download.category = config.category_for(better, info.mime)
+                # Derived from the old name, so recomputed from the new one by
+                # `_prepare`; a stale temp path would write the bytes into a
+                # part file named after a guess.
+                download.temp_path = ""
+                # The folder too — but only if it is the one *this* application
+                # chose for the old name. A folder the user picked in the Add
+                # dialog is a decision, and a better filename is no reason to
+                # move their download somewhere else.
+                if previous and download.dest_dir:
+                    chosen_for_guess = str(config.destination_for(
+                        self.settings, previous, download.mime))
+                    if download.dest_dir == chosen_for_guess:
+                        download.dest_dir = ""
+            # Given by the origin now, or typed: either way it is no longer
+            # a guess and nothing further may overrule it.
+            download.auto_named = False
         download.mime = download.mime or info.mime
         download.server_digest = info.digest or download.server_digest
 
@@ -3481,6 +3513,14 @@ class DownloadEngine:
             status=DownloadStatus.QUEUED,
         )
         if not download.filename:
+            # A name is needed *now* — the row appears the moment this returns,
+            # and a row with no name in it is not a download manager. But the
+            # URL is only a guess, and on plenty of sites a bad one: GitHub's
+            # release assets redirect to a path ending in a UUID, so the guess
+            # was `74709710-bf21-4cd4-926a-526ff561a1bb` with no extension
+            # while the response was saying `filename=ixd_1.0.3_amd64.deb` the
+            # whole time. Flagged as a guess so the probe can overrule it.
+            download.auto_named = True
             download.filename = filename_from_url(url) if url else sanitize_filename(
                 media_title or "download"
             )

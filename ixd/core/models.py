@@ -460,6 +460,10 @@ class Download:
     url: str = ""
     original_url: str = ""
     filename: str = ""
+    #: True while ``filename`` is only a guess taken from the URL. A guess is
+    #: replaced the moment the origin publishes a real one — a name the user
+    #: typed, or one the server sent in `Content-Disposition`, never is.
+    auto_named: bool = False
     dest_dir: str = ""
     temp_path: str = ""
     total_size: int = 0                 # 0 = unknown
