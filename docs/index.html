@@ -206,11 +206,29 @@ header.stuck{border-bottom-color:var(--line); background:rgba(10,12,18,.86)}
 }
 header.stuck .progress{opacity:1}
 .nav{display:flex;align-items:center;gap:28px;height:66px}
-.brand{display:flex;align-items:center;gap:11px;font-weight:650;letter-spacing:-.01em;text-decoration:none}
-.brand img{width:28px;height:28px;border-radius:7px;transition:transform .4s var(--ease)}
-.brand:hover img{transform:rotate(-8deg) scale(1.08)}
-.brand span{font-size:16.5px;line-height:1.2}
-.brand small{color:var(--faint);font-weight:500;font-size:12px;letter-spacing:.02em}
+/* The lockup. The mark is drawn rather than loaded: at this size a raster
+   icon is soft on an ordinary screen and heavy on a dense one, and drawing it
+   lets it carry the same gradient as everything else on the page.
+   The wordmark and the name are set on one leading, with the name in small
+   caps — two lines of ordinary text at two sizes read as a paragraph that has
+   gone wrong, which is what made this corner look untidy. */
+.brand{display:inline-flex;align-items:center;gap:12px;text-decoration:none}
+.mark{
+  width:34px;height:34px;border-radius:10px;flex:none;display:grid;place-items:center;
+  background:linear-gradient(145deg,#6d9bff 10%,var(--accent-2) 95%);
+  box-shadow:0 6px 18px -7px rgba(91,140,255,.9), inset 0 1px 0 rgba(255,255,255,.35);
+  transition:transform .45s var(--ease), box-shadow .45s;
+}
+.brand:hover .mark{transform:translateY(-1px) rotate(-7deg);box-shadow:0 11px 24px -7px rgba(91,140,255,1)}
+.mark svg{width:17px;height:17px;display:block;color:#fff}
+.word{display:flex;flex-direction:column;gap:5px;line-height:1}
+.word b{font-size:17px;font-weight:700;letter-spacing:.01em}
+.word small{
+  font-size:9.5px;font-weight:600;letter-spacing:.155em;text-transform:uppercase;
+  color:var(--faint);transition:color .25s;
+}
+.brand:hover .word small{color:var(--dim)}
+@media(max-width:420px){.word small{display:none}}
 .nav-links{display:flex;gap:26px;margin-left:auto;align-items:center}
 .nav-links a{color:var(--dim);text-decoration:none;font-size:14.5px;font-weight:500;transition:color .18s;position:relative}
 .nav-links a:not(.btn)::after{
@@ -594,8 +612,10 @@ footer{border-top:1px solid var(--line);padding:48px 0;margin-top:40px}
 <header id="top">
   <div class="wrap nav">
     <a class="brand" href="#top">
-      <img src="icon.png" alt="" width="28" height="28">
-      <span>IXD<br><small>Internet Xtreme Downloader</small></span>
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v10"/><path d="M7.6 9.8 12 14.2l4.4-4.4"/><path d="M4.8 19.4h14.4"/></svg>
+      </span>
+      <span class="word"><b>IXD</b><small>Internet Xtreme Downloader</small></span>
     </a>
     <nav class="nav-links" aria-label="Primary">
       <a href="#screens">How it works</a>
