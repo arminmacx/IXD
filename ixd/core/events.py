@@ -29,6 +29,13 @@ class EventType:
     CHUNKS_CHANGED = "download.chunks"
     QUEUE_CHANGED = "queue.changed"
     SCHEDULE_FIRED = "schedule.fired"
+    #: Everything has finished and a completion action is counting down. The
+    #: payload carries the action, the seconds left and why it fired, so the
+    #: window can offer to call it off — an action nobody can stop is not one
+    #: to give a machine.
+    COMPLETION_ARMED = "completion.armed"
+    COMPLETION_CANCELLED = "completion.cancelled"
+    COMPLETION_FIRED = "completion.fired"
     PROXY_ROTATED = "proxy.rotated"
     ENGINE_STATS = "engine.stats"
     LOG = "engine.log"

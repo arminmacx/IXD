@@ -40,6 +40,7 @@ from .core.models import (
 )
 from .core.routing import parse_proxy_url
 from .core.scheduler import Scheduler
+from .power import CompletionAction, parse as parse_completion_action, perform
 from .core.muxing import MuxError, combine as combine_tracks
 from .extractors import (
     audio_track_rank,
@@ -521,6 +522,12 @@ class DownloadService:
         self._started = False
         self._mux_lock = threading.Lock()
         self._muxed: set[str] = set()
+        #: The countdown to "shut down when everything is finished", if one is
+        #: running. Guarded, because a completion event arrives on whichever
+        #: worker thread finished the transfer and two finishing at once must
+        #: not start two timers.
+        self._completion_lock = threading.Lock()
+        self._completion_timer: threading.Timer | None = None
         self._extract_lock = threading.Lock()
         self._extracts: dict[tuple, tuple[float, MediaInfo]] = {}
         #: Transfers the browser is reading on this application's behalf.
@@ -591,6 +598,7 @@ class DownloadService:
     # -- combining adaptive pairs --------------------------------------
     def _on_download_completed(self, _event: str, payload: dict[str, Any]) -> None:
         """Join a video/audio pair as soon as its second half arrives."""
+        self._consider_completion_action()
         download = self.db.get_download(int(payload.get("download_id") or 0))
         if download is None or not download.mux_group:
             return
@@ -599,8 +607,118 @@ class DownloadService:
             name="ixd-mux", daemon=True,
         ).start()
 
+    # -- what to do when there is nothing left to do -------------------
+    #
+    # The point of leaving a queue running overnight is not having to come
+    # back to it, which is why IDM's scheduler ends with "shut down when
+    # done". This is that, and it fires **once**: after it runs the setting
+    # resets itself, because "shut this machine down tonight" is a decision
+    # about tonight and not a standing policy.
+    #
+    # It is armed rather than performed. A countdown the window can offer to
+    # call off is the difference between a convenience and a machine that
+    # turns itself off while somebody is using it — the timer runs even with
+    # no window at all, which is what `--background` needs.
+    def unfinished_work(self) -> list[Download]:
+        """Downloads that still have somewhere to go.
+
+        Paused counts. A paused download is work the user has parked, not work
+        that is over, and powering the machine down under it would lose the
+        session it was going to resume in.
+        """
+        pending = []
+        for download in self.db.list_downloads():
+            if download.status.is_active:
+                pending.append(download)
+            elif download.status in (DownloadStatus.QUEUED,
+                                     DownloadStatus.SCHEDULED,
+                                     DownloadStatus.PAUSED,
+                                     DownloadStatus.NEEDS_LINK):
+                pending.append(download)
+        return pending
+
+    def _consider_completion_action(self) -> None:
+        action = parse_completion_action(self.settings.get("completion_action"))
+        if action is CompletionAction.NOTHING:
+            return
+        with self._completion_lock:
+            if self._completion_timer is not None:
+                return                      # already counting down
+        remaining = self.unfinished_work()
+        if remaining:
+            return
+        self.arm_completion_action(action)
+
+    def arm_completion_action(self, action: CompletionAction | None = None,
+                              seconds: int | None = None) -> int:
+        """Start the countdown. Returns the seconds the caller has to stop it."""
+        action = action or parse_completion_action(
+            self.settings.get("completion_action"))
+        if action is CompletionAction.NOTHING:
+            return 0
+        grace = max(0, int(
+            self.settings.get_int("completion_grace_seconds", 60)
+            if seconds is None else seconds))
+
+        with self._completion_lock:
+            if self._completion_timer is not None:
+                return grace
+            timer = threading.Timer(grace, self._fire_completion_action, (action,))
+            timer.name = "ixd-completion"
+            timer.daemon = True
+            self._completion_timer = timer
+            timer.start()
+
+        message = (f"Everything has finished. {action.label} in {grace}s "
+                   f"unless it is called off.")
+        self.db.log_event(message, level="warning")
+        self.events.emit(EventType.COMPLETION_ARMED, action=action.value,
+                         seconds=grace, message=message)
+        return grace
+
+    def cancel_completion_action(self, reason: str = "cancelled") -> bool:
+        """Call off a countdown. Also clears the setting, so it stays off."""
+        with self._completion_lock:
+            timer = self._completion_timer
+            self._completion_timer = None
+        if timer is None:
+            return False
+        timer.cancel()
+        self.settings.set("completion_action", CompletionAction.NOTHING.value)
+        self.db.log_event(f"Completion action {reason}; nothing will happen.")
+        self.events.emit(EventType.COMPLETION_CANCELLED, reason=reason)
+        return True
+
+    def _fire_completion_action(self, action: CompletionAction) -> None:
+        with self._completion_lock:
+            self._completion_timer = None
+        # Once. A machine that shuts down after every download is unusable,
+        # and the setting is cleared *before* the attempt so that a failure
+        # cannot leave it armed for the next download either.
+        self.settings.set("completion_action", CompletionAction.NOTHING.value)
+
+        if action is CompletionAction.EXIT:
+            self.db.log_event("All downloads finished — quitting.")
+            self.events.emit(EventType.COMPLETION_FIRED, action=action.value,
+                             ok=True, detail="quitting")
+            return
+
+        ok, detail = perform(action)
+        # Recorded whichever way it went, and written before the machine has
+        # the chance to go: on a system that powers off, this line is the only
+        # evidence left behind.
+        self.db.log_event(
+            f"{action.label} after finishing: {'ok' if ok else 'failed'} — {detail}",
+            level="info" if ok else "warning",
+        )
+        self.events.emit(EventType.COMPLETION_FIRED, action=action.value,
+                         ok=ok, detail=detail)
+
     def _on_download_failed(self, _event: str, payload: dict[str, Any]) -> None:
         """Discard the surviving half of a pair whose partner failed."""
+        # A failure can be the last thing that was running, and "when
+        # everything has finished" has to include "and the last one did not".
+        self._consider_completion_action()
         download = self.db.get_download(int(payload.get("download_id") or 0))
         if download is None or not download.mux_group:
             return
@@ -705,6 +823,13 @@ class DownloadService:
         if not self._started:
             return
         self._started = False
+        # A countdown does not survive the service it belongs to. Cancelled
+        # quietly — the setting is left alone, because stopping the
+        # application is not the user changing their mind about tonight.
+        with self._completion_lock:
+            timer, self._completion_timer = self._completion_timer, None
+        if timer is not None:
+            timer.cancel()
         self.scheduler.stop()
         self.engine.shutdown(wait=True, timeout=8.0)
         self.db.log_event("Service stopped")

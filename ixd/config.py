@@ -131,6 +131,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # The registration is refreshed on every start, so a rebuilt or moved
     # application does not leave the session launching a path that is gone.
     "launch_at_startup": False,
+    # What to do once every download has finished: nothing, exit, sleep,
+    # hibernate or shutdown. It fires **once** and resets itself — a machine
+    # that shuts down every time a download ends is a machine nobody can use,
+    # and "shut down when this queue is done" is a decision about tonight
+    # rather than a standing policy.
+    "completion_action": "nothing",
+    # How long the countdown runs before it happens. Long enough to be back at
+    # the desk and stop it; the window offers a Cancel for the whole period.
+    "completion_grace_seconds": 60,
     "start_minimized": False,
     "minimize_to_tray": True,
     # Off by default: `QSystemTrayIcon.isVisible()` only says that `show()` was

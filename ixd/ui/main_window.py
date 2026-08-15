@@ -161,6 +161,15 @@ class MainWindow(QMainWindow):
         self.action_log.triggered.connect(self.open_log)
         toolbar.addAction(self.action_log)
 
+        # The scheduler earns its own button. Everything it does — which
+        # downloads a queue runs, the order they run in, when it starts and
+        # stops, and what happens to the machine afterwards — was reachable
+        # only by opening Settings and finding the right tab, which is not
+        # where anybody looks for "start this at 2am".
+        self.action_schedule = QAction("🕑  Scheduler", self)
+        self.action_schedule.triggered.connect(self.open_scheduler)
+        toolbar.addAction(self.action_schedule)
+
         self.action_settings = QAction("⚙  Settings", self)
         self.action_settings.triggered.connect(self.open_settings)
         toolbar.addAction(self.action_settings)
@@ -508,10 +517,94 @@ class MainWindow(QMainWindow):
 
         LogDialog(self.service, self).exec()
 
-    def open_settings(self) -> None:
+    def open_settings(self, tab: str = "") -> None:
         dialog = SettingsDialog(self.service, self)
+        if tab:
+            dialog.show_tab(tab)
         dialog.exec()
         self.refresh()
+
+    def open_scheduler(self) -> None:
+        """Settings, opened where the schedules are."""
+        self.open_settings("Scheduler")
+
+    # ------------------------------------------------------------------
+    # "shut down when it is done", and the way out of it
+    #
+    # The countdown is the whole safety of the feature. The service arms it
+    # and would carry it out with no window at all — which is what
+    # `--background` needs — so this window's only job is to say what is about
+    # to happen and offer to stop it. It is modeless on purpose: a modal box
+    # would block the rest of the application while the machine is still
+    # perfectly usable.
+    # ------------------------------------------------------------------
+    def _show_completion_countdown(self, payload: dict) -> None:
+        from ..power import parse as parse_completion_action
+
+        action = parse_completion_action(payload.get("action"))
+        remaining = int(payload.get("seconds") or 0)
+        self._close_completion_countdown()
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Everything has finished")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Cancel).setText("Don't")
+        box.setModal(False)
+
+        def render(seconds: int) -> None:
+            box.setText(f"<b>{action.label} in {seconds}s</b>")
+            box.setInformativeText(
+                "Every download has finished and nothing is paused or waiting."
+                + ("\n\nThis affects the whole machine."
+                   if action.touches_the_machine else "")
+            )
+
+        render(remaining)
+        self._completion_box = box
+        self._completion_left = remaining
+
+        def tick() -> None:
+            self._completion_left -= 1
+            if self._completion_left <= 0:
+                self._close_completion_countdown()
+                return
+            render(self._completion_left)
+
+        timer = QTimer(self)
+        timer.setInterval(1000)
+        timer.timeout.connect(tick)
+        timer.start()
+        self._completion_ticker = timer
+
+        # Dismissing the warning any way at all calls the action off. The two
+        # failure modes are not equal: a machine that does not power down
+        # because a box was closed costs nothing, and one that powers down
+        # while somebody was reading the warning costs whatever they were
+        # doing. The guard is against re-entry — the box is torn down by the
+        # cancelled *and* the fired event, and neither is a user decision.
+        def dismissed(_result: int = 0) -> None:
+            if getattr(self, "_completion_box", None) is not box:
+                return
+            self.service.cancel_completion_action("stopped from the window")
+            self._close_completion_countdown()
+
+        box.buttonClicked.connect(lambda _button: dismissed())
+        box.finished.connect(dismissed)
+        box.show()
+        box.raise_()
+        self.tray.notify("Everything has finished", f"{action.label} in {remaining}s.")
+
+    def _close_completion_countdown(self) -> None:
+        ticker = getattr(self, "_completion_ticker", None)
+        if ticker is not None:
+            ticker.stop()
+            self._completion_ticker = None
+        box = getattr(self, "_completion_box", None)
+        if box is not None:
+            self._completion_box = None
+            box.hide()
+            box.deleteLater()
 
     def open_download_window(self, download_id: int) -> None:
         """The download's own live window, one per download and not modal."""
@@ -724,6 +817,19 @@ class MainWindow(QMainWindow):
                 "Source link expired",
                 "A download is waiting for a refreshed link.",
             )
+        elif event_type == EventType.COMPLETION_ARMED:
+            self._show_completion_countdown(payload)
+        elif event_type == EventType.COMPLETION_CANCELLED:
+            self._close_completion_countdown()
+        elif event_type == EventType.COMPLETION_FIRED:
+            self._close_completion_countdown()
+            if payload.get("action") == "exit":
+                self.quit_application()
+            elif not payload.get("ok", False):
+                self.tray.notify(
+                    "Nothing happened",
+                    "The machine refused the completion action; the Log says why.",
+                )
         elif event_type == EventType.DOWNLOAD_FAILED:
             self.status_left.setText(f"Error: {payload.get('error', '')}")
         elif event_type == EventType.PROXY_ROTATED:

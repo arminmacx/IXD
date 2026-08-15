@@ -1893,6 +1893,211 @@ def test_no_credential_shaped_literal_ships() -> None:
           if hasattr(youtube, "CLIENTS") else True)
 
 
+def test_the_queue_finishes_with_a_choice() -> None:
+    """"Shut down when it is done" — armed, countable, and stoppable.
+
+    The point of leaving a queue running overnight is not having to come back
+    to it, so the scheduler has to end somewhere. Nothing here powers a machine
+    off: what is tested is the decision — that it waits for the work to be
+    finished, that it can be called off, that it fires exactly once, and that
+    the commands it would run are the ones the platform actually publishes.
+    """
+    print("\n[the queue finishes with a choice]")
+    from ixd import power
+    from ixd.core.events import EventType
+    from ixd.core.models import Download, DownloadStatus
+    from ixd.service import DownloadService
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-completion-"))
+    config.DATA_DIR = root
+    config.TEMP_DIR = root / "incomplete"
+    config.LOG_DIR = root / "logs"
+    config.IPC_PORT_FILE = root / "ipc.json"
+    config.ensure_dirs()
+
+    settings = Settings(root / "settings.json")
+    settings.set("download_dir", str(root / "out"))
+    service = DownloadService(settings, Database(root / "state.sqlite3"))
+
+    # -- what each platform is asked ------------------------------------
+    check("an unknown action reads as doing nothing",
+          power.parse("explode") is power.CompletionAction.NOTHING)
+    check("and a stored one survives the round trip",
+          power.parse("shutdown") is power.CompletionAction.SHUTDOWN)
+    check("quitting is the application's own job, not a command",
+          power.candidates(power.CompletionAction.EXIT) == [])
+    for platform, expected in (("linux", "systemctl"), ("win32", "shutdown"),
+                               ("darwin", "osascript")):
+        first = power.candidates(power.CompletionAction.SHUTDOWN, platform)
+        check(f"{platform} is asked through {expected}",
+              bool(first) and first[0][0] == expected, str(first))
+    check("every machine action has somewhere to go on every platform",
+          all(power.candidates(action, platform)
+              for platform in ("linux", "win32", "darwin")
+              for action in (power.CompletionAction.SHUTDOWN,
+                             power.CompletionAction.SLEEP,
+                             power.CompletionAction.HIBERNATE)))
+
+    # -- and when it fires ----------------------------------------------
+    fired: list[dict] = []
+    service.events.subscribe(lambda _e, p: fired.append(p),
+                             EventType.COMPLETION_ARMED)
+
+    parked = Download(url="https://example.invalid/one", filename="one.bin",
+                      status=DownloadStatus.PAUSED)
+    parked.id = service.db.insert_download(parked)
+    done = Download(url="https://example.invalid/two", filename="two.bin",
+                    status=DownloadStatus.COMPLETED)
+    done.id = service.db.insert_download(done)
+
+    settings.set("completion_action", "shutdown")
+    settings.set("completion_grace_seconds", 600)
+
+    # A paused download is work parked, not work over.
+    service._consider_completion_action()
+    check("a paused download holds the machine open",
+          not fired and service._completion_timer is None,
+          str([d.filename for d in service.unfinished_work()]))
+
+    service.db.update_download_fields(parked.id, status=DownloadStatus.COMPLETED)
+    service._consider_completion_action()
+    check("with nothing left, the countdown starts", len(fired) == 1, str(fired))
+    check("and it says what it is about to do and when",
+          bool(fired) and fired[0].get("action") == "shutdown"
+          and fired[0].get("seconds") == 600, str(fired))
+
+    # Two downloads finishing at once must not start two timers.
+    before = service._completion_timer
+    service._consider_completion_action()
+    check("a second finish does not start a second countdown",
+          len(fired) == 1 and service._completion_timer is before, str(fired))
+
+    check("it can be called off", service.cancel_completion_action("test"))
+    check("and calling it off clears the setting, so it stays off",
+          settings.get("completion_action") == "nothing"
+          and service._completion_timer is None,
+          str(settings.get("completion_action")))
+    check("cancelling twice is not an error",
+          service.cancel_completion_action("test") is False)
+
+    # Armed again, it must not re-arm itself after firing.
+    settings.set("completion_action", "exit")
+    settings.set("completion_grace_seconds", 0)
+    service.arm_completion_action()
+    deadline = time.time() + 5
+    while time.time() < deadline and service._completion_timer is not None:
+        time.sleep(0.05)
+    check("firing resets the setting, so it happens once and not nightly",
+          settings.get("completion_action") == "nothing",
+          str(settings.get("completion_action")))
+
+    service.shutdown()
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_scheduler_is_reachable_and_stoppable() -> None:
+    """The scheduler has a button, and its ending has a way out.
+
+    Everything the scheduler does — which downloads a queue runs, the order
+    they run in, when it starts and when it stops — was reachable only by
+    opening Settings and finding the sixth tab. "Start this at 2am" is not
+    something anybody looks for under Settings, so it has a button of its own
+    now, and this asserts the button exists and lands on the right page.
+
+    The other half is the countdown. A completion action that cannot be called
+    off is not one to give a machine, so the dialog is opened and its way out
+    is clicked, in a real Qt application.
+    """
+    print("\n[the scheduler is reachable, and its ending is stoppable]")
+    script = '''
+import sys, tempfile
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-sched-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.service import DownloadService
+from ixd.ui.main_window import MainWindow
+from ixd.ui.widgets.settings_dialog import SettingsDialog
+from PySide6.QtGui import QAction
+
+app = QApplication([])
+settings = Settings(root / "settings.json")
+settings.set("download_dir", str(root / "out"))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = MainWindow(service)
+
+labels = [a.text() for a in window.findChildren(QAction)]
+print("TOOLBAR_SCHEDULER", any("Scheduler" in text for text in labels))
+
+dialog = SettingsDialog(service, window)
+print("LANDS_ON", dialog.show_tab("Scheduler"),
+      dialog._tabs.tabText(dialog._tabs.currentIndex()))
+print("CHOICES", "|".join(dialog.completion_combo.itemText(i)
+                          for i in range(dialog.completion_combo.count())))
+print("GRACE", dialog.completion_grace.value())
+
+# Armed through the service, exactly as a finished queue arms it, so the
+# event wiring between the two is what is being tested and not a method call.
+import time
+settings.set("completion_action", "shutdown")
+settings.set("completion_grace_seconds", 42)
+service.arm_completion_action()
+for _ in range(40):
+    app.processEvents()
+    if window._completion_box is not None:
+        break
+    time.sleep(0.05)
+box = window._completion_box
+print("ARRIVED", box is not None)
+print("SAYS", box.text().replace("<b>", "").replace("</b>", ""))
+print("WARNS_ABOUT_THE_MACHINE", "whole machine" in box.informativeText())
+print("WAY_OUT", box.buttons()[0].text())
+box.buttons()[0].click()
+app.processEvents()
+print("STOPPED", window._completion_box is None)
+print("SETTING_AFTER", settings.get("completion_action"))
+service.shutdown()
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-sched-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the scheduler is reachable", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-600:] or "") + (process.stderr[-400:] or "")
+    check("the scheduler has a button of its own",
+          "TOOLBAR_SCHEDULER True" in output, detail)
+    check("and it lands on the scheduler page",
+          "LANDS_ON True Scheduler" in output, detail)
+    check("the ending offers every choice, including leaving the machine alone",
+          "CHOICES Do nothing|Quit IXD|Sleep|Hibernate|Shut down" in output, detail)
+    check("with a countdown before it happens", "GRACE 60" in output, detail)
+    check("finishing raises the countdown in the window itself",
+          "ARRIVED True" in output, detail)
+    check("the countdown says what and when",
+          "SAYS Shut down in 42s" in output, detail)
+    check("and that it is the machine, not just the application",
+          "WARNS_ABOUT_THE_MACHINE True" in output, detail)
+    check("there is a way out", "WAY_OUT Don" in output, detail)
+    check("taking it stops the countdown", "STOPPED True" in output, detail)
+    check("and switches the action off, so it does not happen next time either",
+          "SETTING_AFTER nothing" in output, detail)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -3988,7 +4193,9 @@ def main() -> int:
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
-                 test_the_panel_offers_the_preferred_container):
+                 test_the_panel_offers_the_preferred_container,
+                 test_the_queue_finishes_with_a_choice,
+                 test_the_scheduler_is_reachable_and_stoppable):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

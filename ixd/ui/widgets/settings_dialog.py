@@ -42,6 +42,7 @@ from ...core.models import (
 )
 from ...core.net import list_interfaces
 from ...core.scheduler import WEEKDAY_NAMES, format_days
+from ...power import CompletionAction
 from ..workers import Worker
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -533,6 +534,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(_scrollable(self._build_schedules()), "Scheduler")
         tabs.addTab(_scrollable(self._build_integration()), "Integration")
         layout.addWidget(tabs, 1)
+        self._tabs = tabs
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -541,6 +543,14 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def show_tab(self, title: str) -> bool:
+        """Open on a named tab. Returns whether there was one."""
+        for index in range(self._tabs.count()):
+            if self._tabs.tabText(index).lower() == title.lower():
+                self._tabs.setCurrentIndex(index)
+                return True
+        return False
 
     # -- General --------------------------------------------------------
     def _build_general(self) -> QWidget:
@@ -1152,13 +1162,47 @@ class SettingsDialog(QDialog):
         for label, handler in (
             ("Add", self._add_schedule), ("Edit", self._edit_schedule),
             ("Remove", self._remove_schedule),
-            ("Downloads…", self._schedule_downloads),
+            ("Downloads and order…", self._schedule_downloads),
         ):
             button = QPushButton(label)
             button.clicked.connect(handler)
             actions.addWidget(button)
         actions.addStretch(1)
         layout.addLayout(actions)
+
+        # -- when it is all over -------------------------------------------
+        # The reason to leave a queue running overnight is not having to come
+        # back to it, so the end of the schedule belongs on the same page as
+        # the start of it.
+        done = QGroupBox("When every download has finished")
+        done_form = QFormLayout(done)
+        done_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.completion_combo = QComboBox()
+        for action in CompletionAction:
+            self.completion_combo.addItem(action.label, action.value)
+        current = self.completion_combo.findData(
+            self.settings.get("completion_action", "nothing"))
+        self.completion_combo.setCurrentIndex(max(0, current))
+        done_form.addRow("Then", self.completion_combo)
+
+        self.completion_grace = QSpinBox()
+        self.completion_grace.setRange(0, 3600)
+        self.completion_grace.setSuffix(" s")
+        self.completion_grace.setValue(
+            self.settings.get_int("completion_grace_seconds", 60))
+        done_form.addRow("Countdown first", self.completion_grace)
+
+        note = QLabel(
+            "It happens once and then switches itself back to “Do nothing”. "
+            "A paused or unfinished download counts as work outstanding, so "
+            "nothing will happen while one is waiting — and the countdown can "
+            "be called off from the window while it runs."
+        )
+        note.setObjectName("Subtle")
+        note.setWordWrap(True)
+        done_form.addRow(note)
+        layout.addWidget(done)
 
         self._reload_schedules()
         return page
@@ -1555,6 +1599,8 @@ class SettingsDialog(QDialog):
             "prefer_progressive": self.prefer_progressive.isChecked(),
             "youtube_po_token": self.po_token.text().strip(),
             "youtube_visitor_data": self.visitor_data.text().strip(),
+            "completion_action": self.completion_combo.currentData(),
+            "completion_grace_seconds": self.completion_grace.value(),
         })
 
         self.service.engine.proxies.refresh()
