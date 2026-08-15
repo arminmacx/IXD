@@ -249,6 +249,125 @@ TOPMOST = """(() => {
 })()"""
 
 
+BOXES = """(() => {
+  const host = document.getElementById("ixd-overlay-root");
+  const root = host && host.shadowRoot;
+  const panel = root && root.querySelector(".panel");
+  if (!panel) return null;
+  const menu = root.querySelector(".menu");
+  const close = root.querySelector(".close");
+  const box = panel.getBoundingClientRect();
+  const x = close ? close.getBoundingClientRect() : null;
+  return {
+    visible: panel.classList.contains("visible"),
+    left: Math.round(box.left), top: Math.round(box.top),
+    cx: Math.round(box.left + box.width / 2),
+    cy: Math.round(box.top + box.height / 2),
+    closeX: x ? Math.round(x.left + x.width / 2) : -1,
+    closeY: x ? Math.round(x.top + x.height / 2) : -1,
+    closeHittable: Boolean(close && x && x.width > 0
+                           && getComputedStyle(close).pointerEvents === "auto"),
+    menuOpen: Boolean(menu && menu.classList.contains("visible")),
+    width: Math.round(innerWidth), height: Math.round(innerHeight),
+    ads: window.__adClicks || 0,
+  };
+})()"""
+
+
+def test_the_panel_moves_and_closes() -> None:
+    """Dragged with a real pointer, and closed with the ×.
+
+    Reported by the user: the panel sits on every page that plays anything,
+    over whatever it happens to be over, and there is no way to move it or to
+    put it away. Both are pointer work — pointer capture, a movement threshold,
+    a click that must *not* open the menu when it is the end of a drag — and
+    none of that is visible to a synthesised MouseEvent. So the pointer here is
+    the browser's own, dispatched through the input pipeline.
+    """
+    print("\n[the panel, dragged and closed]")
+    started = ensure_application()
+    server, origin = serve()
+    try:
+        with Browser(REPO / "extension") as browser:
+            session = browser.open(f"{origin}/watch")
+            state = browser.wait_for(
+                session, f"({BOXES}) && ({BOXES}).visible ? ({BOXES}) : null",
+                seconds=20,
+            )
+            check("the panel is on the player to begin with",
+                  bool(state and state["visible"]),
+                  json.dumps(state) if state else "never appeared")
+            if not state:
+                return
+            check("the × is a real target, not a decoration",
+                  state["closeHittable"], json.dumps(state))
+
+            def mouse(kind: str, x: int, y: int, clicks: int = 0) -> None:
+                browser.call("Input.dispatchMouseEvent", {
+                    "type": kind, "x": x, "y": y, "button": "left",
+                    "buttons": 1, "clickCount": clicks,
+                }, session)
+
+            # Somewhere else entirely, in a few steps, the way a hand does it.
+            target_x = round(state["width"] * 0.32)
+            target_y = round(state["height"] * 0.62)
+            dx = target_x - state["cx"]
+            dy = target_y - state["cy"]
+            mouse("mousePressed", state["cx"], state["cy"], 1)
+            for step in (0.25, 0.5, 0.75, 1.0):
+                mouse("mouseMoved",
+                      round(state["cx"] + dx * step),
+                      round(state["cy"] + dy * step))
+            mouse("mouseReleased", target_x, target_y, 1)
+
+            moved = browser.evaluate(session, BOXES)
+            check("the panel goes where it is dragged",
+                  abs(moved["left"] - (state["left"] + dx)) <= 2
+                  and abs(moved["top"] - (state["top"] + dy)) <= 2,
+                  f"{state['left']},{state['top']} + {dx},{dy}"
+                  f" -> {moved['left']},{moved['top']}")
+            check("and the drag never reached the page",
+                  moved["ads"] == state["ads"],
+                  f"{state['ads']} -> {moved['ads']}")
+            check("putting it down does not open the menu",
+                  not moved["menuOpen"], json.dumps(moved))
+
+            # The panel re-places itself against the player four times a
+            # second. Staying where it was put is the whole assertion.
+            time.sleep(1.2)
+            settled = browser.evaluate(session, BOXES)
+            check("and it stays there while the page keeps being scanned",
+                  abs(settled["left"] - moved["left"]) <= 2
+                  and abs(settled["top"] - moved["top"]) <= 2,
+                  f"{moved['left']},{moved['top']}"
+                  f" -> {settled['left']},{settled['top']}")
+
+            mouse("mousePressed", settled["closeX"], settled["closeY"], 1)
+            mouse("mouseReleased", settled["closeX"], settled["closeY"], 1)
+            closed = browser.wait_for(
+                session, f"(() => {{ const s = {BOXES};"
+                         f" return s && !s.visible ? s : null; }})()",
+                seconds=5,
+            )
+            check("the × takes the panel off the page",
+                  bool(closed and not closed["visible"]),
+                  json.dumps(closed) if closed else "still visible")
+
+            # Longer than the backstop scan, which is what would put it back.
+            time.sleep(3.0)
+            after = browser.evaluate(session, BOXES)
+            check("and the scan does not put it back",
+                  not after["visible"], json.dumps(after))
+    finally:
+        server.shutdown()
+        if started is not None:
+            started.terminate()
+            try:
+                started.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                started.kill()
+
+
 def test_the_panel_appears_and_opens() -> None:
     """The whole point: a real page, a real click, a real menu."""
     print("\n[the panel, in a browser, on a page]")
@@ -343,6 +462,7 @@ def main() -> int:
         return 0
     try:
         test_the_panel_appears_and_opens()
+        test_the_panel_moves_and_closes()
     except Exception as exc:  # noqa: BLE001
         import traceback
         traceback.print_exc()

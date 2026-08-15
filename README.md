@@ -9,12 +9,14 @@ Multi-threaded transfers, native media extraction, browser integration,
 proxy routing and scheduling — with no `yt-dlp`, no `ffmpeg`, no `curl`,
 and no runtime dependency beyond Qt.
 
+**[ixd — the website](https://arminmacx.github.io/IXD/)** · [Download](https://github.com/arminmacx/IXD/releases/latest) · [Report a problem](../../issues/new/choose)
+
 [![Tests](https://github.com/arminmacx/IXD/actions/workflows/tests.yml/badge.svg)](https://github.com/arminmacx/IXD/actions/workflows/tests.yml)
 [![Release](https://github.com/arminmacx/IXD/actions/workflows/release.yml/badge.svg)](https://github.com/arminmacx/IXD/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.11-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-555)](#installation)
-[![Tests](https://img.shields.io/badge/tests-1147%20offline%20assertions-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1163%20offline%20assertions-3fb950)](#testing)
 [![Dependencies](https://img.shields.io/badge/external%20binaries-none-3fb950)](#no-external-binaries)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 

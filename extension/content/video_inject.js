@@ -3,7 +3,9 @@
  *
  * Behaves the way IDM's does: hovering a video fades in a small panel over the
  * top of it; clicking the panel drops down the list of available qualities;
- * picking one queues that exact stream and the panel confirms.
+ * picking one queues that exact stream and the panel confirms. It can be
+ * dragged anywhere in the window, and the × in its corner puts it away until
+ * the page is reloaded.
  *
  * Two decisions matter for reliability:
  *
@@ -50,6 +52,11 @@
     "pointerdown", "pointerup", "mousedown", "mouseup", "click", "auxclick",
     "dblclick", "contextmenu", "touchstart", "touchend", "wheel",
   ];
+  //: `pointermove` is deliberately **not** guarded. It fires continuously, and
+  //: a listener that walks `composedPath()` on every one of them is the shape
+  //: of the defect that froze YouTube's main thread. The drag registers its own
+  //: `pointermove` listener while a drag is actually happening, and takes it
+  //: off again when the pointer comes up.
 
   function insideOverlay(event) {
     const host = document.getElementById("ixd-overlay-root");
@@ -63,18 +70,33 @@
   //: **delivered from here**, by walking the composed path for the handler the
   //: element was given. One listener, registered before the page exists, is
   //: both the guard and the dispatcher.
+  //: An element inside the overlay says which events it wants by carrying them
+  //: on `__ixdEvents`; the panel's click keeps its own `__ixdHandler` because
+  //: that is the one the tests reach for. The **first** node on the path that
+  //: names the event gets it and the walk stops, so the close button's
+  //: `pointerdown` is what keeps a click on the × from starting a drag of the
+  //: panel behind it.
+  function deliver(event) {
+    const path = event.composedPath ? event.composedPath() : [];
+    for (const node of path) {
+      if (!node) continue;
+      const bound = node.__ixdEvents && node.__ixdEvents[event.type];
+      if (typeof bound === "function") {
+        bound(event);
+        return;
+      }
+      if (event.type === "click" && typeof node.__ixdHandler === "function") {
+        node.__ixdHandler(event);
+        return;
+      }
+    }
+  }
+
   for (const kind of GUARDED_EVENTS) {
     window.addEventListener(kind, (event) => {
       if (!insideOverlay(event)) return;
       event.stopImmediatePropagation();
-      if (event.type !== "click") return;
-      const path = event.composedPath ? event.composedPath() : [];
-      for (const node of path) {
-        if (node && typeof node.__ixdHandler === "function") {
-          node.__ixdHandler(event);
-          return;
-        }
-      }
+      deliver(event);
     }, true);
   }
 
@@ -88,6 +110,7 @@
   let panel = null;
   let menu = null;
   let label = null;
+  let closeButton = null;
 
   let currentVideo = null;
   let hideTimer = null;
@@ -119,7 +142,7 @@
   const IS_TOP = window.top === window;
 
   function chipWanted() {
-    return IS_TOP && capturedCount > 0 && !playerInTab;
+    return IS_TOP && capturedCount > 0 && !playerInTab && !dismissed;
   }
 
   //: Whether any frame of this tab has a player of its own.
@@ -280,8 +303,45 @@
       pointer-events: none;
       user-select: none;
       white-space: nowrap;
+      /* The panel is dragged with the same pointer a touch screen scrolls
+         with, and without this the browser claims the gesture first. */
+      touch-action: none;
     }
     .panel.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    /* Under the pointer the panel is being moved, not read: the fade that
+       makes it appear would otherwise animate every step of the drag. */
+    .panel.dragging { transition: none; cursor: grabbing; opacity: 1; }
+
+    /* The way out. Small, in the corner, and hanging over the edge so it is
+       never mistaken for part of the label. */
+    .close {
+      position: absolute;
+      top: -8px;
+      right: -8px;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,.20);
+      background: rgba(30,34,46,.98);
+      color: #c6cee2;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      opacity: 0;
+      transform: scale(.75);
+      transition: opacity .14s ease, transform .14s ease,
+                  background .14s ease, color .14s ease;
+      pointer-events: none;
+      font-family: inherit;
+    }
+    /* Visible whenever the panel is, rather than only on hover: a control
+       nobody can see is one nobody knows they have. */
+    .panel.visible .close { opacity: .8; transform: none; pointer-events: auto; }
+    .panel.visible:hover .close { opacity: 1; }
+    .panel.dragging .close { opacity: 0; pointer-events: none; }
+    .close:hover { background: #e0464c; color: #fff; border-color: rgba(255,255,255,.34); }
+    .close svg { width: 8px; height: 8px; display: block; }
     .panel:hover { background: rgba(24,27,37,.94); border-color: rgba(91,140,255,.55); }
     /* Present on the player from the moment there is one, and out of the way
        until it is wanted. Waiting for a hover is what left a playing page with
@@ -393,6 +453,11 @@
     '<svg class="caret" viewBox="0 0 12 12" aria-hidden="true">' +
     '<path fill="currentColor" d="M2 4l4 4 4-4z"/></svg>';
 
+  const CLOSE_ICON =
+    '<svg viewBox="0 0 12 12" aria-hidden="true">' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.9" ' +
+    'stroke-linecap="round" d="M3.3 3.3l5.4 5.4M8.7 3.3l-5.4 5.4"/></svg>';
+
   function ensureOverlay() {
     if (shadow) return;
 
@@ -432,13 +497,28 @@
       panel.classList.remove("resting");
     });
     panel.addEventListener("mouseleave", () => {
+      // A pointer that has outrun the panel it is dragging has not left it.
+      if (drag) return;
       pointerHeld = false;
       if (currentVideo && !menuOpen) panel.classList.add("resting");
       else scheduleHide();
     });
+    closeButton = document.createElement("button");
+    closeButton.className = "close";
+    closeButton.title = "Hide this panel until the page is reloaded";
+    if (closeButton.setAttribute) {
+      closeButton.setAttribute("aria-label", "Hide the download panel");
+    }
+    closeButton.innerHTML = CLOSE_ICON;
+    // Named before the panel is reached on the way up, so pressing the × can
+    // never be the start of a drag of the panel underneath it.
+    closeButton.__ixdEvents = { click: onCloseClick, pointerdown: swallow };
+    panel.appendChild(closeButton);
+
     shadow.appendChild(panel);
 
     panel.__ixdHandler = onPanelClick;
+    panel.__ixdEvents = { pointerdown: onPanelPointerDown, pointerup: onDragUp };
 
     menu = document.createElement("div");
     menu.className = "menu";
@@ -625,14 +705,23 @@
     keepOnTop();
 
     const width = panel.offsetWidth || 128;
+    const height = panel.offsetHeight || 30;
     let left;
     let top;
 
-    if (currentVideo) {
-      if (!currentVideo.isConnected || !isEligible(currentVideo)) {
-        hideNow();
-        return;
-      }
+    // Whatever the panel is anchored to, a player that has gone takes the
+    // panel with it — including one the user has dragged elsewhere.
+    if (currentVideo && (!currentVideo.isConnected || !isEligible(currentVideo))) {
+      hideNow();
+      return;
+    }
+
+    if (pinned) {
+      // Placed by hand, and only ever corrected for a viewport it no longer
+      // fits in — resizing the window must not lose the panel off an edge.
+      left = clamp(pinned.left, MARGIN, window.innerWidth - width - MARGIN);
+      top = clamp(pinned.top, MARGIN, window.innerHeight - height - MARGIN);
+    } else if (currentVideo) {
       const rect = currentVideo.getBoundingClientRect();
       left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width - 12));
       top = Math.max(8, rect.top + 12);
@@ -649,14 +738,175 @@
 
     if (menuOpen) {
       const menuWidth = menu.offsetWidth || 260;
+      const menuHeight = menu.offsetHeight || 220;
       const menuLeft = Math.max(8, Math.min(window.innerWidth - menuWidth - 8,
         left + width - menuWidth));
+      // Below the panel, unless the panel has been dragged low enough that
+      // below is off the screen — then above it, which is where a menu near
+      // the bottom of a window belongs anyway.
+      let menuTop = top + height + 7;
+      if (menuTop + menuHeight > window.innerHeight - 8) {
+        menuTop = top - menuHeight - 7;
+        if (menuTop < 8) menuTop = Math.max(8, window.innerHeight - menuHeight - 8);
+      }
       menu.style.left = `${menuLeft}px`;
-      menu.style.top = `${Math.min(window.innerHeight - 60, top + panel.offsetHeight + 7)}px`;
+      menu.style.top = `${menuTop}px`;
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // moving it, and putting it away
+  //
+  // Reported by the user: on every page holding a video the panel is simply
+  // *there*, and there is no way to move it off what it is covering or to say
+  // "not on this page". IDM's has both — a corner × and a panel you can pick
+  // up — so this has both.
+  //
+  // Neither is remembered. A closed panel comes back on the next page or the
+  // next reload, and a dragged one goes back to the player, because a control
+  // that silently never returns is a support request nobody can answer. The
+  // permanent switch already exists and is in the extension's options.
+  // -------------------------------------------------------------------
+  const MARGIN = 10;
+  //: Pointer travel that separates a click on the panel from a drag of it.
+  const DRAG_SLOP = 4;
+  //: How long a swallowed click stays swallowed. A drag that ends outside the
+  //: window may produce no click at all, and the flag must not then eat the
+  //: user's next real one.
+  const SWALLOW_MS = 400;
+
+  //: Where the panel was dragged to, in viewport coordinates, or null while it
+  //: still follows the player.
+  let pinned = null;
+  //: Set by the ×. Nothing may put the panel back on screen until the page
+  //: navigates or is reloaded.
+  let dismissed = false;
+  let drag = null;
+  let swallowClick = false;
+  let swallowTimer = null;
+  let saidWhyHidden = false;
+
+  function clamp(value, low, high) {
+    if (high < low) return low;
+    return Math.max(low, Math.min(high, value));
+  }
+
+  function swallow(event) {
+    if (event && event.preventDefault) event.preventDefault();
+  }
+
+  function onPanelPointerDown(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    if (event.preventDefault) event.preventDefault();
+    const rect = panel.getBoundingClientRect();
+    drag = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      moved: false,
+    };
+    // Captured, so a pointer that outruns the panel keeps reporting to it.
+    // Both routes are then registered anyway: with capture every move and up
+    // is retargeted to the panel and arrives through the overlay guard, and
+    // without it — an old browser, a refused capture — they arrive on window.
+    try {
+      if (panel.setPointerCapture) panel.setPointerCapture(event.pointerId);
+    } catch (error) {
+      /* uncaptured: the window listeners below are the route */
+    }
+    window.addEventListener("pointermove", onDragMove, true);
+    window.addEventListener("pointerup", onDragUp, true);
+    window.addEventListener("pointercancel", endDrag, true);
+  }
+
+  function onDragMove(event) {
+    if (!drag) return;
+    if (event.pointerId !== undefined && drag.id !== undefined
+        && event.pointerId !== drag.id) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (!drag.moved) {
+      if (Math.abs(dx) + Math.abs(dy) < DRAG_SLOP) return;
+      drag.moved = true;
+      panel.classList.add("dragging");
+      panel.classList.remove("resting");
+    }
+    // The page must not see the drag: a site with its own pointer handling
+    // would start selecting text or running a gesture of its own underneath.
+    if (event.preventDefault) event.preventDefault();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    pinned = { left: drag.left + dx, top: drag.top + dy };
+    position();
+  }
+
+  function onDragUp(event) {
+    if (!drag) return;
+    if (drag.moved) {
+      // The click that follows the release is the drag's own, and it would
+      // otherwise open the menu the moment the panel was put down.
+      swallowClick = true;
+      if (swallowTimer) clearTimeout(swallowTimer);
+      swallowTimer = setTimeout(() => { swallowClick = false; }, SWALLOW_MS);
+    }
+    endDrag(event);
+  }
+
+  function endDrag(event) {
+    if (!drag) return;
+    try {
+      if (panel.releasePointerCapture && drag.id !== undefined) {
+        panel.releasePointerCapture(drag.id);
+      }
+    } catch (error) {
+      /* the capture was already lost with the pointer */
+    }
+    drag = null;
+    if (panel) panel.classList.remove("dragging");
+    window.removeEventListener("pointermove", onDragMove, true);
+    window.removeEventListener("pointerup", onDragUp, true);
+    window.removeEventListener("pointercancel", endDrag, true);
+    // `mouseleave` is suppressed for the length of a drag — a pointer that has
+    // outrun the panel has not left it — so the flag it maintains has to be
+    // put right here. Left stuck true it stops every rescan for good, and the
+    // panel would never find the next video on the page.
+    pointerHeld = false;
+    if (panel && event && typeof event.clientX === "number") {
+      const rect = panel.getBoundingClientRect();
+      pointerHeld = event.clientX >= rect.left && event.clientX <= rect.right
+        && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    }
+    position();
+  }
+
+  function onCloseClick(event) {
+    if (event && event.preventDefault) event.preventDefault();
+    if (event && event.stopPropagation) event.stopPropagation();
+    dismiss();
+  }
+
+  function dismiss() {
+    dismissed = true;
+    endDrag();
+    cancelHide();
+    closeMenu();
+    currentVideo = null;
+    pointerHeld = false;
+    if (repositionTimer) {
+      clearInterval(repositionTimer);
+      repositionTimer = null;
+    }
+    if (panel) panel.classList.remove("visible", "page", "resting", "busy");
+    if (!saidWhyHidden) {
+      saidWhyHidden = true;
+      toast("Panel hidden until you reload. To switch it off everywhere, "
+            + "use the extension's options.");
     }
   }
 
   function show(video, resting) {
+    if (dismissed) return;
     ensureOverlay();
     cancelHide();
     if (currentVideo !== video) {
@@ -682,7 +932,9 @@
   //: it after navigation, a lazy one builds it on play, and a custom element
   //: builds it inside a shadow root.
   function refreshPlayer() {
-    if (menuOpen || pointerHeld) return;
+    // A drag is not a moment to go looking for a different player: a touch
+    // drag fires no `mouseenter`, so `pointerHeld` alone does not cover it.
+    if (menuOpen || pointerHeld || drag) return;
     // The player already on screen is nearly always still the right one, and
     // checking that is two property reads. Searching again on every mutation
     // is what made a busy page unusable.
@@ -705,6 +957,7 @@
   //: fetching rather than by the markup, which is the only thing that works on
   //: a player exposing no <video> element.
   function showPageChip() {
+    if (dismissed) return;
     if (!chipWanted()) {
       if (panel) panel.classList.remove("visible", "page");
       return;
@@ -791,6 +1044,16 @@
   async function onPanelClick(event) {
     event.preventDefault();
     event.stopPropagation();
+
+    // Putting the panel down is not a request to open it.
+    if (swallowClick) {
+      swallowClick = false;
+      if (swallowTimer) {
+        clearTimeout(swallowTimer);
+        swallowTimer = null;
+      }
+      return;
+    }
 
     if (menuOpen) {
       closeMenu();
@@ -1343,7 +1606,12 @@
         sendResponse({
           enabled,
           count: capturedCount,
-          attached: currentVideo ? "over a video"
+          // "closed by the user" is reported separately from "nothing to
+          // show", because from the toolbar the two look the same and the
+          // answer to them is not.
+          attached: dismissed ? "closed by the user"
+            : currentVideo ? (pinned ? "over a video, moved by the user"
+                                     : "over a video")
             : (panel && panel.classList.contains("visible")
               ? "page chip" : "nothing to show"),
         });
@@ -1516,6 +1784,10 @@
         prefetched = "";
         capturedCount = 0;
         reportedPlayer = null;
+        // A new page, in a single-page app as much as anywhere else: a panel
+        // closed on the last one is not closed on this one.
+        dismissed = false;
+        saidWhyHidden = false;
         hideNow();
         refreshCaptured();
         scanSoon();
@@ -1526,6 +1798,8 @@
       prefetched = "";
       capturedCount = 0;
       reportedPlayer = null;
+      dismissed = false;
+      saidWhyHidden = false;
       hideNow();
       refreshCaptured();
     });

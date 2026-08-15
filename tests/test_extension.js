@@ -1450,10 +1450,127 @@ pendingAsync.push((async () => {
   check("and so does a click on the panel", spawned === 4);
 })());
 
-panelChecks(async () => {
+// ---------------------------------------------------------------------------
+// The panel, moved and closed.
+//
+// The report: on every page with a video the panel is simply there, over
+// whatever it is over, with no way to move it and no way to say "not here".
+// Both are pointer work, so both are driven here the way a pointer would drive
+// them — through the same window guard the page's clicks go through, because
+// that guard is what an event inside the overlay actually reaches first.
+// ---------------------------------------------------------------------------
+function moveAndCloseChecks(done) {
+  console.log("\n[the panel, moved and closed]");
+  const { html, sent, sandbox } = bootPanel();
+  setTimeout(() => {
+    const host = html.children.find((c) => c.id === "ixd-overlay-root");
+    const shadow = host && host.shadowRoot;
+    const panel = shadow && shadow.children.find((c) => c.classList.contains("panel"));
+    if (!panel) {
+      check("there is a panel to move", false);
+      return done();
+    }
+    const closeButton = panel.children.find((c) => c.classList.contains("close"));
+    check("the panel carries a close button", Boolean(closeButton));
+    if (!closeButton) return done();
+    check("and it is inside the panel, not loose in the shadow root",
+      !shadow.children.includes(closeButton));
+    check("the × answers a click of its own",
+      Boolean(closeButton.__ixdEvents)
+      && typeof closeButton.__ixdEvents.click === "function");
+    // Named for pointerdown as well: the walk up the path stops at the first
+    // node that wants the event, so pressing the × cannot start a drag of the
+    // panel behind it.
+    check("and it takes the pointerdown too, so pressing it is not a drag",
+      typeof closeButton.__ixdEvents.pointerdown === "function");
+
+    const fire = (kind, extra, path) => {
+      const event = Object.assign({
+        type: kind,
+        preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {},
+        composedPath: () => path || [panel, host],
+      }, extra || {});
+      (sandbox.window.listeners[kind] || [])
+        .filter((entry) => entry.capture)
+        .forEach((entry) => entry.fn(event));
+      return event;
+    };
+
+    // The panel only positions itself while it is on screen.
+    panel.classList.add("visible");
+
+    fire("pointerdown", { button: 0, pointerId: 7, clientX: 100, clientY: 100 });
+    // pointermove is not guarded — it fires far too often for a listener that
+    // walks the composed path — so the drag registers its own while it lasts.
+    const moving = (sandbox.window.listeners.pointermove || [])
+      .filter((entry) => entry.capture);
+    check("pressing the panel starts listening for the pointer",
+      moving.length === 1, String(moving.length));
+
+    const move = (x, y) => moving.forEach((entry) => entry.fn({
+      type: "pointermove", pointerId: 7, clientX: x, clientY: y,
+      preventDefault() {}, stopImmediatePropagation() {},
+    }));
+
+    // Two pixels is a click with a shaky hand, not a drag.
+    move(101, 101);
+    check("a pointer that barely moves does not move the panel",
+      !panel.classList.contains("dragging"), panel.className);
+
+    // The stub's panel starts at left 0, top 40.
+    move(160, 150);
+    check("a real drag moves it, and it says so",
+      panel.classList.contains("dragging"), panel.className);
+    check("the panel follows the pointer exactly",
+      panel.style.left === "60px" && panel.style.top === "90px",
+      `${panel.style.left},${panel.style.top}`);
+
+    // Off the left edge of a 1280×800 window: it stops at the margin rather
+    // than leaving the screen with the download button on it.
+    move(-400, 150);
+    check("and it is kept inside the window",
+      panel.style.left === "10px", panel.style.left);
+
+    move(160, 150);
+    fire("pointerup", { pointerId: 7, clientX: 160, clientY: 150 });
+    check("letting go ends the drag", !panel.classList.contains("dragging"),
+      panel.className);
+    check("and the panel stays where it was put",
+      panel.style.left === "60px" && panel.style.top === "90px",
+      `${panel.style.left},${panel.style.top}`);
+
+    const afterDrag = sent.length;
+    fire("click", { clientX: 160, clientY: 150 });
+    setTimeout(() => {
+      check("the click that ends a drag does not open the menu",
+        sent.length === afterDrag,
+        sent.slice(afterDrag).map((m) => m.type).join(","));
+
+      // …and the next one does, because a swallowed click is swallowed once.
+      fire("click", { clientX: 160, clientY: 150 });
+      setTimeout(() => {
+        check("a click after that opens it as usual", sent.length > afterDrag,
+          sent.slice(afterDrag).map((m) => m.type).join(","));
+
+        const afterMenu = sent.length;
+        fire("click", { clientX: 200, clientY: 90 }, [closeButton, panel, host]);
+        setTimeout(() => {
+          check("clicking the × takes the panel away",
+            !panel.classList.contains("visible"), panel.className);
+          check("and it asks the application for nothing on the way out",
+            sent.length === afterMenu,
+            sent.slice(afterMenu).map((m) => m.type).join(","));
+          done();
+        }, 20);
+      }, 20);
+    }, 20);
+  }, 30);
+}
+
+panelChecks(() => moveAndCloseChecks(async () => {
   await Promise.all(pendingAsync);
   console.log(`\n${"=".repeat(60)}`);
   console.log(`${passed} passed, ${failed} failed`);
   console.log("=".repeat(60));
   process.exit(failed ? 1 : 0);
-});
+}));
