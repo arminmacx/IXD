@@ -232,6 +232,48 @@ function loadGenericEntry() {
   return new Function(classifier + entry + "; return { genericEntry };")();
 }
 
+// ---------------------------------------------------------------------------
+// Every map it clears is a map it has.
+//
+// `badgeDueAt.delete(tabId)` shipped in two handlers with nothing anywhere
+// declaring it — a leftover from a badge-timing map that was removed. Chrome
+// reported `ReferenceError: badgeDueAt is not defined` on every tab close and
+// every navigation, and everything after the throw in those handlers never
+// ran: the players map, the frame origins, the badge redraw. A worker that
+// throws in a listener looks exactly like one that is merely quiet.
+// ---------------------------------------------------------------------------
+console.log("\n[every map it clears is a map it has]");
+{
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "background.js"), "utf8");
+  const declared = new Set();
+  for (const match of source.matchAll(
+      /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g)) {
+    declared.add(match[1]);
+  }
+  // Function parameters and named functions count as declared too.
+  for (const match of source.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)) {
+    declared.add(match[1]);
+  }
+  const builtins = new Set([
+    "chrome", "console", "Map", "Set", "JSON", "Object", "Array", "Promise",
+    "URL", "URLSearchParams", "Date", "Math", "String", "Number", "navigator",
+    "self", "globalThis", "performance", "crypto", "TextEncoder", "TextDecoder",
+    "atob", "btoa", "fetch", "Uint8Array", "ArrayBuffer", "Error", "RegExp",
+  ]);
+  const used = new Set();
+  for (const match of source.matchAll(
+      /(?<![.\w$])([A-Za-z_$][\w$]*)\.(?:delete|set|get|has|add|clear)\(/g)) {
+    used.add(match[1]);
+  }
+  const missing = [...used].filter(
+    (name) => !declared.has(name) && !builtins.has(name)
+      && !/^(?:this|entry|item|message|details|response|result|payload|state|target|node|event|request|window|document|headers|params|options|settings|streams|info|tab|data|map|store|cache|list|found|seen|known|value|record|row|panel|menu|shadow|host|element|box|worker|port|task|group|parsed|url|args|self)$/.test(name),
+  );
+  check("every map the worker clears is one it declares",
+    missing.length === 0, missing.join(", "));
+}
+
 console.log("\n[a sound effect is not a download]");
 {
   const { genericEntry } = loadGenericEntry();

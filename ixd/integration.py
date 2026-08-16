@@ -127,7 +127,19 @@ def extension_dir() -> Path:
 
 
 def _mirror_tree(source: Path, target: Path) -> None:
-    """Copy ``source`` into ``target``, refreshing only what changed."""
+    """Copy ``source`` into ``target``, refreshing whatever differs.
+
+    Compared by **content**, not by timestamp. The old test — same size and a
+    destination no older than the source — is wrong in exactly the case that
+    matters: the copy in the data directory is written *after* the files it
+    came from, so its timestamps are newer for ever, and an update that
+    changes a file without changing its length was skipped indefinitely.
+    Reported as an extension that stayed on the previous version through
+    repeated launches and reloads.
+
+    The whole extension is a few hundred kilobytes of text, so reading both
+    sides is cheaper than being wrong about it.
+    """
     target.mkdir(parents=True, exist_ok=True)
     for item in source.rglob("*"):
         relative = item.relative_to(source)
@@ -135,12 +147,31 @@ def _mirror_tree(source: Path, target: Path) -> None:
         if item.is_dir():
             destination.mkdir(parents=True, exist_ok=True)
             continue
-        if (destination.exists()
-                and destination.stat().st_size == item.stat().st_size
-                and destination.stat().st_mtime >= item.stat().st_mtime):
-            continue
+        wanted = item.read_bytes()
+        if destination.exists():
+            try:
+                if destination.read_bytes() == wanted:
+                    continue
+            except OSError:
+                pass
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(item.read_bytes())
+        destination.write_bytes(wanted)
+
+    # Anything the new version dropped goes too: a file left behind from an
+    # older extension is one the browser still loads.
+    if not source.is_dir():
+        return
+    for item in sorted(target.rglob("*"), reverse=True):
+        relative = item.relative_to(target)
+        if (source / relative).exists():
+            continue
+        try:
+            if item.is_dir():
+                item.rmdir()
+            else:
+                item.unlink()
+        except OSError:
+            pass
 
 
 def chrome_manifest_path() -> Path:

@@ -1200,7 +1200,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   endpointByTab.delete(tabId);
   requestByTab.delete(tabId);
   forgetTab(tabId);
-  badgeDueAt.delete(tabId);
   announcedByTab.delete(tabId);
   playersByTab.delete(tabId);
 });
@@ -1232,7 +1231,6 @@ chrome.tabs.onUpdated.addListener((tabId, changes, tab) => {
     endpointByTab.delete(tabId);
     requestByTab.delete(tabId);
     forgetTab(tabId);
-    badgeDueAt.delete(tabId);
     playersByTab.delete(tabId);
     noteFrameOrigin(tabId, changes.url);
     showDetectedCount(tabId, true);

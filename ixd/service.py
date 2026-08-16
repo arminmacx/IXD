@@ -1109,11 +1109,20 @@ class DownloadService:
         only downloads where it changes anything, and it is skipped entirely
         for every address that already names its file.
         """
-        if payload.get("filename"):
-            return sanitize_filename(str(payload["filename"]))
+        supplied = sanitize_filename(str(payload.get("filename") or "")) \
+            if payload.get("filename") else ""
+        # A name the browser supplies is not always a name somebody chose. On
+        # Windows the download item already carries one by the time it is
+        # intercepted, and for an address ending in an identifier that name is
+        # the identifier — which is how `8b192290-d315-431a-8ff6-b03be0d2c027`
+        # reached a notification while the window showed the real filename.
+        # So it is trusted when it looks like a filename and treated as
+        # another guess when it does not.
+        if supplied and self._looks_like_a_filename(supplied):
+            return supplied
         url = str(payload.get("url") or "")
         if not url or self._looks_like_a_filename(filename_from_url(url)):
-            return ""
+            return supplied
         try:
             client = self.client(
                 cookies=payload.get("cookies", "") or "",
@@ -1123,13 +1132,13 @@ class DownloadService:
             )
             info = client.probe(url)
         except Exception:               # noqa: BLE001 - the guess still stands
-            return ""
+            return supplied
         named = getattr(info, "filename", "") or ""
         if named:
             return sanitize_filename(named)
         mime = getattr(info, "mime", "") or ""
         derived = filename_from_url(getattr(info, "url", url) or url, mime)
-        return derived if self._looks_like_a_filename(derived) else ""
+        return derived if self._looks_like_a_filename(derived) else supplied
 
     def add_from_browser(self, payload: dict[str, Any]) -> Download:
         """Accept an intercepted download from the browser extension."""

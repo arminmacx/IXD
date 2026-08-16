@@ -2642,6 +2642,16 @@ def test_what_the_browser_announces_is_the_real_name() -> None:
         check("and a name that was asked for is never replaced",
               chosen.filename == "mine.deb", chosen.filename)
 
+        # But a name the *browser* supplies is only a name when it looks like
+        # one. On Windows the download item already carries the identifier
+        # from the address, which is how it reached a notification.
+        browser_guess = service.add_from_browser(
+            {"url": opaque, "filename": "8b192290-d315-431a-8ff6-b03be0d2c027",
+             "start": False})
+        check("a supplied name that is not filename-shaped is a guess too",
+              browser_guess.filename == "ixd_1.0.8_amd64.deb",
+              browser_guess.filename)
+
         # An origin that will not answer leaves the old behaviour in place
         # rather than failing the add.
         unreachable = service.add_from_browser(
@@ -2714,6 +2724,64 @@ service.shutdown()
           "SAID 1" in output, detail)
     check("and it is remembered, so the next launch does not say it either",
           "REMEMBERED True" in output, detail)
+
+
+def test_the_extension_folder_follows_the_application() -> None:
+    """Reported: the extension stayed on the old version through many launches.
+
+    The folder the browser loads is a *copy*, in the data directory. It was
+    refreshed only inside `ensure_registered`, which is a no-op once the
+    messaging manifests already point at the current launcher — the normal
+    case — so a new version of the application shipped a new extension that
+    the copy never received. And the copy is written after the files it comes
+    from, so the "destination is not older" test that guarded each file was
+    permanently true: a changed file of unchanged length was skipped for ever.
+
+    Content decides now, and it runs on every start.
+    """
+    print("\n[the extension folder follows the application]")
+    from ixd import integration
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-mirror-"))
+    source = root / "shipped"
+    target = root / "materialised"
+    (source / "content").mkdir(parents=True)
+    (source / "manifest.json").write_text('{"version": "1.0.8"}', encoding="utf-8")
+    (source / "content" / "panel.js").write_text("// one\n", encoding="utf-8")
+    (source / "gone.js").write_text("// removed later\n", encoding="utf-8")
+
+    integration._mirror_tree(source, target)
+    check("the copy is made", (target / "manifest.json").exists())
+
+    # A new version, written *earlier* than the copy that already exists —
+    # which is what an unpacked build looks like — and one file that changes
+    # without changing length.
+    (source / "manifest.json").write_text('{"version": "1.0.9"}', encoding="utf-8")
+    (source / "content" / "panel.js").write_text("// two\n", encoding="utf-8")
+    (source / "gone.js").unlink()
+    old = time.time() - 86400
+    for path in source.rglob("*"):
+        if path.is_file():
+            os.utime(path, (old, old))
+
+    integration._mirror_tree(source, target)
+    check("a file that changed without changing length is copied",
+          (target / "content" / "panel.js").read_text() == "// two\n",
+          (target / "content" / "panel.js").read_text())
+    check("even though the copy is newer than what it came from",
+          (target / "manifest.json").read_text() == '{"version": "1.0.9"}',
+          (target / "manifest.json").read_text())
+    check("and a file the new version dropped is removed from the copy",
+          not (target / "gone.js").exists())
+
+    # Nothing is rewritten when nothing changed: this runs at every launch.
+    stamps = {p: p.stat().st_mtime_ns for p in target.rglob("*") if p.is_file()}
+    time.sleep(0.01)
+    integration._mirror_tree(source, target)
+    unchanged = all(p.stat().st_mtime_ns == stamp for p, stamp in stamps.items())
+    check("an unchanged extension is not rewritten on every start", unchanged)
+
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def test_it_can_start_with_the_session() -> None:
@@ -4819,7 +4887,8 @@ def main() -> int:
                  test_it_can_tell_you_there_is_a_newer_version,
                  test_the_updater_says_what_it_is_doing,
                  test_what_the_browser_announces_is_the_real_name,
-                 test_the_still_running_notice_is_said_once):
+                 test_the_still_running_notice_is_said_once,
+                 test_the_extension_folder_follows_the_application):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

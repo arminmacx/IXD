@@ -156,6 +156,20 @@ def _register_browser_integration(service) -> None:
     try:
         from . import integration
 
+        # Written out on **every** start, not only when a registration turns
+        # out to be stale. `ensure_registered` is a no-op once the manifests
+        # point at the current launcher — which is the normal case — and the
+        # extension was only ever materialised inside that no-op. So a new
+        # version of the application shipped a new extension that the folder
+        # the browser loads never received: reported as an extension stuck on
+        # the previous version through repeated launches and reloads.
+        try:
+            folder = integration.extension_dir()
+            service.db.log_event(f"Browser extension written to {folder}")
+        except Exception as exc:  # noqa: BLE001 - registration still matters
+            service.db.log_event(f"Could not write the extension out: {exc}",
+                                 level="warning")
+
         result = integration.ensure_registered()
     except Exception as exc:  # noqa: BLE001 - never block start-up on this
         service.db.log_event(f"Browser integration check failed: {exc}", level="warning")
