@@ -297,7 +297,7 @@ def relaunch_into(staged: Path, target: Path, launcher: str = "") -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def apply(target: Path, wait_for: int = 0, timeout: float = 60.0,
+def apply(target: Path, wait_for: int = 0, timeout: float = 180.0,
           relaunch: bool = True) -> tuple[bool, str]:
     """Replace ``target`` with the folder this process is running from.
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -218,13 +218,25 @@ class UpdateDialog(QDialog):
             self.check_button.setEnabled(True)
             QMessageBox.warning(self, "Update", detail)
             return
-        QMessageBox.information(
-            self, "Update",
-            f"Version {detail} is ready and will replace this one now. "
-            "The application restarts by itself.\n\nRemember to reload the "
-            "extension in your browser afterwards.",
+
+        # No box to dismiss. The updater is already running and waiting for
+        # this process to end; asking somebody to click OK so that it can is
+        # a step that exists only to be in the way. What is shown instead is
+        # what is about to happen, for the second or two it takes.
+        self.heading.setText(f"Version {detail} is ready")
+        self.subheading.setText(
+            "Closing now — the updater replaces this version and starts it "
+            "again by itself. Remember to reload the extension in your "
+            "browser afterwards."
         )
-        self.accept()
+        self.notes.setVisible(False)
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.install_button.setVisible(False)
+        self.page_button.setVisible(False)
+        self.check_button.setVisible(False)
+
         window = self.parent()
+        QTimer.singleShot(1200, self.accept)
         if window is not None and hasattr(window, "quit_application"):
-            window.quit_application()
+            QTimer.singleShot(1400, window.quit_application)

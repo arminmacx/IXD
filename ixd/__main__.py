@@ -393,12 +393,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.apply_update:
         from pathlib import Path
-        from . import updates
+        from . import updater_ui
 
-        ok, detail = updates.apply(Path(arguments.apply_update),
-                                   wait_for=arguments.wait_for)
-        print(detail)
-        return 0 if ok else 1
+        # Its own process, its own small window, and nothing else loaded: this
+        # is what is still running while the application's files are moved.
+        return updater_ui.run(Path(arguments.apply_update),
+                              wait_for=arguments.wait_for)
 
     if arguments.native_host:
         return _run_native_host()

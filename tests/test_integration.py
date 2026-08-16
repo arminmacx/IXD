@@ -2265,6 +2265,7 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
     print("\n[it can tell you there is a newer version]")
     import tarfile as _tarfile
     import threading as _threading
+    from ixd.core.models import Download, DownloadStatus
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from ixd import updates
     from ixd.core.events import EventType
@@ -2416,6 +2417,32 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
             updates.install_root = original_root
             updates.self_update_kind = original_kind
 
+        # Installing by itself waits for the transfers to finish. An update
+        # that replaces the application mid-download is an update that lost
+        # somebody a file.
+        settings.set("updates_install_automatically", True)
+        busy = Download(url="https://example.invalid/big.bin",
+                        filename="big.bin", status=DownloadStatus.DOWNLOADING)
+        busy.id = service.db.insert_download(busy)
+        service.IDLE_WAIT_SECONDS = 1        # do not sit here for half an hour
+        tried: list[str] = []
+        original_install = service.install_update
+        service.install_update = lambda release, progress=None: (
+            tried.append(release.version) or (False, "not in this test"))
+        service._install_when_idle(release)
+        time.sleep(2.5)
+        check("an automatic install waits while a download is running",
+              not tried, str(tried))
+        service.db.update_download_fields(busy.id, status=DownloadStatus.COMPLETED)
+        service._install_when_idle(release)
+        deadline = time.time() + 5
+        while time.time() < deadline and not tried:
+            time.sleep(0.1)
+        check("and goes ahead once nothing is downloading",
+              tried == ["9.9.9"], str(tried))
+        service.install_update = original_install
+        settings.set("updates_install_automatically", False)
+
         # And the swap itself, done directly rather than through a relaunch.
         target = root / "installed"
         target.mkdir()
@@ -2442,6 +2469,70 @@ def _swap_for_test(staged: Path, target: Path) -> str:
     shutil.copytree(staged, target, symlinks=True, dirs_exist_ok=True)
     shutil.rmtree(aside, ignore_errors=True)
     return str(target)
+
+
+def test_the_updater_says_what_it_is_doing() -> None:
+    """The window the *staged* build shows while it swaps the folders.
+
+    Asked for: the application should close, be replaced and start again
+    without the user doing anything. That works headless, but an application
+    that vanishes for a few seconds and comes back looks like a crash — and on
+    Windows, where the build has no console, there is nowhere for a message to
+    go at all. So the updater has a window, and it carries its own colours:
+    the folder holding the application's theme is the folder being replaced.
+    """
+    print("\n[the updater says what it is doing]")
+    script = '''
+import sys, tempfile
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-updater-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd import updater_ui
+
+app = QApplication([])
+window, parts = updater_ui.build_window()
+window.show()
+app.processEvents()
+print("TITLE", window.windowTitle())
+print("HEADING", parts["heading"].text())
+print("DETAIL", parts["detail"].text())
+print("FOOTER", parts["footer"].text())
+print("INDETERMINATE", parts["bar"].minimum() == 0 and parts["bar"].maximum() == 0)
+print("OWN_COLOURS", "#0d0f16" in window.styleSheet())
+print("NO_CLOSE_BUTTON", not bool(window.windowFlags() & 0x08000000))
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-updater-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=120, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the updater window builds", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-400:] or "") + (process.stderr[-300:] or "")
+    check("the updater's window is the application's own name",
+          "TITLE Internet Xtreme Downloader" in output, detail)
+    check("it says which version it is installing",
+          "HEADING Updating to version" in output, detail)
+    check("and what it is waiting for",
+          "DETAIL Waiting for the application to close" in output, detail)
+    check("it promises to start it again",
+          "start again by itself" in output, detail)
+    check("the bar does not pretend to know how long this takes",
+          "INDETERMINATE True" in output, detail)
+    check("it carries its own colours, not the ones being replaced",
+          "OWN_COLOURS True" in output, detail)
 
 
 def test_it_can_start_with_the_session() -> None:
@@ -4544,7 +4635,8 @@ def main() -> int:
                  test_the_scheduler_is_reachable_and_stoppable,
                  test_cancelling_closes_the_download_window,
                  test_a_schedule_can_actually_be_added,
-                 test_it_can_tell_you_there_is_a_newer_version):
+                 test_it_can_tell_you_there_is_a_newer_version,
+                 test_the_updater_says_what_it_is_doing):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

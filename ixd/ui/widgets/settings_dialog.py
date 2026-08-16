@@ -586,6 +586,20 @@ class SettingsDialog(QDialog):
             self.settings.get_bool("updates_check_automatically", True))
         form.addWidget(self.updates_automatic)
 
+        self.updates_install = QCheckBox(
+            "Install it by itself and restart (this build can)"
+            if kind else
+            "Install it by itself — not possible for a build installed from a "
+            "package")
+        self.updates_install.setChecked(
+            self.settings.get_bool("updates_install_automatically", False))
+        self.updates_install.setEnabled(bool(kind))
+        self.updates_install.setToolTip(
+            "The new version is downloaded in the background. When nothing is "
+            "downloading, the application closes, the updater replaces it and "
+            "starts it again.")
+        form.addWidget(self.updates_install)
+
         last = self.settings.get("updates_last_check") or 0
         when = ("never" if not last else
                 _time.strftime("%Y-%m-%d %H:%M", _time.localtime(float(last))))
@@ -632,7 +646,23 @@ class SettingsDialog(QDialog):
         # tick to have meant something.
         self.settings.set("updates_check_automatically",
                           self.updates_automatic.isChecked())
+        self.settings.set("updates_install_automatically",
+                          self.updates_install.isChecked())
         UpdateDialog(self.service, {}, self).exec()
+        self.updates_install = QCheckBox(
+            "Install it by itself and restart (this build can)"
+            if kind else
+            "Install it by itself — not possible for a build installed from a "
+            "package")
+        self.updates_install.setChecked(
+            self.settings.get_bool("updates_install_automatically", False))
+        self.updates_install.setEnabled(bool(kind))
+        self.updates_install.setToolTip(
+            "The new version is downloaded in the background. When nothing is "
+            "downloading, the application closes, the updater replaces it and "
+            "starts it again.")
+        form.addWidget(self.updates_install)
+
         last = self.settings.get("updates_last_check") or 0
         if last:
             self.updates_when.setText(
@@ -1695,6 +1725,7 @@ class SettingsDialog(QDialog):
             "youtube_po_token": self.po_token.text().strip(),
             "youtube_visitor_data": self.visitor_data.text().strip(),
             "updates_check_automatically": self.updates_automatic.isChecked(),
+            "updates_install_automatically": self.updates_install.isChecked(),
             "completion_action": self.completion_combo.currentData(),
             "completion_grace_seconds": self.completion_grace.value(),
         })

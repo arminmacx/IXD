@@ -142,6 +142,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     #: what stops the window announcing the same release every launch.
     "updates_last_check": 0,
     "updates_last_seen": "",
+    # Whether a new version installs itself once it has been found. Only a
+    # build published as self-updating can, and even then it waits for the
+    # download list to be idle: replacing the application under a running
+    # transfer is how an update becomes the thing that lost somebody's file.
+    # Off by default — an application that replaces itself unasked is one the
+    # user did not agree to, and the checkbox is right beside the check.
+    "updates_install_automatically": False,
     # What to do once every download has finished: nothing, exit, sleep,
     # hibernate or shutdown. It fires **once** and resets itself — a machine
     # that shuts down every time a download ends is a machine nobody can use,

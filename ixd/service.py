@@ -693,7 +693,49 @@ class DownloadService:
             page_url=release.page_url,
             self_update=bool(kind),
         )
+
+        if kind and self.settings.get_bool("updates_install_automatically", False):
+            self._install_when_idle(release)
         return release
+
+    #: How long an automatic install waits for the downloads to finish before
+    #: giving up and leaving it for the next check. Long enough for a transfer
+    #: that is nearly done, short enough that it does not sit there for a day.
+    IDLE_WAIT_SECONDS = 30 * 60
+
+    def _install_when_idle(self, release: updates.Release) -> None:
+        """Install by itself, but never on top of a transfer that is running.
+
+        An update that replaces the application while a download is in flight
+        is an update that loses a file. The rule is simple and it is the whole
+        policy: if anything is still going, this waits, and if it is still
+        going half an hour later the install is left for the next check.
+        """
+        def wait_then_install() -> None:
+            deadline = time.time() + self.IDLE_WAIT_SECONDS
+            while time.time() < deadline:
+                busy = [d for d in self.db.list_downloads() if d.status.is_active]
+                if not busy:
+                    break
+                time.sleep(10.0)
+            else:
+                self.db.log_event(
+                    f"Version {release.version} was not installed automatically: "
+                    "downloads were still running. It will be offered again.",
+                )
+                return
+            started, detail = self.install_update(release)
+            if started:
+                self.events.emit(EventType.COMPLETION_FIRED, action="exit",
+                                 ok=True, detail=f"updating to {detail}")
+            else:
+                self.db.log_event(
+                    f"Automatic update to {release.version} did not start: {detail}",
+                    level="warning")
+
+        thread = threading.Thread(target=wait_then_install,
+                                  name="ixd-auto-update", daemon=True)
+        thread.start()
 
     def install_update(self, release: updates.Release,
                        progress: Any = None) -> tuple[bool, str]:
