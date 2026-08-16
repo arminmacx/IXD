@@ -77,6 +77,35 @@
     }
   }
 
+  //: Encrypted media announces itself, and it is the one honest answer to
+  //: "why did nothing appear on this page".
+  //:
+  //: A player that asks for a content-decryption module is playing media the
+  //: browser will only ever hand to that module: Spotify, and every other
+  //: service that streams under Widevine or PlayReady. Nothing this
+  //: application can capture is of any use, because the bytes on the wire are
+  //: ciphertext and the key is not ours to have. Reported so the Log answers
+  //: the question instead of being empty, and never acted on.
+  try {
+    const askForKeys = navigator.requestMediaKeySystemAccess;
+    if (typeof askForKeys === "function") {
+      navigator.requestMediaKeySystemAccess = function (system, ...rest) {
+        try {
+          window.postMessage({
+            __ixdTee: true, drm: true,
+            url: String(location.href).slice(0, 300),
+            system: String(system || ""),
+          }, "*");
+        } catch (error) {
+          /* a page that will not take a message is one this cannot report from */
+        }
+        return askForKeys.call(this, system, ...rest);
+      };
+    }
+  } catch (error) {
+    /* a page that has frozen navigator keeps its own copy; nothing to report */
+  }
+
   function post(url, buffer) {
     if (posted >= MAX_POSTS) return;
     try {

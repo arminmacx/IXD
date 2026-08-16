@@ -413,6 +413,13 @@ class DownloadQueue:
     speed_limit: int = 0
     network_interface: str = ""
 
+    def __post_init__(self) -> None:
+        # Same trap as `Schedule`: a `str`-based enum comes back from Qt item
+        # data — and from JSON over the control socket — as a plain string,
+        # and only fails at the point something asks for `.value`.
+        if not isinstance(self.mode, QueueMode):
+            self.mode = QueueMode(str(self.mode or "sequential"))
+
     @classmethod
     def from_row(cls, row: Any) -> "DownloadQueue":
         return cls(
@@ -437,6 +444,20 @@ class Schedule:
     action_end: ScheduleAction = ScheduleAction.PAUSE
     speed_limit: int = 0              # bytes/sec enforced while inside the window
     enabled: bool = True
+
+    def __post_init__(self) -> None:
+        # `ScheduleAction` subclasses `str`, so anything that carries it
+        # through a boundary that only knows strings — Qt item data, JSON over
+        # the control socket — hands back a plain `str` that quacks the same
+        # until something asks for `.value`. That is what it did: adding a
+        # schedule from the dialog raised `'str' object has no attribute
+        # 'value'` inside the insert, the exception died in a Qt slot, and the
+        # schedule silently never appeared in the list. Normalised here, once,
+        # for every caller rather than at each of them.
+        if not isinstance(self.action_start, ScheduleAction):
+            self.action_start = ScheduleAction(str(self.action_start or "start"))
+        if not isinstance(self.action_end, ScheduleAction):
+            self.action_end = ScheduleAction(str(self.action_end or "nothing"))
 
     def covers_day(self, weekday: int) -> bool:
         return bool(self.days_mask & (1 << weekday))

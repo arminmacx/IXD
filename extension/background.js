@@ -518,12 +518,65 @@ const capturedByTab = new Map();
 const playersByTab = new Map();
 //: Tabs whose player is using the server-driven protocol.
 const serverDrivenTabs = new Set();
+//: Pages already reported as DRM-protected, so the Log says it once rather
+//: than once per track.
+const drmReported = new Set();
 
 //: What a URL turns out to be, or null when it is not media at all.
 //:
 //: Judged by the path, so a query string full of tokens cannot make an ".mp4"
 //: look like something else — and segments are recognised in order to be
 //: dropped, rather than left to flood the list.
+//: What a media CDN says about a file inside its own query string.
+//:
+//: Instagram and Facebook publish a clip as **two `.mp4` files** — picture
+//: without sound and sound without picture — served from the same CDN with
+//: the same extension, so nothing in the path or the content type tells them
+//: apart. Both were therefore captured as "video", the panel offered two rows
+//: that looked identical, and the pairing that exists to avoid silent films
+//: could never find an audio track to pair with. Reported as "the panel shows
+//: only audio and no video at all".
+//:
+//: They do say which is which: `efg` is base64 JSON carrying a `vencode_tag`
+//: — `…dash_baseline_1_v1` against `…dash_ln_heaac_vbr3_audio` — and an
+//: `xpv_asset_id` that is the same for both halves of one clip. That is the
+//: pairing key, taken from the addresses themselves rather than guessed.
+function cdnAssetHint(parsed) {
+  const efg = parsed.searchParams.get("efg");
+  if (!efg) return null;
+  try {
+    const described = JSON.parse(atob(efg));
+    const tag = String(described.vencode_tag || "");
+    const asset = String(described.xpv_asset_id || described.video_id || "");
+    if (!tag && !asset) return null;
+    return { asset, audio: /audio/i.test(tag) };
+  } catch (error) {
+    return null;      // not the convention we know; judged the usual way
+  }
+}
+
+//: Query parameters that name a *slice* rather than a file.
+//:
+//: A player asks for a long clip in pieces — `bytestart`/`byteend` on the same
+//: signed address, dozens of times — and each piece was recorded as a download
+//: of its own. Two files became thirty rows, and queueing any of them fetched
+//: that slice alone: a few hundred kilobytes of a five-megabyte clip, which is
+//: a file that plays nothing. The signature (`oh`) is identical across every
+//: slice of one address, so it does not cover these and dropping them yields
+//: the whole file.
+const SLICE_PARAMS = ["bytestart", "byteend"];
+
+function withoutSlice(raw) {
+  try {
+    const parsed = new URL(raw);
+    if (!SLICE_PARAMS.some((name) => parsed.searchParams.has(name))) return raw;
+    for (const name of SLICE_PARAMS) parsed.searchParams.delete(name);
+    return parsed.toString();
+  } catch (error) {
+    return raw;
+  }
+}
+
 function classifyMediaUrl(raw, contentType = "") {
   let parsed;
   try {
@@ -543,16 +596,25 @@ function classifyMediaUrl(raw, contentType = "") {
     return { kind: "manifest", name: fileNameOf(parsed) };
   }
   if (FILE_EXTENSIONS.some((ext) => path.endsWith(ext))) {
-    return { kind: path.match(/\.(mp3|m4a|aac|ogg|oga|opus|flac|wav|weba)$/)
-      ? "audio" : "video", name: fileNameOf(parsed) };
+    const hint = cdnAssetHint(parsed);
+    const byName = path.match(/\.(mp3|m4a|aac|ogg|oga|opus|flac|wav|weba)$/);
+    return {
+      kind: (hint && hint.audio) || byName ? "audio" : "video",
+      name: fileNameOf(parsed),
+      asset: hint ? hint.asset : "",
+    };
   }
   if (type.startsWith("video/") || type.startsWith("audio/")) {
     // An extensionless address that the header says is media: either the whole
     // file, or one piece of a stream whose manifest is worth far more. Only the
     // path can tell those apart here.
     if (SEGMENT_PATH.test(path)) return null;
-    return { kind: type.startsWith("audio/") ? "audio" : "video",
-             name: fileNameOf(parsed) };
+    const hint = cdnAssetHint(parsed);
+    return {
+      kind: (hint && hint.audio) || type.startsWith("audio/") ? "audio" : "video",
+      name: fileNameOf(parsed),
+      asset: hint ? hint.asset : "",
+    };
   }
   return null;
 }
@@ -870,7 +932,8 @@ function rememberMedia(details) {
 
   const entry = (isYouTubeMedia(details.url) ? parseMediaUrl(details.url) : null)
     || genericEntry(details.url, headerValue(details, "content-type"),
-                    headerValue(details, "content-length"));
+                    headerValue(details, "content-length"),
+                    headerValue(details, "content-range"));
   if (!entry) return;
   const known = capturedByTab.get(details.tabId);
   if (!known || !known.has(entry.itag)) {
@@ -1031,25 +1094,52 @@ function headerValue(details, name) {
 //: that menu is looking for the film, and four beeps in front of it are worse
 //: than nothing. Nothing anyone wants to download is this small.
 const SMALLEST_WORTH_OFFERING = 512 * 1024;
+//: The same idea for sound, which is smaller by nature. Well above every
+//: interface effect measured (9–20 KB) and well below a real track.
+const SMALLEST_AUDIO_WORTH_OFFERING = 128 * 1024;
 
 //: A capture from any site, in the shape the panel already renders.
-function genericEntry(url, contentType, contentLength) {
+function genericEntry(url, contentType, contentLength, contentRange = "") {
   const what = classifyMediaUrl(url, contentType);
   if (!what) return null;
-  const size = Number(contentLength || 0) || 0;
+  // The file, not the slice of it the player happened to ask for.
+  url = withoutSlice(url);
+  // `Content-Range: bytes 0-823/237996` — the number after the slash is the
+  // file. Judging a clip by the 824 bytes of its first slice threw it away as
+  // a sound effect, which is half of why Instagram's audio and video both went
+  // missing from the panel at different times.
+  const whole = /\/\s*(\d+)\s*$/.exec(String(contentRange || ""));
+  const size = whole ? Number(whole[1]) : (Number(contentLength || 0) || 0);
   // A manifest is bytes of text describing gigabytes of video, so its own size
   // says nothing; everything else is judged by it when it is known.
-  if (what.kind !== "manifest" && size && size < SMALLEST_WORTH_OFFERING) {
+  //
+  // Two exceptions, both measured. A track the CDN itself declares to be half
+  // of a clip is never a stray sound: Instagram's audio half of a 32-second
+  // post is 238 KB, and the flat half-megabyte floor threw it away — which is
+  // why the video it belonged to could never be paired with its sound. And
+  // sound on its own is legitimately smaller than video: the beeps this floor
+  // exists to hide are nine to twenty kilobytes, so audio is judged against a
+  // floor of its own rather than against a film's.
+  const floor = what.asset ? 0
+    : what.kind === "audio" ? SMALLEST_AUDIO_WORTH_OFFERING
+    : SMALLEST_WORTH_OFFERING;
+  if (what.kind !== "manifest" && size && size < floor) {
     return null;
   }
   return {
     url,
     // The identity a capture is kept under. For YouTube that is the itag; here
-    // the URL itself is the only thing that distinguishes one from another.
+    // the URL itself is the only thing that distinguishes one from another —
+    // with the byte range stripped, so a clip fetched in thirty pieces is one
+    // entry and not thirty.
     itag: url,
+    //: Which clip this is half of, when the CDN says so. Both halves of an
+    //: Instagram post carry the same one, which is what lets the video be
+    //: paired with its own sound rather than with whatever else is on the page.
+    asset: what.asset || "",
     kind: what.kind,
     name: what.name,
-    size: Number(contentLength || 0) || 0,
+    size,
     mime: (contentType || "").split(";")[0].trim(),
     at: Date.now(),
   };
@@ -1173,17 +1263,22 @@ const AUDIO_ITAGS = new Set([
 ]);
 
 function isAudioStream(entry) {
+  // What it was classified as when it was captured comes first. A CDN may
+  // serve a sound-only file as `video/mp4` — Instagram does — so the content
+  // type is the weaker witness of the two.
+  if (entry.kind === "audio") return true;
   if (entry.mime && entry.mime.startsWith("audio/")) return true;
   return AUDIO_ITAGS.has(String(entry.itag));
 }
 
 function isVideoOnly(entry) {
+  // Asked first, for the same reason: `video/mp4` on a track that is known to
+  // be sound must not make it a video wanting a companion of its own.
+  if (isAudioStream(entry)) return false;
   // The progressive itags carry both tracks and need no companion; everything
   // else the player fetches is a single-kind adaptive stream.
   if (entry.mime && entry.mime.startsWith("video/")) return true;
-  return !isAudioStream(entry) && !["18", "22", "37", "59"].includes(
-    String(entry.itag),
-  );
+  return !["18", "22", "37", "59"].includes(String(entry.itag));
 }
 
 function bestCapturedAudio(streams, video) {
@@ -1191,8 +1286,16 @@ function bestCapturedAudio(streams, video) {
   // a WebM/Opus track cannot become one file, so a lower-bitrate AAC track is
   // the better companion.
   const wantsMp4 = !(video.mime || "").includes("webm");
-  const audio = streams.filter(isAudioStream);
+  let audio = streams.filter(isAudioStream);
   if (!audio.length) return null;
+  // On a page holding several clips — a feed — the sound of the wrong one is
+  // worse than no sound at all. When the CDN names the clip each half belongs
+  // to, only that clip's own audio is a candidate.
+  if (video.asset) {
+    const sameClip = audio.filter((entry) => entry.asset === video.asset);
+    if (sameClip.length) audio = sameClip;
+    else return null;
+  }
   const matching = audio.filter(
     (entry) => (entry.mime || "").includes("webm") !== wantsMp4,
   );
@@ -2048,6 +2151,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // wrong place to learn a protocol.
         // The page hook saying it exists. Its silence and its absence looked
         // the same from the log, and they are different faults.
+        case "ixdDrm": {
+          // Once per page: a player asks for a key system on every track.
+          const where = message.pageUrl || pageUrl || "";
+          if (!drmReported.has(where)) {
+            drmReported.add(where);
+            report(`${where} plays DRM-protected media (${message.system || "EME"})`
+              + " — its stream is encrypted and cannot be downloaded by anything"
+              + " outside the browser's own decryption module.");
+          }
+          sendResponse({ ok: true, result: { noted: true } });
+          break;
+        }
         case "ixdTeeAlive": {
           report(`the page hook is running on ${pageUrl || message.pageUrl}`
             + (message.detail ? ` — ${message.detail}` : ""));

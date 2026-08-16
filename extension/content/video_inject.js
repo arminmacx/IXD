@@ -1703,6 +1703,13 @@
         const message = event && event.data;
         if (!message || message.__ixdTee !== true) return;
         if (event.source !== window) return;      // only this page's own hook
+        if (message.drm) {
+          send({
+            type: "ixdDrm", system: message.system || "",
+            pageUrl: location.href,
+          }, 20000).catch(() => {});
+          return;
+        }
         if (message.hello) {
           send({
             type: "ixdTeeAlive", detail: message.detail || "",

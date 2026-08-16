@@ -2198,6 +2198,59 @@ service.shutdown()
           "AFTER_REFUSAL 3" in output, detail)
 
 
+def test_a_schedule_can_actually_be_added() -> None:
+    """Reported: "I add a schedule but it is not added to the list".
+
+    It never could be. `ScheduleAction` subclasses `str`, so the enum stored as
+    Qt item data comes back as a plain string — which quacks the same until the
+    insert asks for `.value`, raises `AttributeError` inside a Qt slot, and
+    leaves the dialog closing with nothing saved and nothing said. The queue
+    dialog had the identical bug, and with no schedule in the list "Downloads
+    and order…" could only answer "Select a schedule first".
+    """
+    print("\n[a schedule can actually be added]")
+    from ixd.core.models import DownloadQueue, QueueMode, Schedule, ScheduleAction
+    from ixd.service import DownloadService
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-schedule-"))
+    config.DATA_DIR = root
+    config.TEMP_DIR = root / "incomplete"
+    config.LOG_DIR = root / "logs"
+    config.IPC_PORT_FILE = root / "ipc.json"
+    config.ensure_dirs()
+    settings = Settings(root / "settings.json")
+    settings.set("download_dir", str(root / "out"))
+    service = DownloadService(settings, Database(root / "state.sqlite3"))
+
+    # Exactly what Qt hands back, and what JSON over the control socket does.
+    saved = service.save_schedule(Schedule(
+        name="Overnight", action_start="start", action_end="pause"))
+    check("a schedule whose actions arrive as strings still saves",
+          isinstance(saved, int) and saved > 0, str(saved))
+    stored = [s for s in service.list_schedules() if s.id == saved]
+    check("and it appears in the list", len(stored) == 1,
+          str([s.name for s in service.list_schedules()]))
+    if stored:
+        check("with its actions as actions, not as text",
+              isinstance(stored[0].action_start, ScheduleAction)
+              and stored[0].action_start is ScheduleAction.START
+              and stored[0].action_end is ScheduleAction.PAUSE,
+              f"{stored[0].action_start!r}/{stored[0].action_end!r}")
+    check("the scheduler can describe it without raising",
+          any(row["name"] == "Overnight" for row in service.scheduler.status()),
+          str(service.scheduler.status()))
+
+    queue_id = service.save_queue(DownloadQueue(
+        name="Evening", mode="concurrent", max_concurrent=3))
+    queue = service.db.get_queue(queue_id)
+    check("a queue whose mode arrives as a string saves too",
+          queue is not None and queue.mode is QueueMode.CONCURRENT,
+          repr(queue.mode) if queue else "missing")
+
+    service.shutdown()
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -4296,7 +4349,8 @@ def main() -> int:
                  test_the_panel_offers_the_preferred_container,
                  test_the_queue_finishes_with_a_choice,
                  test_the_scheduler_is_reachable_and_stoppable,
-                 test_cancelling_closes_the_download_window):
+                 test_cancelling_closes_the_download_window,
+                 test_a_schedule_can_actually_be_added):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

@@ -423,8 +423,13 @@ class ScheduleDialog(QDialog):
         self.schedule.days_mask = mask
         self.schedule.start_time = self.start_time.time().toString("HH:mm")
         self.schedule.end_time = self.end_time.time().toString("HH:mm")
-        self.schedule.action_start = self.start_action.currentData()
-        self.schedule.action_end = self.end_action.currentData()
+        # Qt gives back what it stored, and what it stored is a string —
+        # `ScheduleAction` is one. Named explicitly so the type is right
+        # before it leaves the dialog.
+        self.schedule.action_start = ScheduleAction(
+            str(self.start_action.currentData() or ScheduleAction.START.value))
+        self.schedule.action_end = ScheduleAction(
+            str(self.end_action.currentData() or ScheduleAction.NOTHING.value))
         self.schedule.speed_limit = _from_kib(self.limit_spin.value())
         self.schedule.enabled = self.enabled_check.isChecked()
         return self.schedule
@@ -484,7 +489,8 @@ class QueueDialog(QDialog):
 
     def result_queue(self) -> DownloadQueue:
         self.queue.name = self.name_edit.text().strip() or "Queue"
-        self.queue.mode = self.mode_combo.currentData()
+        self.queue.mode = QueueMode(
+            str(self.mode_combo.currentData() or QueueMode.SEQUENTIAL.value))
         self.queue.max_concurrent = self.concurrent_spin.value()
         self.queue.speed_limit = _from_kib(self.limit_spin.value())
         self.queue.network_interface = self.interface_edit.text().strip()

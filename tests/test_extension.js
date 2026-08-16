@@ -213,6 +213,14 @@ function extractionOrder(streams, pageUrl) {
 // correctly classified as audio — so the panel offered four beeps beside the
 // video the person actually came for.
 // ---------------------------------------------------------------------------
+function loadPairing() {
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "background.js"), "utf8");
+  const helpers = text.slice(text.indexOf("const AUDIO_ITAGS"),
+                             text.indexOf("// ------", text.indexOf("function bestCapturedAudio")));
+  return new Function(helpers + "; return { isVideoOnly, bestCapturedAudio };")();
+}
+
 function loadGenericEntry() {
   const text = fs.readFileSync(
     path.join(__dirname, "..", "extension", "background.js"), "utf8");
@@ -244,6 +252,73 @@ console.log("\n[a sound effect is not a download]");
   check("and a file whose size the origin did not state is still offered",
     (genericEntry("https://cdn.example/film.mp4", "video/mp4", "") || {}).kind
       === "video");
+}
+
+// ---------------------------------------------------------------------------
+// Two files, one clip.
+//
+// Reported from Instagram: the panel offered audio and no video at all. The
+// URLs in the user's log are the fixture — the CDN publishes picture and sound
+// as two `.mp4` addresses, fetched in slices, and nothing in the path or the
+// content type separates them. `efg` does: base64 JSON naming the encoding
+// (`dash_baseline_1_v1` against `dash_ln_heaac_vbr3_audio`) and the asset both
+// halves belong to.
+// ---------------------------------------------------------------------------
+console.log("\n[two files, one clip]");
+{
+  const { genericEntry } = loadGenericEntry();
+  const efgFor = (tag, asset) => encodeURIComponent(Buffer.from(JSON.stringify({
+    vencode_tag: tag, video_id: null, xpv_asset_id: asset,
+    client_name: "ig", duration_s: 32,
+  })).toString("base64"));
+  const address = (name, tag, asset, slice) =>
+    `https://scontent-cdg4-1.cdninstagram.com/o1/v/t2/f2/m86/${name}.mp4`
+    + `?_nc_cat=111&efg=${efgFor(tag, asset)}&oh=00_AQHicnm1&oe=6A82DE74${slice}`;
+
+  const video = address("AQM-hMPD", "ig-xpvds.clips.c1-C3.dash_baseline_1_v1",
+                        1836684161075181, "&bytestart=1009&byteend=1311787");
+  const audio = address("AQPBAOhc", "ig-xpvds.clips.c1-C3.dash_ln_heaac_vbr3_audio",
+                        1836684161075181, "&bytestart=0&byteend=823");
+  const other = address("AQMz0wbD", "ig-xpvds.clips.c2-C3.dash_ln_heaac_vbr3_audio",
+                        907553225268869, "&bytestart=205979&byteend=255387");
+
+  const asVideo = genericEntry(video, "video/mp4", "1310779");
+  const asAudio = genericEntry(audio, "video/mp4", "824", "bytes 0-823/237996");
+  check("the picture half is video", asVideo && asVideo.kind === "video",
+    JSON.stringify(asVideo));
+  check("and the sound half is audio, though it is also an .mp4 served as "
+    + "video/mp4", asAudio && asAudio.kind === "audio", JSON.stringify(asAudio));
+  check("its size is the file's, not the 824-byte slice that was asked for",
+    asAudio && asAudio.size === 237996, String(asAudio && asAudio.size));
+  check("both know which clip they belong to",
+    asVideo && asAudio && asVideo.asset === asAudio.asset && asVideo.asset,
+    `${asVideo && asVideo.asset} / ${asAudio && asAudio.asset}`);
+
+  // A clip fetched in thirty pieces is one download, not thirty — and the
+  // address kept is the whole file rather than the slice.
+  const first = genericEntry(video, "video/mp4", "1310779");
+  const second = genericEntry(
+    video.replace("bytestart=1009&byteend=1311787", "bytestart=1311788&byteend=2805294"),
+    "video/mp4", "1493507");
+  check("every slice of one address is the same entry",
+    first.itag === second.itag, `${first.itag}\n${second.itag}`);
+  check("and the address kept is the file, not the slice",
+    !/bytestart|byteend/.test(first.url), first.url);
+
+  // The pairing the panel does with them.
+  const pairing = loadPairing();
+  const streams = [asVideo, asAudio,
+    genericEntry(other, "video/mp4", "49408", "bytes 205979-255387/255388")];
+  check("a video-only capture is recognised as needing sound",
+    pairing.isVideoOnly(asVideo) === true);
+  const companion = pairing.bestCapturedAudio(streams, asVideo);
+  check("and it is paired with its own clip's audio",
+    companion && companion.itag === asAudio.itag,
+    companion ? companion.url : "nothing");
+  const strayAudio = genericEntry(other, "video/mp4", "49408",
+    "bytes 205979-255387/255388");
+  check("never with another clip's",
+    pairing.bestCapturedAudio([asVideo, strayAudio], asVideo) === null);
 }
 
 console.log("\n[what the panel does with what it found]");
