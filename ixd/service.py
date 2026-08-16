@@ -25,7 +25,8 @@ from .core.db import Database
 from .core.engine import DownloadEngine
 from .core.errors import ExtractionError, IXDError
 from .core.events import EventBus, EventType
-from .core.http_client import CookieJar, HttpClient, format_bytes, sanitize_filename
+from .core.http_client import (CookieJar, HttpClient, filename_from_url,
+                               format_bytes, sanitize_filename)
 from .core.models import (
     Download,
     MediaFormat,
@@ -1083,6 +1084,53 @@ class DownloadService:
         """Queue a plain file download."""
         return self.engine.add_download(url, **kwargs)
 
+    #: Whether a name taken from a URL is a name at all.
+    #:
+    #: `ixd_1.0.3_amd64.deb` is; `74709710-bf21-4cd4-926a-526ff561a1bb` is not,
+    #: and neither is anything else with no extension on the end of it.
+    @staticmethod
+    def _looks_like_a_filename(name: str) -> bool:
+        stem, dot, extension = str(name or "").rpartition(".")
+        if not dot or not stem:
+            return False
+        return 1 <= len(extension) <= 5 and extension.isalnum()
+
+    def _name_before_the_row_appears(self, payload: dict[str, Any]) -> str:
+        """Ask the origin what the file is called, when the address will not say.
+
+        The engine renames a guessed filename as soon as it has fetched the
+        first response (§3.27), and the row in the window corrects itself. But
+        the *reply to this call* is what the browser announces in its "sent to
+        IXD" notification, and that happens once, immediately, with whatever
+        was known then — which on a GitHub release asset was a UUID.
+
+        So when the address carries nothing that could be a filename, one HEAD
+        is spent before answering. It costs a few hundred milliseconds on the
+        only downloads where it changes anything, and it is skipped entirely
+        for every address that already names its file.
+        """
+        if payload.get("filename"):
+            return sanitize_filename(str(payload["filename"]))
+        url = str(payload.get("url") or "")
+        if not url or self._looks_like_a_filename(filename_from_url(url)):
+            return ""
+        try:
+            client = self.client(
+                cookies=payload.get("cookies", "") or "",
+                user_agent=payload.get("userAgent", "") or "",
+                referer=payload.get("referrer", "") or payload.get("referer", "") or "",
+                site_headers=_site_headers_of(payload),
+            )
+            info = client.probe(url)
+        except Exception:               # noqa: BLE001 - the guess still stands
+            return ""
+        named = getattr(info, "filename", "") or ""
+        if named:
+            return sanitize_filename(named)
+        mime = getattr(info, "mime", "") or ""
+        derived = filename_from_url(getattr(info, "url", url) or url, mime)
+        return derived if self._looks_like_a_filename(derived) else ""
+
     def add_from_browser(self, payload: dict[str, Any]) -> Download:
         """Accept an intercepted download from the browser extension."""
         # The browser's own headers, minus the ones the engine sets itself: a
@@ -1091,7 +1139,7 @@ class DownloadService:
         headers = _site_headers_of(payload)
         return self.engine.add_download(
             payload["url"],
-            filename=sanitize_filename(payload.get("filename", "")) if payload.get("filename") else "",
+            filename=self._name_before_the_row_appears(payload),
             headers=headers,
             cookies=payload.get("cookies", "") or "",
             referer=payload.get("referrer", "") or payload.get("referer", "") or "",

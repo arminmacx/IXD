@@ -165,6 +165,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # swallowed the whole application — the window closed and the process had
     # to be killed by hand.
     "close_to_tray": False,
+    # Whether the "still running" notice has been shown. Once is useful and
+    # twice is noise: closing the window is deliberate, and being told about
+    # it every time is what makes people switch notifications off entirely.
+    "close_to_tray_notice_shown": False,
     # Whether anything is recorded at all. On by default because the log is
     # the instrument every field report is answered with — but it is a record
     # of what you downloaded and from where, so it is a choice rather than an

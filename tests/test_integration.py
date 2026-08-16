@@ -2535,6 +2535,138 @@ print("NO_CLOSE_BUTTON", not bool(window.windowFlags() & 0x08000000))
           "OWN_COLOURS True" in output, detail)
 
 
+def test_what_the_browser_announces_is_the_real_name() -> None:
+    """The notification that fires once, immediately, with whatever was known.
+
+    Reported after the naming fix landed: the window shows the right filename
+    now, and Windows' own notification still says
+    `74709710-bf21-4cd4-926a-526ff561a1bb`. Both were true. The engine renames
+    a guess as soon as it has fetched the first response, but the *reply to
+    the add call* is what the browser announces, and that had already gone out
+    with the guess in it.
+
+    So an address that carries nothing filename-shaped is asked before the
+    reply is written. An address that already names its file pays nothing —
+    which is every ordinary download.
+
+    Also here: the "still running" notice belongs to the first close, not to
+    every close.
+    """
+    print("\n[what the browser announces is the real name]")
+    from ixd.service import DownloadService
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-announce-"))
+    config.DATA_DIR = root
+    config.TEMP_DIR = root / "incomplete"
+    config.LOG_DIR = root / "logs"
+    config.IPC_PORT_FILE = root / "ipc.json"
+    config.ensure_dirs()
+    settings = Settings(root / "settings.json")
+    settings.set("download_dir", str(root / "out"))
+    service = DownloadService(settings, Database(root / "state.sqlite3"))
+
+    payload = b"\x00" * 4096
+    with TestOrigin(payload) as origin:
+        origin.state.disposition_name = "ixd_1.0.8_amd64.deb"
+
+        # What a release asset's address looks like once the browser has
+        # followed the redirect.
+        opaque = origin.url("/asset/74709710-bf21-4cd4-926a-526ff561a1bb")
+        row = service.add_from_browser({"url": opaque, "start": False})
+        check("the reply the browser announces carries the origin's name",
+              row.filename == "ixd_1.0.8_amd64.deb", row.filename)
+        check("and it is not marked as a guess, because it is not one",
+              not row.auto_named)
+
+        # An ordinary address is not probed at all: the name is already there.
+        before = origin.state.request_count
+        plain = service.add_from_browser(
+            {"url": origin.url("/holiday-video.mp4"), "start": False})
+        check("an address that names its file costs no extra request",
+              plain.filename == "holiday-video.mp4"
+              and origin.state.request_count == before,
+              f"{plain.filename}, {origin.state.request_count - before} requests")
+
+        # A name the caller chose still wins over everything.
+        chosen = service.add_from_browser(
+            {"url": opaque, "filename": "mine.deb", "start": False})
+        check("and a name that was asked for is never replaced",
+              chosen.filename == "mine.deb", chosen.filename)
+
+        # An origin that will not answer leaves the old behaviour in place
+        # rather than failing the add.
+        unreachable = service.add_from_browser(
+            {"url": "https://127.0.0.1:9/asset/opaque-name", "start": False})
+        check("an origin that cannot be reached still yields a download",
+              unreachable.filename == "opaque-name" and unreachable.auto_named,
+              unreachable.filename)
+
+    service.shutdown()
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_still_running_notice_is_said_once() -> None:
+    """Closing the window to the tray explains itself the first time only."""
+    print("\n[the still-running notice is said once]")
+    script = '''
+import sys, tempfile
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-notice-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.service import DownloadService
+from ixd.ui.main_window import MainWindow
+
+app = QApplication([])
+settings = Settings(root / "settings.json")
+settings.set("download_dir", str(root / "out"))
+settings.set("close_to_tray", True)
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = MainWindow(service)
+
+said = []
+window.tray.notify = lambda title, body: said.append(title)
+# The tray has to look available for the close-to-tray path to be taken.
+window.tray.isVisible = lambda: True
+import ixd.ui.main_window as mw
+from PySide6.QtWidgets import QSystemTrayIcon
+QSystemTrayIcon.isSystemTrayAvailable = staticmethod(lambda: True)
+
+for _ in range(4):
+    window.show()
+    window.closeEvent(QCloseEvent())
+print("SAID", len(said))
+print("REMEMBERED", settings.get_bool("close_to_tray_notice_shown", False))
+service.shutdown()
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-notice-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=120, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the notice is said once", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-400:] or "") + (process.stderr[-300:] or "")
+    check("four closes produce one notice, not four",
+          "SAID 1" in output, detail)
+    check("and it is remembered, so the next launch does not say it either",
+          "REMEMBERED True" in output, detail)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -4636,7 +4768,9 @@ def main() -> int:
                  test_cancelling_closes_the_download_window,
                  test_a_schedule_can_actually_be_added,
                  test_it_can_tell_you_there_is_a_newer_version,
-                 test_the_updater_says_what_it_is_doing):
+                 test_the_updater_says_what_it_is_doing,
+                 test_what_the_browser_announces_is_the_real_name,
+                 test_the_still_running_notice_is_said_once):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

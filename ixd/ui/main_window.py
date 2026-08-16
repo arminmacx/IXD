@@ -939,10 +939,19 @@ class MainWindow(QMainWindow):
                 and self.tray.isVisible():
             event.ignore()
             self.hide()
-            self.tray.notify(
-                "Still running",
-                "Downloads continue in the background. Use the tray icon to reopen.",
-            )
+            # Once. The first close has to explain where the application went,
+            # because a window that disappears with no trace is one people
+            # think they have quit — but saying it at every close is a
+            # notification for something the user now knows and did on
+            # purpose. Remembered in the settings, so it is once per
+            # installation and not once per launch.
+            if not self.service.settings.get_bool("close_to_tray_notice_shown", False):
+                self.service.settings.set("close_to_tray_notice_shown", True)
+                self.tray.notify(
+                    "Still running",
+                    "Downloads continue in the background. Use the tray icon "
+                    "to reopen — this is the only time this will be said.",
+                )
             return
 
         # Closing the window with the tray disabled is also a request to quit;
