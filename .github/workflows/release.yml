@@ -93,6 +93,34 @@ jobs:
           IXD_PYTHON: ${{ steps.python.outputs.python-path }}
           CI: 'true'          # the script skips its final `pause` when set
 
+      # NSIS ships on the runner image but is not on PATH, so `build.py` wrote
+      # the script and skipped compiling it — v1.0.14 published a release note
+      # promising an installer and no installer. Found where it is, or installed
+      # if the image ever stops carrying it, and **both outcomes are logged**:
+      # a step that silently produces nothing is how this got out.
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $nsis = "C:\Program Files (x86)\NSIS"
+          if (Test-Path "$nsis\makensis.exe") {
+            Write-Host "makensis: already on the image at $nsis"
+          } else {
+            Write-Host "makensis: not on the image, installing"
+            choco install nsis -y --no-progress
+          }
+          if (-not (Test-Path "$nsis\makensis.exe")) {
+            throw "makensis is still not present; the installer cannot be built"
+          }
+          "$nsis" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$nsis;$env:PATH"
+          & "$env:IXD_PYTHON" packaging/build.py --installer --no-clean
+          $setup = Get-ChildItem dist\*setup.exe -ErrorAction SilentlyContinue
+          if (-not $setup) { throw "no setup.exe was produced" }
+          Write-Host "installer: $($setup.Name) $([math]::Round($setup.Length/1MB,1)) MB"
+
       # A folder of files is not something to hand somebody. Each platform's
       # portable build is collapsed into one archive next to its installer.
       #
@@ -147,6 +175,7 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/*.AppImage
+            dist/*setup.exe
 
   publish:
     name: Publish the release
@@ -199,8 +228,9 @@ jobs:
           | Linux (Debian/Ubuntu) | `ixd_*_amd64.deb` |
           | Linux (portable) | `ixd-linux-x86_64.tar.gz` |
           | macOS (Apple silicon) | `*.dmg`, or `ixd-macos-arm64.zip` |
-          | Windows | `ixd-*-windows-x64.zip` |
-          | Browser extension | `ixd-extension-chrome-*.zip` |
+          | Windows (installer) | `ixd-*-windows-x64-setup.exe` |
+          | Windows (portable) | `ixd-*-windows-x64.zip` |
+          | Browser extension | `ixd-extension-chrome-*.zip`, `ixd-extension-firefox-*.zip` |
 
           Start the application once, then load the extension from the folder
           it writes. The two browsers need different manifests under the same
