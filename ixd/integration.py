@@ -105,6 +105,19 @@ def bundled_extension_source() -> Path:
     return SOURCE_ROOT / "extension"
 
 
+#: Folder names the extension is materialised under, inside the data directory.
+#:
+#: Constants rather than something derived by calling :func:`extension_dir`:
+#: that function *writes to disk*, and a predicate that only wanted a name was
+#: calling it once per installed extension — see :func:`_entry_is_ours`.
+EXTENSION_DIR_NAME = "extension"
+FIREFOX_EXTENSION_DIR_NAME = "extension-firefox"
+
+#: The manifest each browser family reads, under the name it is shipped as.
+CHROME_MANIFEST = "manifest.chrome.json"
+FIREFOX_MANIFEST = "manifest.firefox.json"
+
+
 def extension_dir() -> Path:
     """The folder the user points "Load unpacked" at.
 
@@ -116,17 +129,44 @@ def extension_dir() -> Path:
     """
     source = bundled_extension_source()
     if not getattr(sys, "frozen", False):
+        _write_manifest(source, source, CHROME_MANIFEST)
         return source
 
-    target = config.DATA_DIR / "extension"
+    target = config.DATA_DIR / EXTENSION_DIR_NAME
     try:
-        _mirror_tree(source, target)
+        _mirror_tree(source, target, CHROME_MANIFEST)
     except OSError:
         return source
     return target
 
 
-def _mirror_tree(source: Path, target: Path) -> None:
+def _is_flavoured_manifest(path: Path, root: Path) -> bool:
+    """``manifest.chrome.json`` and friends — never ``manifest.json`` itself."""
+    return (path.parent == root
+            and path.name.startswith("manifest.")
+            and path.name != "manifest.json")
+
+
+def _write_manifest(source: Path, target: Path, variant: str) -> None:
+    """Put the browser's own manifest into ``target`` under ``manifest.json``.
+
+    Neither browser will look at any other name, and the two are not
+    interchangeable, so the flavour is chosen here rather than shipped.
+    """
+    origin = source / variant
+    if not origin.is_file():
+        return
+    payload = origin.read_bytes()
+    manifest = target / "manifest.json"
+    try:
+        if manifest.exists() and manifest.read_bytes() == payload:
+            return
+    except OSError:
+        pass
+    manifest.write_bytes(payload)
+
+
+def _mirror_tree(source: Path, target: Path, variant: str = "") -> None:
     """Copy ``source`` into ``target``, refreshing whatever differs.
 
     Compared by **content**, not by timestamp. The old test — same size and a
@@ -147,6 +187,11 @@ def _mirror_tree(source: Path, target: Path) -> None:
         if item.is_dir():
             destination.mkdir(parents=True, exist_ok=True)
             continue
+        # The flavoured manifests do not travel: one of them is written below
+        # as `manifest.json`, and copying both leaves the folder holding a
+        # manifest for a browser that is not the one loading it.
+        if _is_flavoured_manifest(item, source):
+            continue
         wanted = item.read_bytes()
         if destination.exists():
             try:
@@ -157,13 +202,35 @@ def _mirror_tree(source: Path, target: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(wanted)
 
+    _write_manifest(source, target, variant)
+
     # Anything the new version dropped goes too: a file left behind from an
     # older extension is one the browser still loads.
+    #
+    # But only when the source is unmistakably a real extension. A deletion
+    # pass driven by a source that is missing, empty or half-written would
+    # empty the folder the browser is loading from — and an emptied folder is
+    # not a browser without an extension, it is a browser that marks the
+    # extension **corrupted** and stays that way until it is removed by hand.
+    # Nothing is worth that: a stale leftover file is a far cheaper mistake.
     if not source.is_dir():
+        return
+    if not any((source / name).is_file()
+               for name in ("manifest.json", CHROME_MANIFEST, FIREFOX_MANIFEST)):
         return
     for item in sorted(target.rglob("*"), reverse=True):
         relative = item.relative_to(target)
-        if (source / relative).exists():
+        # `manifest.json` is written here, not copied, so it is not in the
+        # source and the prune pass deleted it on every pass — leaving the
+        # folder the browser loads from with no manifest at all. That is the
+        # "corrupted" the comment above is about, and it was being caused
+        # three times per launch by this loop rather than avoided by it.
+        if relative.as_posix() == "manifest.json":
+            continue
+        # The flavoured manifests are no longer copied, so a copy sitting in
+        # the target is left over from when they were and goes, even though
+        # the source still has one under that name.
+        if not _is_flavoured_manifest(item, target) and (source / relative).exists():
             continue
         try:
             if item.is_dir():
@@ -180,28 +247,44 @@ def chrome_manifest_path() -> Path:
     Read from the shipped copy rather than the materialised one so the ID is
     known even if the data directory has not been populated yet.
     """
-    return bundled_extension_source() / "manifest.chrome.json"
+    return bundled_extension_source() / CHROME_MANIFEST
+
+
+def firefox_extension_dir() -> Path:
+    """A folder Firefox can load, beside the one Chrome can.
+
+    Both browsers insist on a file literally called ``manifest.json`` and the
+    two manifests are not interchangeable, so one folder cannot serve both.
+    Until now only Chrome's was written and a Firefox user was left with a
+    `manifest.firefox.json` sitting next to a Chrome manifest and no
+    instructions — the extension shipped, and half the people who could load
+    it could not.
+
+    Always in the data directory, including for a source run: it is a
+    generated mirror, and writing it beside the tree left an `extension-firefox`
+    folder in the checkout that nothing owned and the source bundle shipped.
+    """
+    source = bundled_extension_source()
+    firefox = config.DATA_DIR / FIREFOX_EXTENSION_DIR_NAME
+    try:
+        _mirror_tree(source, firefox, FIREFOX_MANIFEST)
+    except OSError:
+        pass
+    return firefox
 
 
 def sync_extension_manifest() -> Path | None:
-    """Make ``extension/`` directly loadable by Chrome.
+    """Confirm the loadable ``manifest.json`` is where the browser expects it.
 
-    Chrome only recognises a file literally named ``manifest.json``.  Keeping
-    the Chrome manifest under its own name lets the Firefox variant live beside
-    it, so the loadable copy is written on demand instead of asking the user to
-    rename anything.
+    Chrome only recognises a file literally named ``manifest.json``. Writing it
+    is :func:`extension_dir`'s job — materialising a folder and making it
+    loadable are one step, because they were two and the second kept being
+    undone by the first.
     """
-    source = chrome_manifest_path()
-    if not source.exists():
+    if not chrome_manifest_path().exists():
         return None
     target = extension_dir() / "manifest.json"
-    try:
-        payload = source.read_text(encoding="utf-8")
-        if not target.exists() or target.read_text(encoding="utf-8") != payload:
-            target.write_text(payload, encoding="utf-8")
-    except OSError:
-        return None
-    return target
+    return target if target.is_file() else None
 
 
 def bundled_extension_id() -> str:
@@ -257,8 +340,11 @@ def _entry_is_ours(entry: object) -> bool:
         name = str(manifest.get("name", ""))
         if "Internet Xtreme Downloader" in name:
             return True
+    # The *name*, from a constant. This ran once per installed extension in
+    # every browser profile, and calling `extension_dir()` here re-materialised
+    # the whole folder each time — a predicate with a filesystem behind it.
     path = str(entry.get("path", ""))
-    return bool(path) and Path(path).name == extension_dir().name and "ixd" in path.lower()
+    return bool(path) and Path(path).name == EXTENSION_DIR_NAME and "ixd" in path.lower()
 
 
 def all_extension_ids(extra: list[str] | None = None) -> list[str]:

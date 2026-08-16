@@ -202,9 +202,19 @@ jobs:
           | Windows | `ixd-*-windows-x64.zip` |
           | Browser extension | `ixd-extension-chrome-*.zip` |
 
-          Load the extension from `chrome://extensions` → Developer mode →
-          Load unpacked, pointing at the application's `extension` folder
-          (`~/.local/share/ixd/extension` on Linux).
+          Start the application once, then load the extension from the folder
+          it writes. The two browsers need different manifests under the same
+          filename, so they get a folder each.
+
+          | | Chrome / Edge / Brave | Firefox |
+          |---|---|---|
+          | Linux | `~/.local/share/ixd/extension` | `~/.local/share/ixd/extension-firefox` |
+          | Windows | `%APPDATA%\IXD\extension` | `%APPDATA%\IXD\extension-firefox` |
+          | macOS | `~/Library/Application Support/IXD/extension` | `…/extension-firefox` |
+
+          Chrome: `chrome://extensions` → Developer mode → **Load unpacked** →
+          the folder. Firefox: `about:debugging` → **Load Temporary Add-on** →
+          `manifest.json` inside the folder.
 
           ### Before you report a problem
 

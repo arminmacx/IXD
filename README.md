@@ -140,10 +140,10 @@ the [Releases](../../releases) page — nothing to compile.
 
 | Platform | File |
 |---|---|
-| Debian / Ubuntu | `ixd_1.0.13_amd64.deb` → `sudo dpkg -i ixd_1.0.13_amd64.deb` |
+| Debian / Ubuntu | `ixd_1.0.14_amd64.deb` → `sudo dpkg -i ixd_1.0.14_amd64.deb` |
 | Linux (portable) | `ixd-linux-x86_64.tar.gz` → extract and run `ixd/ixd` |
 | macOS (Apple silicon) | `*.dmg` — unsigned, so right-click → **Open** the first time. **Unverified: never launched on real hardware** |
-| Windows | `ixd-1.0.13-windows-x64.zip` → extract and run `ixd.exe`. See the note below on the SmartScreen warning; the **first** launch also takes a while, because Windows scans the whole folder before running anything from it |
+| Windows | `ixd-1.0.14-windows-x64.zip` → extract and run `ixd.exe`. See the note below on the SmartScreen warning; the **first** launch also takes a while, because Windows scans the whole folder before running anything from it |
 
 ### Or build it yourself
 
@@ -179,8 +179,19 @@ curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
 ### Browser extension
 
 > **Chrome / Chromium / Edge / Brave** → `chrome://extensions` → enable
-> Developer mode → **Load unpacked** → select `~/.local/share/ixd/extension`
-> (or the `extension/` folder of a source checkout).
+> Developer mode → **Load unpacked** → select the `extension` folder in the
+> application's data directory (see below), or the `extension/` folder of a
+> source checkout.
+>
+> **Firefox** → `about:debugging` → **Load Temporary Add-on** → select
+> `manifest.json` in the `extension-firefox` folder beside it. The two browsers
+> need different manifests under the same filename, so they get a folder each.
+
+| | Chrome | Firefox |
+|---|---|---|
+| Linux | `~/.local/share/ixd/extension` | `~/.local/share/ixd/extension-firefox` |
+| Windows | `%APPDATA%\IXD\extension` | `%APPDATA%\IXD\extension-firefox` |
+| macOS | `~/Library/Application Support/IXD/extension` | `…/extension-firefox` |
 
 There is no extension ID to copy and no manifest to rename: `manifest.json` is
 written for you and the ID is already authorised. To drive it by hand:
@@ -270,7 +281,7 @@ can also be driven directly:
 
 | Host | Produces |
 |---|---|
-| Linux | `dist/ixd/`, `ixd_1.0.13_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
+| Linux | `dist/ixd/`, `ixd_1.0.14_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
 | macOS | `Internet Xtreme Downloader.app`, `.dmg` via `hdiutil` |
 | Windows | `dist/ixd/`, `.zip`, multi-resolution `.ico` |
 

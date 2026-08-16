@@ -2784,6 +2784,96 @@ def test_the_extension_folder_follows_the_application() -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_the_folder_the_browser_loads_always_has_a_manifest() -> None:
+    """Reported from Windows: "it still says its corrupted", and the folder was
+    empty of any manifest.
+
+    The extension ships two manifests under their own names — Chrome and
+    Firefox will each read only a file literally called `manifest.json`, and the
+    two are not interchangeable. The loadable one was written by
+    `sync_extension_manifest`, *after* the mirror had run.
+
+    But the mirror's prune pass removes anything in the copy that is not in the
+    source, and `manifest.json` is in neither — it is written, not copied. So
+    every subsequent call to `extension_dir()` deleted it again, and there are
+    three per launch: start-up writes the Chrome folder, then the Firefox one
+    (which asked for the Chrome path to find its neighbour), and
+    `_entry_is_ours` called it once per installed extension in every browser
+    profile it read. On a normal start `ensure_registered` is a no-op and never
+    re-runs the write, so the folder the browser had been loading from was left
+    with no manifest at all — which is what a browser reports as corrupted.
+
+    Materialising the folder is what writes the manifest now, so there is no
+    window in which the two disagree.
+    """
+    print("\n[the folder the browser loads always has a manifest]")
+    from ixd import integration
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-manifest-"))
+    try:
+        source = root / "shipped"
+        (source / "content").mkdir(parents=True)
+        (source / integration.CHROME_MANIFEST).write_text(
+            '{"name": "IXD", "background": {"service_worker": "background.js"}}',
+            encoding="utf-8")
+        (source / integration.FIREFOX_MANIFEST).write_text(
+            '{"name": "IXD", "background": {"scripts": ["background.js"]}}',
+            encoding="utf-8")
+        (source / "background.js").write_text("// worker\n", encoding="utf-8")
+        (source / "content" / "panel.js").write_text("// panel\n", encoding="utf-8")
+
+        chrome = root / "chrome"
+        integration._mirror_tree(source, chrome, integration.CHROME_MANIFEST)
+        manifest = chrome / "manifest.json"
+        check("the mirrored folder has a manifest.json at all", manifest.is_file(),
+              str(sorted(p.name for p in chrome.iterdir())))
+        check("and it is the browser's own flavour",
+              "service_worker" in manifest.read_text(encoding="utf-8"),
+              manifest.read_text(encoding="utf-8")[:80])
+
+        # The defect: mirroring again pruned what the previous pass had written.
+        integration._mirror_tree(source, chrome, integration.CHROME_MANIFEST)
+        integration._mirror_tree(source, chrome, integration.CHROME_MANIFEST)
+        check("and a second and third pass do not take it away again",
+              manifest.is_file(),
+              str(sorted(p.name for p in chrome.iterdir())))
+
+        check("the other browser's manifest is not left sitting beside it",
+              not (chrome / integration.FIREFOX_MANIFEST).exists()
+              and not (chrome / integration.CHROME_MANIFEST).exists(),
+              str(sorted(p.name for p in chrome.iterdir())))
+        check("the rest of the extension is still copied",
+              (chrome / "background.js").is_file()
+              and (chrome / "content" / "panel.js").is_file())
+
+        firefox = root / "firefox"
+        integration._mirror_tree(source, firefox, integration.FIREFOX_MANIFEST)
+        body = (firefox / "manifest.json").read_text(encoding="utf-8")
+        check("the Firefox folder gets Firefox's manifest, not Chrome's",
+              "scripts" in body and "service_worker" not in body, body[:80])
+
+        # A folder written by the old code still holds the flavoured copies;
+        # they go, rather than confusing whoever opens it looking for one.
+        (chrome / integration.CHROME_MANIFEST).write_text("{}", encoding="utf-8")
+        integration._mirror_tree(source, chrome, integration.CHROME_MANIFEST)
+        check("a leftover flavoured manifest from an older version is removed",
+              not (chrome / integration.CHROME_MANIFEST).exists())
+
+        # And the predicate that was driving one of the three calls per launch
+        # must not touch the disk at all. Read as code, not as text: the comment
+        # explaining the defect names the very call it is asserting is gone.
+        import ast as _ast
+        import inspect
+        tree = _ast.parse(inspect.getsource(integration._entry_is_ours))
+        called = {node.func.id for node in _ast.walk(tree)
+                  if isinstance(node, _ast.Call)
+                  and isinstance(node.func, _ast.Name)}
+        check("deciding whether an entry is ours no longer re-writes the folder",
+              "extension_dir" not in called, str(sorted(called)))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_an_update_survives_a_folder_windows_will_not_rename() -> None:
     """Two Windows failures, both reported with a screenshot.
 
@@ -4854,9 +4944,18 @@ def test_the_windows_source_bundle_is_complete() -> None:
 
     # Checked the way a browser would check it: every path the manifest names
     # has to be in the archive.
-    for manifest_name in ("manifest.json", "manifest.chrome.json",
-                          "manifest.firefox.json"):
-        check(f"{manifest_name} is in the bundle", manifest_name in manifests)
+    #
+    # The two flavoured ones are tracked and always present. `manifest.json` is
+    # *generated* — gitignored, written when the application runs — so a machine
+    # that has run from source bundles one and a fresh clone does not. Asserting
+    # it unconditionally passed here and would have failed in CI, and worse, it
+    # hid the defect this file's `…always_has_a_manifest` test now pins: a build
+    # made here shipped a manifest the materialised folder could inherit, and a
+    # build made from a clean checkout shipped none.
+    check("both flavoured manifests are in the bundle",
+          {"manifest.chrome.json", "manifest.firefox.json"} <= set(manifests),
+          str(sorted(manifests)))
+    for manifest_name in sorted(manifests):
         manifest = manifests[manifest_name]
         referenced: list[str] = list((manifest.get("icons") or {}).values())
         action = manifest.get("action") or manifest.get("browser_action") or {}
@@ -4873,6 +4972,84 @@ def test_the_windows_source_bundle_is_complete() -> None:
                    if f"extension/{ref}" not in inner]
         check(f"every file {manifest_name} names is present",
               not missing, str(missing))
+
+
+def test_the_windows_installer_script_is_one_that_could_run() -> None:
+    """The installer is written here and compiled somewhere else.
+
+    `makensis` is not on this machine and NSIS is not something this project
+    reimplements, so `build_windows_installer` writes the script either way and
+    compiles it only where the tool exists. That means the script itself is the
+    only thing anybody here can check — and `build.py` already claimed it was
+    checked by a test, which it was not.
+
+    What is checked is the class of failure a Linux machine can still find: a
+    placeholder that was never substituted, a version that disagrees with the
+    build, a payload or launcher name that is not what was just produced, and
+    the decisions that were made deliberately — per-user rather than
+    administrator, an Add/Remove Programs entry, and an uninstaller that closes
+    the application before removing the folder it is running from.
+    """
+    print("\n[the windows installer script is one that could run]")
+    import re as _re
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import build as build_module  # noqa: PLC0415
+
+    payload = root / "dist" / "ixd"
+    output = root / "dist" / f"ixd-{build_module.VERSION}-windows-x64-setup.exe"
+    script = build_module.windows_installer_script(payload, output)
+
+    # Every `{name}` in the template has to have been filled in. One that was
+    # not is a literal brace in an NSIS script, which is a compile error on a
+    # machine none of us is sitting at.
+    left = _re.findall(r"\{[a-z_]+\}", script)
+    check("no placeholder is left unsubstituted", not left, str(left))
+
+    check("it names this build's version", f"{build_module.VERSION}" in script)
+    check("and writes the file the release publishes", str(output) in script)
+    check("it installs what was just built", str(payload) in script)
+    # The directive, not the whole script: the comment above it in the template
+    # explains the DOS spelling by quoting it, and a substring test over the
+    # file matches the explanation instead of the instruction.
+    directives = [line.strip() for line in script.splitlines()
+                  if line.strip().startswith("File ")]
+    check("copying it whole, including files with no extension",
+          len(directives) == 1 and directives[0].endswith(r'\*"'),
+          str(directives))
+    check("the launcher it points at is the Windows one",
+          "ixd.exe" in script and "$INSTDIR\\ixd.exe" in script)
+
+    # Deliberate decisions, each of which was a choice rather than a default.
+    check("it does not ask for administrator",
+          "RequestExecutionLevel user" in script,
+          _re.search(r"RequestExecutionLevel.*", script).group(0))
+    check("it installs per-user, under the user's own profile",
+          "$LOCALAPPDATA\\Programs" in script)
+    check("Add/Remove Programs gets an entry",
+          "CurrentVersion\\Uninstall\\IXD" in script)
+    check("with an uninstall command, so it can be removed at all",
+          '"UninstallString"' in script and "WriteUninstaller" in script)
+    check("the uninstaller closes the application first",
+          "taskkill" in script and script.index("taskkill") < script.index('RMDir /r "$INSTDIR"'))
+    check("and takes its shortcuts and registry keys with it",
+          'Delete "$DESKTOP' in script and "DeleteRegKey" in script)
+
+    # The icon is the one the build generates; it need not exist yet on a tree
+    # that has never been built, but the path has to be the one that will.
+    icon = root / "packaging" / "icons" / "ixd.ico"
+    check("it uses the multi-resolution icon the build assembles",
+          str(icon) in script, str(icon))
+
+    check("and it is compiled only where the tool exists",
+          "makensis" in inspect_source(build_module.build_windows_installer))
+
+
+def inspect_source(function) -> str:
+    import inspect
+    return inspect.getsource(function)
 
 
 def test_the_page_hook_supplies_what_the_session_withholds() -> None:
@@ -4997,6 +5174,7 @@ def main() -> int:
                  test_a_stranded_stream_is_never_queued,
                  test_the_page_hook_supplies_what_the_session_withholds,
                  test_the_windows_source_bundle_is_complete,
+                 test_the_windows_installer_script_is_one_that_could_run,
         test_the_page_reaches_the_engine_from_the_browser,
         test_a_page_handed_over_keeps_its_session,
         test_removing_a_download_never_deletes_another_ones_file,
@@ -5035,6 +5213,7 @@ def main() -> int:
                  test_what_the_browser_announces_is_the_real_name,
                  test_the_still_running_notice_is_said_once,
                  test_the_extension_folder_follows_the_application,
+                 test_the_folder_the_browser_loads_always_has_a_manifest,
                  test_an_update_survives_a_folder_windows_will_not_rename):
         try:
             test()

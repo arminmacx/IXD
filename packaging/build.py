@@ -452,6 +452,128 @@ def build_windows_source() -> Path:
 
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
+# Windows: an installer, for people who expect to install things
+# ----------------------------------------------------------------------
+#: Written from here rather than kept as a file, because every path and name
+#: in it has to agree with what the build just produced — and a template that
+#: drifts from the build is an installer that ships the wrong version number
+#: or omits a file nobody notices until somebody runs it.
+_NSIS_SCRIPT = r"""
+Unicode true
+!include "MUI2.nsh"
+
+Name "{app_name}"
+OutFile "{output}"
+BrandingText "{app_name} {version}"
+; Per-user by default: asking for administrator to unpack a folder into the
+; user's own profile is how an ordinary program starts looking like something
+; to be suspicious of, and it is not needed for anything here.
+RequestExecutionLevel user
+InstallDir "$LOCALAPPDATA\Programs\{app_slug}"
+InstallDirRegKey HKCU "Software\{app_slug}" "InstallDir"
+ShowInstDetails show
+ShowUninstDetails show
+
+!define MUI_ABORTWARNING
+!define MUI_ICON "{icon}"
+!define MUI_UNICON "{icon}"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\{launcher}"
+!define MUI_FINISHPAGE_RUN_TEXT "Start {app_name}"
+
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+Section "Install"
+  SetOutPath "$INSTDIR"
+  ; Everything the portable build contains, exactly as it was tested.
+  ; `\*` and not `\*.*`: the second is the DOS spelling and is reported to skip
+  ; files with no extension. Only one file in the build has none — the launcher,
+  ; which on Windows is `ixd.exe` and does — but this is a script that cannot be
+  ; run here, and the superset costs nothing.
+  File /r "{payload}\*"
+
+  CreateDirectory "$SMPROGRAMS\{app_name}"
+  CreateShortCut "$SMPROGRAMS\{app_name}\{app_name}.lnk" "$INSTDIR\{launcher}"
+  CreateShortCut "$SMPROGRAMS\{app_name}\Uninstall {app_name}.lnk" "$INSTDIR\uninstall.exe"
+  CreateShortCut "$DESKTOP\{app_name}.lnk" "$INSTDIR\{launcher}"
+
+  WriteRegStr HKCU "Software\{app_slug}" "InstallDir" "$INSTDIR"
+  ; The entry Add/Remove Programs reads. Without it the application can be
+  ; installed and not uninstalled, which is worse than not installing at all.
+  WriteRegStr HKCU "{uninstall_key}" "DisplayName" "{app_name}"
+  WriteRegStr HKCU "{uninstall_key}" "DisplayVersion" "{version}"
+  WriteRegStr HKCU "{uninstall_key}" "Publisher" "{publisher}"
+  WriteRegStr HKCU "{uninstall_key}" "DisplayIcon" "$INSTDIR\{launcher}"
+  WriteRegStr HKCU "{uninstall_key}" "UninstallString" "$INSTDIR\uninstall.exe"
+  WriteRegStr HKCU "{uninstall_key}" "InstallLocation" "$INSTDIR"
+  WriteRegDWORD HKCU "{uninstall_key}" "NoModify" 1
+  WriteRegDWORD HKCU "{uninstall_key}" "NoRepair" 1
+  WriteUninstaller "$INSTDIR\uninstall.exe"
+SectionEnd
+
+Section "Uninstall"
+  ; The application is asked to close first: a folder cannot be removed while
+  ; anything inside it is running, which is the same lesson the updater
+  ; learned the hard way.
+  ExecWait 'taskkill /IM "{launcher}" /F'
+  Sleep 500
+  Delete "$DESKTOP\{app_name}.lnk"
+  Delete "$SMPROGRAMS\{app_name}\{app_name}.lnk"
+  Delete "$SMPROGRAMS\{app_name}\Uninstall {app_name}.lnk"
+  RMDir "$SMPROGRAMS\{app_name}"
+  RMDir /r "$INSTDIR"
+  DeleteRegKey HKCU "{uninstall_key}"
+  DeleteRegKey HKCU "Software\{app_slug}"
+SectionEnd
+"""
+
+
+def windows_installer_script(binary_dir: Path, output: Path) -> str:
+    """The installer script for what has just been built."""
+    icon = ROOT / "packaging" / "icons" / "ixd.ico"
+    return _NSIS_SCRIPT.format(
+        app_name=APP_NAME,
+        app_slug="IXD",
+        version=VERSION,
+        publisher=APP_NAME,
+        output=str(output),
+        payload=str(binary_dir),
+        launcher="ixd.exe",
+        icon=str(icon),
+        uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
+                       r"\Uninstall\IXD"),
+    )
+
+
+def build_windows_installer(binary_dir: Path) -> Path | None:
+    """A real installer, when the machine has something to build one with.
+
+    NSIS is the tool Windows installers are built with; it is not something
+    this project reimplements, and it is not something a Linux machine has. So
+    the script is written either way — it can be read, and it is checked by a
+    test — and it is compiled only where `makensis` exists, which is CI.
+    """
+    section("Windows installer")
+    output = DIST / f"ixd-{VERSION}-windows-x64-setup.exe"
+    script_path = DIST / "installer.nsi"
+    script_path.write_text(windows_installer_script(binary_dir, output),
+                           encoding="utf-8")
+    log(f"wrote {script_path.name}")
+    if not have("makensis"):
+        log("makensis is not installed here, so the installer is not compiled")
+        return None
+    if run(["makensis", "-V2", str(script_path)]) != 0:
+        log("makensis refused the script; no installer was produced")
+        return None
+    log(f"wrote {output.name} ({output.stat().st_size / 1048576:.1f} MB)")
+    return output
+
+
+# ----------------------------------------------------------------------
 # the build that can replace itself
 # ----------------------------------------------------------------------
 #: The name each platform's self-updating archive is published under. The
@@ -540,6 +662,8 @@ def main() -> int:
                         help="keep previous build artefacts")
     parser.add_argument("--self-update", action="store_true",
                         help="also produce the archive that may replace itself")
+    parser.add_argument("--installer", action="store_true",
+                        help="write (and, where possible, compile) the installer")
     arguments = parser.parse_args()
 
     DIST.mkdir(parents=True, exist_ok=True)
@@ -557,6 +681,12 @@ def main() -> int:
     # pass to produce an archive that differs by one file is ten minutes
     # nobody gets back.
     existing = DIST / "ixd"
+    if arguments.installer and not arguments.package and existing.exists():
+        build_windows_installer(existing)
+        if not arguments.self_update:
+            section("Done")
+            return 0
+
     if arguments.self_update and not arguments.package and existing.exists():
         build_self_updating(existing)
         section("Done")
@@ -574,6 +704,7 @@ def main() -> int:
             build_dmg(binary)
         elif IS_WINDOWS:
             build_windows_zip(binary)
+            build_windows_installer(binary)
         # Built everywhere, because the machine that can build for Windows is
         # never the machine asking for it.
         if not IS_WINDOWS:

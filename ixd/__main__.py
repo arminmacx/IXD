@@ -165,7 +165,22 @@ def _register_browser_integration(service) -> None:
         # the previous version through repeated launches and reloads.
         try:
             folder = integration.extension_dir()
-            service.db.log_event(f"Browser extension written to {folder}")
+            firefox = integration.firefox_extension_dir()
+            # The manifest is named, not assumed. A folder that exists and a
+            # folder a browser can load are different things, and the
+            # difference — a missing `manifest.json` — is what a browser
+            # reports as a corrupted extension. Both outcomes are logged so a
+            # field report says which one happened.
+            for label, path in (("Chrome", folder), ("Firefox", firefox)):
+                manifest = path / "manifest.json"
+                if manifest.is_file():
+                    service.db.log_event(
+                        f"{label} extension ready at {path} "
+                        f"(manifest.json, {manifest.stat().st_size} bytes)")
+                else:
+                    service.db.log_event(
+                        f"{label} extension at {path} has no manifest.json — "
+                        "the browser will refuse it", level="error")
         except Exception as exc:  # noqa: BLE001 - registration still matters
             service.db.log_event(f"Could not write the extension out: {exc}",
                                  level="warning")
