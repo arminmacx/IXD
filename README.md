@@ -16,7 +16,7 @@ and no runtime dependency beyond Qt.
 [![Python](https://img.shields.io/badge/python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.11-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-555)](#installation)
-[![Tests](https://img.shields.io/badge/tests-1163%20offline%20assertions-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1324%20offline%20assertions-3fb950)](#testing)
 [![Dependencies](https://img.shields.io/badge/external%20binaries-none-3fb950)](#no-external-binaries)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -138,12 +138,28 @@ a tool it does not ship.
 Every release is built on all three operating systems by CI and attached to
 the [Releases](../../releases) page — nothing to compile.
 
-| Platform | File |
-|---|---|
-| Debian / Ubuntu | `ixd_1.0.14_amd64.deb` → `sudo dpkg -i ixd_1.0.14_amd64.deb` |
-| Linux (portable) | `ixd-linux-x86_64.tar.gz` → extract and run `ixd/ixd` |
-| macOS (Apple silicon) | `*.dmg` — unsigned, so right-click → **Open** the first time. **Unverified: never launched on real hardware** |
-| Windows | `ixd-1.0.14-windows-x64.zip` → extract and run `ixd.exe`. See the note below on the SmartScreen warning; the **first** launch also takes a while, because Windows scans the whole folder before running anything from it |
+Every platform has both: an **installer**, and a **portable** copy that keeps
+its files wherever you put it and can replace itself in place when a new
+version appears.
+
+| Platform | Installer | Portable |
+|---|---|---|
+| Windows | `ixd-1.0.15-windows-x64-setup.exe` | `ixd-1.0.15-windows-x64.zip` → extract, run `ixd.exe` |
+| macOS (Apple silicon) | `ixd-1.0.15-macos-arm64.pkg`, or the `.dmg` | `ixd-macos-arm64.zip` |
+| Debian / Ubuntu | `ixd_1.0.15_amd64.deb` → `sudo dpkg -i ixd_1.0.15_amd64.deb` | `ixd-linux-x86_64.tar.gz` → extract, run `ixd/ixd` |
+
+The **Windows installer asks who it is for**: *everyone* needs administrator
+and installs to `Program Files`; *just me* needs nothing and installs to
+`%APPDATA%\IXD`. See the note below on the SmartScreen warning; the **first**
+launch also takes a while, because Windows scans the whole folder before
+running anything from it.
+
+macOS is unsigned either way, so right-click → **Open** the first time —
+and it is **unverified: never launched on real hardware**.
+
+The `*-selfupdate*` archives are the portable copies that are allowed to
+replace their own folder when a new version appears. The ordinary ones never
+touch themselves.
 
 ### Or build it yourself
 
@@ -281,7 +297,7 @@ can also be driven directly:
 
 | Host | Produces |
 |---|---|
-| Linux | `dist/ixd/`, `ixd_1.0.14_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
+| Linux | `dist/ixd/`, `ixd_1.0.15_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
 | macOS | `Internet Xtreme Downloader.app`, `.dmg` via `hdiutil` |
 | Windows | `dist/ixd/`, `.zip`, multi-resolution `.ico` |
 

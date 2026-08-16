@@ -2874,6 +2874,109 @@ def test_the_folder_the_browser_loads_always_has_a_manifest() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_the_extension_sits_where_an_update_leaves_it() -> None:
+    """The browser is pointed at that folder once and never again.
+
+    The user, on finding it under `%APPDATA%`: *"on selfupdate zip file you
+    should still holding the extension in same place as the main folder because
+    when upgrade to new version done its done in same place and user need to
+    point their browser to reload the extension from that folder … but now i
+    see you push the extension to AppData\\Roaming\\IXD which gonna be in
+    conflict with the installer you made."*
+
+    Right on both counts. A portable build replaces its own folder in place, so
+    an extension folder inside it keeps the path the browser holds; one in the
+    data directory belongs to no install in particular, and once there is also
+    an installed copy the two share it and the last one launched wins.
+
+    So it goes beside the application **when that is writable** — portable, and
+    a per-user install under `%APPDATA%\\IXD` — and falls back to the data
+    directory when it is not, which is the all-users install under Program
+    Files and the .deb under /opt.
+
+    And the swap must not take it: it is generated, so it is in no archive, and
+    the pass that removes what the new version no longer ships would delete the
+    whole folder. The application rewrites it on the next launch, but the
+    browser does not wait — a folder that vanishes is one it marks corrupted.
+    """
+    print("\n[the extension sits where an update leaves it]")
+    from ixd import config, integration, updates
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-where-"))
+    previous_frozen = getattr(sys, "frozen", None)
+    previous_exe = sys.executable
+    previous_data = config.DATA_DIR
+    try:
+        installed = root / "installed"
+        installed.mkdir(parents=True)
+        (installed / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        config.DATA_DIR = root / "data"
+        config.DATA_DIR.mkdir(parents=True)
+
+        sys.frozen = True
+        sys.executable = str(installed / "ixd")
+        check("a writable installation keeps the extension beside it",
+              integration.extension_root() == installed,
+              str(integration.extension_root()))
+
+        # Program Files, from the point of view of the person running it.
+        readonly = root / "readonly"
+        (readonly).mkdir()
+        (readonly / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        readonly.chmod(0o500)
+        sys.executable = str(readonly / "ixd")
+        try:
+            check("an installation it cannot write to falls back to the data dir",
+                  integration.extension_root() == config.DATA_DIR,
+                  str(integration.extension_root()))
+        finally:
+            readonly.chmod(0o700)
+
+        check("and writability is asked, not read off permission bits",
+              "_is_writable" in inspect_source(integration.extension_root))
+
+        # The swap, with an extension folder the archive knows nothing about.
+        sys.executable = str(installed / "ixd")
+        target = root / "target"
+        (target / "extension" / "content").mkdir(parents=True)
+        (target / "extension" / "manifest.json").write_text("{}", encoding="utf-8")
+        (target / "extension-firefox").mkdir(parents=True)
+        (target / "extension-firefox" / "manifest.json").write_text("{}", encoding="utf-8")
+        (target / "old-thing.txt").write_text("dropped", encoding="utf-8")
+        (target / "ixd").write_text("old", encoding="utf-8")
+
+        source = root / "newversion"
+        (source / "_internal").mkdir(parents=True)
+        (source / "ixd").write_text("new", encoding="utf-8")
+        (source / "_internal" / "base.zip").write_text("x", encoding="utf-8")
+
+        ok, detail = updates._replace_contents(source, target)
+        check("the swap succeeds", ok, detail)
+        check("the new version is in place",
+              (target / "ixd").read_text() == "new")
+        check("what the new version dropped is still removed",
+              not (target / "old-thing.txt").exists())
+        check("but the folder the browser loads survives the update",
+              (target / "extension" / "manifest.json").is_file(),
+              str(sorted(p.name for p in target.iterdir())))
+        check("and so does Firefox's",
+              (target / "extension-firefox" / "manifest.json").is_file())
+
+        check("the updater and the integration agree on which folders those are",
+              updates.PRESERVED_ON_UPDATE == {integration.EXTENSION_DIR_NAME,
+                                              integration.FIREFOX_EXTENSION_DIR_NAME},
+              f"{updates.PRESERVED_ON_UPDATE} vs "
+              f"{integration.EXTENSION_DIR_NAME}/{integration.FIREFOX_EXTENSION_DIR_NAME}")
+    finally:
+        if previous_frozen is None:
+            del sys.frozen
+        else:
+            sys.frozen = previous_frozen
+        sys.executable = previous_exe
+        config.DATA_DIR = previous_data
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_an_update_survives_a_folder_windows_will_not_rename() -> None:
     """Two Windows failures, both reported with a screenshot.
 
@@ -5023,11 +5126,23 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
           "ixd.exe" in script and "$INSTDIR\\ixd.exe" in script)
 
     # Deliberate decisions, each of which was a choice rather than a default.
-    check("it does not ask for administrator",
-          "RequestExecutionLevel user" in script,
-          _re.search(r"RequestExecutionLevel.*", script).group(0))
-    check("it installs per-user, under the user's own profile",
-          "$LOCALAPPDATA\\Programs" in script)
+    check("the person installing is asked who it is for",
+          "MULTIUSER_PAGE_INSTALLMODE" in script and "MultiUser.nsh" in script)
+    check("and can install without administrator if they choose",
+          "MULTIUSER_EXECUTIONLEVEL Highest" in script,
+          _re.search(r"MULTIUSER_EXECUTIONLEVEL.*", script).group(0))
+    check("all users goes to Program Files",
+          "$PROGRAMFILES64\\IXD" in script)
+    check("just me goes to %APPDATA%, which needs no elevation and is writable",
+          "$APPDATA\\IXD" in script)
+
+    # The half that is easy to get wrong: an all-users install whose uninstall
+    # entry is written to HKCU shows up for one account and cannot be removed
+    # by anyone else. SHCTX is whichever hive the chosen mode implies.
+    hives = _re.findall(r"(?:WriteRegStr|WriteRegDWORD|DeleteRegKey)\s+(\S+)", script)
+    check("every registry write follows the chosen mode, not a fixed hive",
+          hives and set(hives) == {"SHCTX"}, str(sorted(set(hives))))
+
     check("Add/Remove Programs gets an entry",
           "CurrentVersion\\Uninstall\\IXD" in script)
     check("with an uninstall command, so it can be removed at all",
@@ -5036,6 +5151,9 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
           "taskkill" in script and script.index("taskkill") < script.index('RMDir /r "$INSTDIR"'))
     check("and takes its shortcuts and registry keys with it",
           'Delete "$DESKTOP' in script and "DeleteRegKey" in script)
+    check("MultiUser is initialised on both sides, or the uninstaller "
+          "does not know which hive it is in",
+          "MULTIUSER_INIT" in script and "MULTIUSER_UNINIT" in script)
 
     # The icon is the one the build generates; it need not exist yet on a tree
     # that has never been built, but the path has to be the one that will.
@@ -5214,6 +5332,7 @@ def main() -> int:
                  test_the_still_running_notice_is_said_once,
                  test_the_extension_folder_follows_the_application,
                  test_the_folder_the_browser_loads_always_has_a_manifest,
+                 test_the_extension_sits_where_an_update_leaves_it,
                  test_an_update_survives_a_folder_windows_will_not_rename):
         try:
             test()

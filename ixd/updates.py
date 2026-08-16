@@ -500,6 +500,15 @@ def _end_process(pid: int) -> str:
 #: may hold a freshly written file for a second or two.
 LOCK_PATIENCE_SECONDS = 20.0
 
+#: Top-level names inside the installation that a swap must not remove.
+#:
+#: These are written by the application, not by any archive, and something
+#: outside this project is pointing at them: the browser loads the extension
+#: from that exact path and treats its disappearance as corruption. Kept as a
+#: constant so `ixd.integration` and the updater cannot drift apart about which
+#: folders those are — a test pins them to each other.
+PRESERVED_ON_UPDATE = frozenset({"extension", "extension-firefox"})
+
 
 def _replace_contents(source: Path, target: Path) -> tuple[bool, str]:
     """Put ``source``'s files where ``target``'s are, file by file.
@@ -549,9 +558,20 @@ def _replace_contents(source: Path, target: Path) -> tuple[bool, str]:
 
     # Anything the new version no longer ships. A file that will not go is not
     # worth failing an otherwise complete update over.
+    #
+    # Except the folders the browser is loading the extension from. They are
+    # *generated* — materialised beside the application at start-up — so they
+    # are in no archive and this pass would delete them wholesale. The
+    # application refreshes their contents on the very next launch, but the
+    # browser does not wait for that: an extension folder that vanishes is one
+    # the browser marks corrupted, and it stays corrupted until it is removed
+    # by hand (context.md §3.44). Left alone, they are updated in place seconds
+    # later with the new version's files and the browser only needs a reload.
     for item in sorted(target.rglob("*"), reverse=True):
         relative = item.relative_to(target)
         if (source / relative).exists() or ".old-" in item.name:
+            continue
+        if relative.parts[0] in PRESERVED_ON_UPDATE:
             continue
         try:
             item.rmdir() if item.is_dir() else item.unlink()

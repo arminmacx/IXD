@@ -176,6 +176,7 @@ jobs:
             dist/*.tar.gz
             dist/*.AppImage
             dist/*setup.exe
+            dist/*.pkg
 
   publish:
     name: Publish the release
@@ -223,14 +224,23 @@ jobs:
 
           ## Downloads
 
-          | Platform | File |
-          |---|---|
-          | Linux (Debian/Ubuntu) | `ixd_*_amd64.deb` |
-          | Linux (portable) | `ixd-linux-x86_64.tar.gz` |
-          | macOS (Apple silicon) | `*.dmg`, or `ixd-macos-arm64.zip` |
-          | Windows (installer) | `ixd-*-windows-x64-setup.exe` |
-          | Windows (portable) | `ixd-*-windows-x64.zip` |
-          | Browser extension | `ixd-extension-chrome-*.zip`, `ixd-extension-firefox-*.zip` |
+          Every platform has both: an **installer**, and a **portable** copy
+          that keeps its files wherever you put them and can replace itself
+          in place.
+
+          | Platform | Installer | Portable |
+          |---|---|---|
+          | Windows | `ixd-*-windows-x64-setup.exe` | `ixd-*-windows-x64.zip` |
+          | macOS (Apple silicon) | `ixd-*-macos-arm64.pkg`, or the `.dmg` | `ixd-macos-arm64.zip` |
+          | Linux | `ixd_*_amd64.deb` | `ixd-linux-x86_64.tar.gz` |
+
+          The Windows installer asks whether to install **for everyone** — which
+          needs administrator and goes to `Program Files` — or **just for you**,
+          which needs nothing and goes to `%APPDATA%\IXD`.
+
+          The `*-selfupdate*` archives are the portable copies that are allowed
+          to replace their own folder when a new version appears. The ordinary
+          ones never touch themselves.
 
           Start the application once, then load the extension from the folder
           it writes. The two browsers need different manifests under the same

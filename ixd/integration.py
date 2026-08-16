@@ -118,21 +118,69 @@ CHROME_MANIFEST = "manifest.chrome.json"
 FIREFOX_MANIFEST = "manifest.firefox.json"
 
 
+def _is_writable(directory: Path) -> bool:
+    """Can this process actually create a file here? Asked, not inferred.
+
+    Permission bits are the wrong question on Windows, where an elevated
+    install under ``Program Files`` is writable to an administrator and not to
+    the user who runs the application afterwards. The only answer that is true
+    on every platform is the one you get by trying.
+    """
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".ixd-write-probe"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def extension_root() -> Path:
+    """The folder that holds ``extension`` and ``extension-firefox``.
+
+    **Beside the application whenever that is writable**, and only otherwise in
+    the data directory. The browser is pointed at this path once and keeps
+    referring to it, so where it is decides whether an update reaches it:
+
+    * A **portable / self-updating** build replaces its own folder in place, so
+      an extension folder inside it is replaced along with everything else and
+      the path the browser holds keeps working. Putting it under ``%APPDATA%``
+      instead left the extension somewhere the install had no relationship
+      with — and once there is also an installed copy, two installations share
+      one folder and the last one launched wins.
+    * A **per-user install** (``%APPDATA%\\IXD``) is writable, so the same
+      applies.
+    * An **all-users install** (``Program Files``, ``/opt`` from the .deb) is
+      not writable by the person running the application. That is what the data
+      directory is for, and it is a fallback rather than the default.
+
+    macOS is always the data directory: ``sys.executable`` there is inside
+    ``…app/Contents/MacOS``, and writing into a bundle is both invisible to the
+    user and undone by the next update.
+    """
+    if getattr(sys, "frozen", False) and not config.IS_MACOS:
+        beside = Path(sys.executable).resolve().parent
+        if _is_writable(beside):
+            return beside
+    return config.DATA_DIR
+
+
 def extension_dir() -> Path:
     """The folder the user points "Load unpacked" at.
 
     A source checkout uses the tree directly. A frozen build cannot: its data
     files live inside the bundle, which is wiped and rebuilt on every launch
     for onefile builds and is not somewhere a user should be browsing. So the
-    extension is materialised once into the application's data directory, which
-    is writable and has a stable path the browser can keep referring to.
+    extension is materialised into :func:`extension_root`, which is writable
+    and has a stable path the browser can keep referring to.
     """
     source = bundled_extension_source()
     if not getattr(sys, "frozen", False):
         _write_manifest(source, source, CHROME_MANIFEST)
         return source
 
-    target = config.DATA_DIR / EXTENSION_DIR_NAME
+    target = extension_root() / EXTENSION_DIR_NAME
     try:
         _mirror_tree(source, target, CHROME_MANIFEST)
     except OSError:
@@ -260,12 +308,14 @@ def firefox_extension_dir() -> Path:
     instructions — the extension shipped, and half the people who could load
     it could not.
 
-    Always in the data directory, including for a source run: it is a
-    generated mirror, and writing it beside the tree left an `extension-firefox`
-    folder in the checkout that nothing owned and the source bundle shipped.
+    Beside the Chrome one, in :func:`extension_root` — except for a source run,
+    where it goes to the data directory rather than leaving an
+    `extension-firefox` folder in the checkout that nothing owned and the
+    source bundle shipped.
     """
     source = bundled_extension_source()
-    firefox = config.DATA_DIR / FIREFOX_EXTENSION_DIR_NAME
+    root = extension_root() if getattr(sys, "frozen", False) else config.DATA_DIR
+    firefox = root / FIREFOX_EXTENSION_DIR_NAME
     try:
         _mirror_tree(source, firefox, FIREFOX_MANIFEST)
     except OSError:

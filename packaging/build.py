@@ -460,17 +460,32 @@ def build_windows_source() -> Path:
 #: or omits a file nobody notices until somebody runs it.
 _NSIS_SCRIPT = r"""
 Unicode true
+
+; MultiUser gives the "everyone / just me" page, and with it the two things
+; that have to change together: where the files go, and which hive the
+; uninstall entry is written to. Doing that by hand is how an installer ends up
+; writing an all-users install into HKCU, where Add/Remove Programs shows it to
+; one account and nobody else can remove it.
+;
+; `Highest` means: elevate when the person running this can, and offer only the
+; per-user option when they cannot. A standard user still gets a working
+; install, which is the whole point of having the second option.
+!define MULTIUSER_EXECUTIONLEVEL Highest
+!define MULTIUSER_MUI
+!define MULTIUSER_INSTALLMODE_COMMANDLINE
+!define MULTIUSER_INSTALLMODE_INSTDIR "{app_slug}"
+!define MULTIUSER_INSTALLMODE_INSTALL_REGISTRY_KEY "Software\{app_slug}"
+!define MULTIUSER_INSTALLMODE_INSTALL_REGISTRY_VALUENAME "InstallDir"
+!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_KEY "Software\{app_slug}"
+!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_VALUENAME "InstallDir"
+!define MULTIUSER_INSTALLMODE_FUNCTION OnInstallModeChanged
+!include "MultiUser.nsh"
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
 
 Name "{app_name}"
 OutFile "{output}"
 BrandingText "{app_name} {version}"
-; Per-user by default: asking for administrator to unpack a folder into the
-; user's own profile is how an ordinary program starts looking like something
-; to be suspicious of, and it is not needed for anything here.
-RequestExecutionLevel user
-InstallDir "$LOCALAPPDATA\Programs\{app_slug}"
-InstallDirRegKey HKCU "Software\{app_slug}" "InstallDir"
 ShowInstDetails show
 ShowUninstDetails show
 
@@ -480,12 +495,38 @@ ShowUninstDetails show
 !define MUI_FINISHPAGE_RUN "$INSTDIR\{launcher}"
 !define MUI_FINISHPAGE_RUN_TEXT "Start {app_name}"
 
+!insertmacro MULTIUSER_PAGE_INSTALLMODE
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+
+; Chosen on the page above, and the two answers are not symmetrical.
+;
+; All users goes to Program Files, which needs administrator and which the
+; person who *runs* the application afterwards cannot write to — so the
+; extension folder falls back to their data directory, by design.
+;
+; Just me goes to %APPDATA%\{app_slug} — writable, no elevation, and the
+; extension folder therefore sits inside the install where the browser can be
+; pointed at it once and keep working across updates.
+Function OnInstallModeChanged
+  ${{If}} $MultiUser.InstallMode == "AllUsers"
+    StrCpy $INSTDIR "$PROGRAMFILES64\{app_slug}"
+  ${{Else}}
+    StrCpy $INSTDIR "$APPDATA\{app_slug}"
+  ${{EndIf}}
+FunctionEnd
+
+Function .onInit
+  !insertmacro MULTIUSER_INIT
+FunctionEnd
+
+Function un.onInit
+  !insertmacro MULTIUSER_UNINIT
+FunctionEnd
 
 Section "Install"
   SetOutPath "$INSTDIR"
@@ -501,17 +542,21 @@ Section "Install"
   CreateShortCut "$SMPROGRAMS\{app_name}\Uninstall {app_name}.lnk" "$INSTDIR\uninstall.exe"
   CreateShortCut "$DESKTOP\{app_name}.lnk" "$INSTDIR\{launcher}"
 
-  WriteRegStr HKCU "Software\{app_slug}" "InstallDir" "$INSTDIR"
+  ; SHCTX is HKLM for an all-users install and HKCU for a per-user one.
+  ; MultiUser sets it; writing the literal hive is the mistake it exists to
+  ; prevent.
+  WriteRegStr SHCTX "Software\{app_slug}" "InstallDir" "$INSTDIR"
+  WriteRegStr SHCTX "Software\{app_slug}" "InstallMode" "$MultiUser.InstallMode"
   ; The entry Add/Remove Programs reads. Without it the application can be
   ; installed and not uninstalled, which is worse than not installing at all.
-  WriteRegStr HKCU "{uninstall_key}" "DisplayName" "{app_name}"
-  WriteRegStr HKCU "{uninstall_key}" "DisplayVersion" "{version}"
-  WriteRegStr HKCU "{uninstall_key}" "Publisher" "{publisher}"
-  WriteRegStr HKCU "{uninstall_key}" "DisplayIcon" "$INSTDIR\{launcher}"
-  WriteRegStr HKCU "{uninstall_key}" "UninstallString" "$INSTDIR\uninstall.exe"
-  WriteRegStr HKCU "{uninstall_key}" "InstallLocation" "$INSTDIR"
-  WriteRegDWORD HKCU "{uninstall_key}" "NoModify" 1
-  WriteRegDWORD HKCU "{uninstall_key}" "NoRepair" 1
+  WriteRegStr SHCTX "{uninstall_key}" "DisplayName" "{app_name}"
+  WriteRegStr SHCTX "{uninstall_key}" "DisplayVersion" "{version}"
+  WriteRegStr SHCTX "{uninstall_key}" "Publisher" "{publisher}"
+  WriteRegStr SHCTX "{uninstall_key}" "DisplayIcon" "$INSTDIR\{launcher}"
+  WriteRegStr SHCTX "{uninstall_key}" "UninstallString" "$INSTDIR\uninstall.exe"
+  WriteRegStr SHCTX "{uninstall_key}" "InstallLocation" "$INSTDIR"
+  WriteRegDWORD SHCTX "{uninstall_key}" "NoModify" 1
+  WriteRegDWORD SHCTX "{uninstall_key}" "NoRepair" 1
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 
@@ -525,9 +570,11 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\{app_name}\{app_name}.lnk"
   Delete "$SMPROGRAMS\{app_name}\Uninstall {app_name}.lnk"
   RMDir "$SMPROGRAMS\{app_name}"
+  ; Takes the generated extension folders with it. They are written by the
+  ; application rather than by this installer, so nothing else would.
   RMDir /r "$INSTDIR"
-  DeleteRegKey HKCU "{uninstall_key}"
-  DeleteRegKey HKCU "Software\{app_slug}"
+  DeleteRegKey SHCTX "{uninstall_key}"
+  DeleteRegKey SHCTX "Software\{app_slug}"
 SectionEnd
 """
 
@@ -547,6 +594,43 @@ def windows_installer_script(binary_dir: Path, output: Path) -> str:
         uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
                        r"\Uninstall\IXD"),
     )
+
+
+def build_macos_pkg(app_bundle: Path) -> Path | None:
+    """A double-clickable installer, which a .dmg is not.
+
+    The `.dmg` is a disk image: it opens a window and the person drags the
+    application into `Applications` themselves. That is idiomatic on macOS and
+    it is still published — but it is not an installer, and "an installer for
+    every OS" should mean one on every OS rather than one on two of them.
+
+    `pkgbuild` ships with the developer tools and exists only on macOS, so this
+    is written here and runs on the macOS runner, the same arrangement as NSIS.
+    Unsigned, like the .dmg: the first launch still needs right-click → Open.
+    """
+    section("macOS installer")
+    if not app_bundle.exists():
+        log("no .app bundle — skipped")
+        return None
+    if not have("pkgbuild"):
+        log("pkgbuild is not available here, so no .pkg is produced")
+        return None
+
+    target = DIST / f"{APP_NAME}-{VERSION}-macos-arm64.pkg"
+    target.unlink(missing_ok=True)
+    code = run([
+        "pkgbuild",
+        "--install-location", "/Applications",
+        "--component", str(app_bundle),
+        "--identifier", "com.ixd.downloader",
+        "--version", VERSION,
+        str(target),
+    ])
+    if code != 0 or not target.exists():
+        log("pkgbuild failed; no .pkg was produced")
+        return None
+    log(f"wrote {target.name} ({target.stat().st_size / 1048576:.1f} MB)")
+    return target
 
 
 def build_windows_installer(binary_dir: Path) -> Path | None:
@@ -681,8 +765,17 @@ def main() -> int:
     # pass to produce an archive that differs by one file is ten minutes
     # nobody gets back.
     existing = DIST / "ixd"
-    if arguments.installer and not arguments.package and existing.exists():
-        build_windows_installer(existing)
+    bundle = DIST / f"{BUNDLE_NAME}.app"
+    if arguments.installer and not arguments.package:
+        # `--installer` means "this platform's installer", so it does the right
+        # thing wherever it is run rather than being a Windows-only flag with a
+        # general-sounding name.
+        if IS_MACOS and bundle.exists():
+            build_macos_pkg(bundle)
+        elif IS_LINUX and existing.exists():
+            build_deb(existing)
+        elif existing.exists():
+            build_windows_installer(existing)
         if not arguments.self_update:
             section("Done")
             return 0
@@ -702,6 +795,7 @@ def main() -> int:
             build_appimage(binary)
         elif IS_MACOS:
             build_dmg(binary)
+            build_macos_pkg(binary)
         elif IS_WINDOWS:
             build_windows_zip(binary)
             build_windows_installer(binary)
