@@ -2784,6 +2784,113 @@ def test_the_extension_folder_follows_the_application() -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_an_update_survives_a_folder_windows_will_not_rename() -> None:
+    """Two Windows failures, both reported with a screenshot.
+
+    `[WinError 32] … being used by another process: 'C:\\Users\\…\\ixd' ->
+    '…\\ixd.previous'` — the swap renamed the whole folder, and Windows will
+    not rename a folder while anything holds a file in it. Something always
+    does: the browser keeps a native-messaging host alive out of the installed
+    folder, and a scanner may be reading what was just written.
+
+    Then, on retrying: `Failed to execute script 'entry' … No such file or
+    directory: …\\update\\unpacked\\ixd\\_internal\\base_library.zip` — the
+    second attempt emptied the staging folder that the first attempt's updater
+    was still *running from*.
+
+    Neither can be reproduced on Linux, where a rename over a busy directory
+    is allowed. What is tested here is the code that replaced them: files are
+    replaced one at a time, a file that refuses is moved aside first, staging
+    folders are never reused, and the Windows liveness check does not use the
+    call that kills a process instead of looking at it.
+    """
+    print("\n[an update survives a folder Windows will not rename]")
+    import re
+    from ixd import updates
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-swap-"))
+    source = root / "new"
+    target = root / "installed"
+    (source / "_internal").mkdir(parents=True)
+    (source / "ixd").write_text("#!/bin/sh\necho new\n", encoding="utf-8")
+    (source / "_internal" / "base_library.zip").write_text("new", encoding="utf-8")
+    target.mkdir()
+    (target / "ixd").write_text("old", encoding="utf-8")
+    (target / "stale.dat").write_text("gone in the new version", encoding="utf-8")
+
+    ok, detail = updates._replace_contents(source, target)
+    check("the new version is put in place file by file", ok, detail)
+    check("the launcher is the new one",
+          (target / "ixd").read_text().startswith("#!"), (target / "ixd").read_text())
+    check("nested files arrive too",
+          (target / "_internal" / "base_library.zip").read_text() == "new")
+    check("and what the new version dropped is gone",
+          not (target / "stale.dat").exists())
+
+    # A file the system will not let us write over — which on Windows is every
+    # running executable. The way through is to rename it aside first.
+    real_copy = shutil.copy2
+    refused: dict[str, int] = {"ixd": 0}
+
+    def refuses_the_launcher(src, dst, *args, **kwargs):
+        if Path(dst).name == "ixd" and refused["ixd"] < 1:
+            refused["ixd"] += 1
+            raise PermissionError(13, "being used by another process")
+        return real_copy(src, dst, *args, **kwargs)
+
+    (source / "ixd").write_text("#!/bin/sh\necho newer\n", encoding="utf-8")
+    shutil.copy2 = refuses_the_launcher
+    try:
+        ok, detail = updates._replace_contents(source, target)
+    finally:
+        shutil.copy2 = real_copy
+    check("a file that cannot be written over is moved aside and replaced",
+          ok and (target / "ixd").read_text().endswith("newer\n"), detail)
+    check("and nothing of the moved-aside copy is left lying about",
+          not any(".old-" in p.name for p in target.iterdir()),
+          str([p.name for p in target.iterdir()]))
+
+    # Staging is never reused, so a retry cannot empty the folder the first
+    # attempt is running from.
+    archive = root / "ixd-linux-x86_64-selfupdate.tar.gz"
+    import tarfile as _tarfile
+    with _tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(source, arcname="ixd")
+    first = updates.stage(archive, root / "staging" / "unpacked", launcher="ixd")
+    (first.parent / "running.lock").write_text("the first updater", encoding="utf-8")
+    second = updates.stage(archive, root / "staging" / "unpacked", launcher="ixd")
+    check("a second attempt unpacks somewhere else entirely",
+          first.parent != second.parent, f"{first.parent} == {second.parent}")
+    check("and the first attempt's folder is still whole",
+          (first / "ixd").exists() and (first / "_internal" / "base_library.zip").exists(),
+          str(sorted(p.name for p in first.iterdir())))
+
+    # Old staging folders are swept, but only once they are old enough that
+    # nothing can still be running from them.
+    ancient = first.parent.with_name("unpacked-000000-1")
+    ancient.mkdir(parents=True, exist_ok=True)
+    (ancient / "leftover").write_text("from last month", encoding="utf-8")
+    os.utime(ancient, (time.time() - 7 * 86400, time.time() - 7 * 86400))
+    updates.stage(archive, root / "staging" / "unpacked", launcher="ixd")
+    check("a week-old staging folder is cleaned up", not ancient.exists())
+    check("and a recent one is not", first.parent.exists(), str(first.parent))
+
+    # The Windows liveness check, verified the way §3.22 taught: read the
+    # source, and read the stdlib's own wintypes for the names it uses.
+    source_text = (Path(updates.__file__)).read_text(encoding="utf-8")
+    windows_branch = source_text[source_text.index("if sys.platform.startswith(\"win\"):",
+                                                   source_text.index("def _alive")):]
+    check("the Windows branch does not use the call that kills a process",
+          "os.kill" not in windows_branch.split("try:\n        os.kill")[0],
+          "os.kill appears in the Windows path")
+    import ctypes.wintypes as _wintypes
+    check("every wintypes name it uses exists in this Python",
+          all(hasattr(_wintypes, name) for name in ("DWORD", "BOOL", "HANDLE")),
+          "a name is missing from ctypes.wintypes")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -4888,7 +4995,8 @@ def main() -> int:
                  test_the_updater_says_what_it_is_doing,
                  test_what_the_browser_announces_is_the_real_name,
                  test_the_still_running_notice_is_said_once,
-                 test_the_extension_folder_follows_the_application):
+                 test_the_extension_folder_follows_the_application,
+                 test_an_update_survives_a_folder_windows_will_not_rename):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

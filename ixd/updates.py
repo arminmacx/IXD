@@ -276,7 +276,15 @@ def stage(archive: Path, into: Path, launcher: str = "") -> Path:
     it out with nothing left to run.
     """
     launcher = launcher or Path(sys.executable).name
-    shutil.rmtree(into, ignore_errors=True)
+    # A staging folder is never reused. The first attempt's updater is still
+    # *running from* the last one when a second attempt is made — that is what
+    # a retry after a failed update is — and emptying it took its own files
+    # away underneath it: "Failed to execute script 'entry' … No such file or
+    # directory: …\\update\\unpacked\\ixd\\_internal\\base_library.zip".
+    # Each attempt gets its own folder, and the old ones are swept up when
+    # nothing is holding them.
+    into = into.with_name(f"{into.name}-{int(time.time())}-{os.getpid()}")
+    _sweep_old_staging(into.parent, keep=into.name)
     into.mkdir(parents=True, exist_ok=True)
 
     if archive.suffix.lower() == ".zip":
@@ -302,6 +310,38 @@ def stage(archive: Path, into: Path, launcher: str = "") -> Path:
     except OSError:
         pass
     return root
+
+
+#: How old a staging folder has to be before it is swept up. An updater from
+#: a failed attempt may still be running out of one, and deleting its files
+#: underneath it is the exact failure this staging scheme exists to prevent —
+#: so age is the only safe signal available, and an hour is far longer than
+#: any update takes.
+STAGING_KEEP_SECONDS = 60 * 60
+
+
+def _sweep_old_staging(parent: Path, keep: str = "") -> None:
+    """Remove staging folders from *old* attempts, and never a recent one.
+
+    Best-effort throughout: a folder that will not go is one something is
+    still holding, and it will be swept next time instead.
+    """
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    cutoff = time.time() - STAGING_KEEP_SECONDS
+    for entry in entries:
+        if not entry.is_dir() or entry.name == keep:
+            continue
+        if not entry.name.startswith("unpacked"):
+            continue
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue              # recent: something may be running in it
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
 
 
 def _refuse_paths(names: Any) -> None:
@@ -351,28 +391,9 @@ def apply(target: Path, wait_for: int = 0, timeout: float = 180.0,
         if _alive(wait_for):
             return False, f"process {wait_for} is still running"
 
-    aside = target.with_name(target.name + ".previous")
-    shutil.rmtree(aside, ignore_errors=True)
-    try:
-        if target.exists():
-            os.replace(target, aside)
-    except OSError as error:
-        return False, f"could not move the old version aside: {error}"
-
-    try:
-        shutil.copytree(staged, target, symlinks=True, dirs_exist_ok=True)
-    except OSError as error:
-        # Put it back. A failed update must leave a working application.
-        shutil.rmtree(target, ignore_errors=True)
-        if aside.exists():
-            try:
-                os.replace(aside, target)
-            except OSError:
-                return False, (f"the update failed ({error}) and the old version "
-                               f"is in {aside}")
-        return False, f"the update failed and the previous version was restored: {error}"
-
-    shutil.rmtree(aside, ignore_errors=True)
+    ok, detail = _replace_contents(staged, target)
+    if not ok:
+        return False, detail
     if relaunch:
         launcher = target / Path(sys.executable).name
         try:
@@ -384,7 +405,118 @@ def apply(target: Path, wait_for: int = 0, timeout: float = 180.0,
     return True, f"updated {target}"
 
 
+#: How long a locked file is given before the update gives up on it. Windows
+#: releases handles a moment after a process ends, and an anti-virus scanner
+#: may hold a freshly written file for a second or two.
+LOCK_PATIENCE_SECONDS = 20.0
+
+
+def _replace_contents(source: Path, target: Path) -> tuple[bool, str]:
+    """Put ``source``'s files where ``target``'s are, file by file.
+
+    **Not** a directory rename. Windows refuses to rename or delete a folder
+    while any process holds a file inside it, and there is always one: the
+    browser keeps a native-messaging host alive from the installed folder
+    (§3.14u57), an anti-virus scanner may be reading what was just written,
+    and Explorer holds whatever is selected. The report was exactly that —
+    `[WinError 32] … being used by another process: 'C:\\Users\\…\\ixd' ->
+    'C:\\Users\\…\\ixd.previous'`.
+
+    A *file* is different. Windows will not let a running executable be
+    overwritten or deleted, but it will let it be **renamed**, and the new one
+    can then be written in its place. So each file is replaced on its own, a
+    locked one is moved aside first, and what was moved aside is swept up
+    afterwards — or on the next update, if it is still held.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    moved_aside: list[Path] = []
+    deadline = time.time() + LOCK_PATIENCE_SECONDS
+
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        destination = target / relative
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                shutil.copy2(item, destination)
+                break
+            except OSError as error:
+                aside = destination.with_name(
+                    f"{destination.name}.old-{int(time.time())}")
+                try:
+                    os.replace(destination, aside)
+                    moved_aside.append(aside)
+                    continue          # the way is clear now
+                except OSError:
+                    if time.time() >= deadline:
+                        return False, (f"{destination.name} is held by another "
+                                       f"program and could not be replaced: "
+                                       f"{error}")
+                    time.sleep(0.5)
+
+    # Anything the new version no longer ships. A file that will not go is not
+    # worth failing an otherwise complete update over.
+    for item in sorted(target.rglob("*"), reverse=True):
+        relative = item.relative_to(target)
+        if (source / relative).exists() or ".old-" in item.name:
+            continue
+        try:
+            item.rmdir() if item.is_dir() else item.unlink()
+        except OSError:
+            pass
+
+    for aside in moved_aside:
+        try:
+            aside.unlink()
+        except OSError:
+            pass                      # still running; the next update takes it
+    return True, f"replaced {target}"
+
+
 def _alive(pid: int) -> bool:
+    """Is that process still running?
+
+    On POSIX, signal 0 asks without sending anything. **On Windows it does
+    not**: `os.kill` maps every signal other than the two console events onto
+    `TerminateProcess`, so the obvious cross-platform check would kill the
+    application it is waiting for rather than look at it — and the update
+    would then be racing a process that was killed mid-write instead of one
+    that closed its database and went. Windows is asked through the interface
+    that answers this question: open a handle and read the exit code.
+    """
+    if sys.platform.startswith("win"):
+        import ctypes
+        from ctypes import wintypes
+
+        SYNCHRONIZE = 0x00100000
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                             wintypes.DWORD)
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.GetExitCodeProcess.argtypes = (
+                wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            handle = kernel32.OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        except Exception:               # noqa: BLE001 - unknown means "gone"
+            return False
+        if not handle:
+            return False                # exited, or not ours to look at
+        try:
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
