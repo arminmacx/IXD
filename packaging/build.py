@@ -580,13 +580,20 @@ SectionEnd
 
 
 def windows_installer_script(binary_dir: Path, output: Path) -> str:
-    """The installer script for what has just been built."""
+    """The installer script for what has just been built.
+
+    `app_name` is the **display** name and `app_slug` the one that goes in
+    paths and the registry. They were the same string — the slug — until the
+    script was compiled and its preprocessed output read: Add/Remove Programs
+    would have said `ixd`, and so would the Start menu folder and the desktop
+    shortcut. Nothing about reading the template showed it.
+    """
     icon = ROOT / "packaging" / "icons" / "ixd.ico"
     return _NSIS_SCRIPT.format(
-        app_name=APP_NAME,
+        app_name=BUNDLE_NAME,
         app_slug="IXD",
         version=VERSION,
-        publisher=APP_NAME,
+        publisher="IXD",
         output=str(output),
         payload=str(binary_dir),
         launcher="ixd.exe",

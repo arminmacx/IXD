@@ -2935,6 +2935,43 @@ def test_the_extension_sits_where_an_update_leaves_it() -> None:
         check("and writability is asked, not read off permission bits",
               "_is_writable" in inspect_source(integration.extension_root))
 
+        # macOS: the launcher is three levels inside the bundle, and neither
+        # "inside Contents/MacOS" nor "the bundle itself" is the folder someone
+        # extracted the archive into. It was excluded from this rule entirely
+        # until the user said the rule covers every platform.
+        bundle = root / "Applications"
+        macos = bundle / "Internet Xtreme Downloader.app" / "Contents" / "MacOS"
+        macos.mkdir(parents=True)
+        (macos / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        sys.executable = str(macos / "ixd")
+        was_macos = config.IS_MACOS
+        config.IS_MACOS = True
+        try:
+            check("on macOS it is the folder holding the .app, not inside it",
+                  integration.installation_dir() == bundle,
+                  str(integration.installation_dir()))
+        finally:
+            config.IS_MACOS = was_macos
+        sys.executable = str(installed / "ixd")
+
+        # A copy from 1.0.14 or earlier is never refreshed again, so a browser
+        # pointed at it is frozen on that version for ever.
+        legacy = config.DATA_DIR / "extension"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "manifest.json").write_text("{}", encoding="utf-8")
+        (config.DATA_DIR / "extension-firefox").mkdir(parents=True, exist_ok=True)
+        gone = integration.retire_legacy_extension_copies(installed)
+        check("a copy left by an older version is retired", len(gone) == 2, str(gone))
+        check("and it is really gone", not legacy.exists())
+
+        # …but never when that *is* where the live copy is.
+        keep = config.DATA_DIR / "extension"
+        keep.mkdir(parents=True, exist_ok=True)
+        (keep / "manifest.json").write_text("{}", encoding="utf-8")
+        check("the live copy is never retired as though it were stale",
+              integration.retire_legacy_extension_copies(config.DATA_DIR) == []
+              and keep.exists())
+
         # The swap, with an extension folder the archive knows nothing about.
         sys.executable = str(installed / "ixd")
         target = root / "target"
@@ -5163,6 +5200,58 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
 
     check("and it is compiled only where the tool exists",
           "makensis" in inspect_source(build_module.build_windows_installer))
+
+    # The names a person actually sees. These were the slug — `ixd` in
+    # Add/Remove Programs, in the Start menu and on the desktop — and reading
+    # the template never showed it; compiling and reading the preprocessed
+    # output did.
+    check("what it calls itself is the display name, not the slug",
+          f'"DisplayName" "{build_module.BUNDLE_NAME}"' in script,
+          _re.search(r'"DisplayName".*', script).group(0))
+    check("and so is the Start menu folder and the desktop shortcut",
+          f"$SMPROGRAMS\\{build_module.BUNDLE_NAME}" in script
+          and f"$DESKTOP\\{build_module.BUNDLE_NAME}.lnk" in script)
+    check("while paths and the registry keep the slug",
+          "$PROGRAMFILES64\\IXD" in script and "Uninstall\\IXD" in script)
+
+    # ---- and then actually compile it, wherever that is possible ----
+    #
+    # `makensis` runs on Linux and produces Windows installers, so this is not
+    # a check that only CI can make. Against a stand-in payload: what is under
+    # test is the script, and packing the real 50 MB build here proves nothing
+    # extra and exhausts the compiler's mmap.
+    if not build_module.have("makensis"):
+        print("  SKIP  makensis is not installed here "
+              "(apt install nsis); CI still compiles it")
+        return
+
+    import subprocess
+    with tempfile.TemporaryDirectory() as home:
+        payload = Path(home) / "payload"
+        (payload / "_internal").mkdir(parents=True)
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
+        (payload / "_internal" / "base_library.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
+        # A file with no extension, which is what `\*.*` would have skipped.
+        (payload / "_internal" / "noextension").write_bytes(b"x")
+
+        produced = Path(home) / "setup.exe"
+        nsi = Path(home) / "installer.nsi"
+        nsi.write_text(
+            build_module.windows_installer_script(payload, produced),
+            encoding="utf-8")
+        try:
+            done = subprocess.run(["makensis", "-V2", str(nsi)],
+                                  capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            check("the installer script compiles", False, str(exc))
+            return
+
+        detail = (done.stdout[-600:] + done.stderr[-600:]).strip()
+        check("the installer script compiles", done.returncode == 0, detail)
+        check("and produces an installer", produced.is_file(), detail)
+        if produced.is_file():
+            check("which is a Windows executable",
+                  produced.read_bytes()[:2] == b"MZ")
 
 
 def inspect_source(function) -> str:

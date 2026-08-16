@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
 from dataclasses import dataclass, field
@@ -136,34 +137,80 @@ def _is_writable(directory: Path) -> bool:
         return False
 
 
+def installation_dir() -> Path:
+    """The folder a person would say the application "is in".
+
+    For an ordinary frozen build that is the launcher's own directory — the
+    folder someone extracted the portable archive into, and the one a
+    self-update replaces in place.
+
+    On macOS the launcher lives at ``…/Internet Xtreme Downloader.app/Contents/
+    MacOS/ixd``, and neither of those two answers is right: inside the bundle is
+    invisible and is replaced wholesale by an update, so the folder *holding*
+    the bundle is the one that corresponds to "where I put it".
+    """
+    executable = Path(sys.executable).resolve()
+    if config.IS_MACOS:
+        for parent in executable.parents:
+            if parent.suffix == ".app":
+                return parent.parent
+    return executable.parent
+
+
 def extension_root() -> Path:
     """The folder that holds ``extension`` and ``extension-firefox``.
 
-    **Beside the application whenever that is writable**, and only otherwise in
-    the data directory. The browser is pointed at this path once and keeps
-    referring to it, so where it is decides whether an update reaches it:
+    **Beside the application whenever that is writable**, on every platform,
+    and only otherwise in the data directory. The browser is pointed at this
+    path once and keeps referring to it, so where it is decides whether an
+    update ever reaches it:
 
     * A **portable / self-updating** build replaces its own folder in place, so
       an extension folder inside it is replaced along with everything else and
-      the path the browser holds keeps working. Putting it under ``%APPDATA%``
-      instead left the extension somewhere the install had no relationship
-      with — and once there is also an installed copy, two installations share
-      one folder and the last one launched wins.
+      the path the browser holds keeps working. This is the case the user named
+      directly: *"when update finished it should put all the files in same
+      folder user extracted its ixd"* — and it applies to the macOS and Linux
+      archives exactly as it does to the Windows one.
     * A **per-user install** (``%APPDATA%\\IXD``) is writable, so the same
       applies.
-    * An **all-users install** (``Program Files``, ``/opt`` from the .deb) is
-      not writable by the person running the application. That is what the data
-      directory is for, and it is a fallback rather than the default.
-
-    macOS is always the data directory: ``sys.executable`` there is inside
-    ``…app/Contents/MacOS``, and writing into a bundle is both invisible to the
-    user and undone by the next update.
+    * An **all-users install** (``Program Files``, ``/Applications``, ``/opt``
+      from the .deb) is not writable by the person running the application.
+      That is what the data directory is for, and it is a fallback rather than
+      a default — the user's words: *"on windows installer you can put either
+      in same folder as its installed or in %APPDATA%\\IXD folder."*
     """
-    if getattr(sys, "frozen", False) and not config.IS_MACOS:
-        beside = Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False):
+        beside = installation_dir()
         if _is_writable(beside):
             return beside
     return config.DATA_DIR
+
+
+def retire_legacy_extension_copies(root: Path) -> list[str]:
+    """Remove the data-directory copies once the real ones live elsewhere.
+
+    Versions up to 1.0.14 always materialised into the data directory. Leaving
+    that copy behind is not harmless: it is never refreshed again, so a browser
+    still pointed at it loads an extension that is frozen at the version it was
+    abandoned on, and no amount of updating the application changes what the
+    page sees. Reported as exactly that — *"you still put extension in
+    %APPDATA%\\IXD folder"* — with the current copy sitting beside the
+    application the whole time.
+
+    Only when the live copy is somewhere else, and only the two folders this
+    project created.
+    """
+    if root == config.DATA_DIR:
+        return []
+    removed: list[str] = []
+    for name in (EXTENSION_DIR_NAME, FIREFOX_EXTENSION_DIR_NAME):
+        stale = config.DATA_DIR / name
+        if not stale.is_dir():
+            continue
+        shutil.rmtree(stale, ignore_errors=True)
+        if not stale.exists():
+            removed.append(str(stale))
+    return removed
 
 
 def extension_dir() -> Path:
@@ -312,7 +359,7 @@ def firefox_extension_dir() -> Path:
     where it goes to the data directory rather than leaving an
     `extension-firefox` folder in the checkout that nothing owned and the
     source bundle shipped.
-    """
+    """  # noqa: D401
     source = bundled_extension_source()
     root = extension_root() if getattr(sys, "frozen", False) else config.DATA_DIR
     firefox = root / FIREFOX_EXTENSION_DIR_NAME

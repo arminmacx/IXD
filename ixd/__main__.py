@@ -166,6 +166,24 @@ def _register_browser_integration(service) -> None:
         try:
             folder = integration.extension_dir()
             firefox = integration.firefox_extension_dir()
+            # Which of the two locations was chosen, and why. A field report
+            # that says "it is still in AppData" cannot be answered without
+            # this: the fallback and the preferred path look identical from
+            # outside, and a copy left over from an older version looks like a
+            # copy this launch just wrote.
+            root = integration.extension_root()
+            if root == integration.installation_dir():
+                service.db.log_event(
+                    f"Extension folders live with the application, in {root}")
+            else:
+                service.db.log_event(
+                    f"The installation at {integration.installation_dir()} is "
+                    f"not writable, so the extension folders are in {root}")
+            for gone in integration.retire_legacy_extension_copies(root):
+                service.db.log_event(
+                    f"Removed an extension folder left by an older version: "
+                    f"{gone} — if a browser was loading from there, point it "
+                    f"at {folder} instead")
             # The manifest is named, not assumed. A folder that exists and a
             # folder a browser can load are different things, and the
             # difference — a missing `manifest.json` — is what a browser
