@@ -236,7 +236,12 @@ class UpdateDialog(QDialog):
         self.page_button.setVisible(False)
         self.check_button.setVisible(False)
 
+        # Out of the way first, then gone. The updater's own window is the
+        # only thing that should be on screen while the folders are swapped,
+        # and it cannot start until this process has ended — so leaving is
+        # not optional here, which is what `force_after` guarantees.
         window = self.parent()
-        QTimer.singleShot(1200, self.accept)
+        QTimer.singleShot(900, self.accept)
         if window is not None and hasattr(window, "quit_application"):
-            QTimer.singleShot(1400, window.quit_application)
+            QTimer.singleShot(1000, lambda: window.hide())
+            QTimer.singleShot(1200, lambda: window.quit_application(force_after=4.0))

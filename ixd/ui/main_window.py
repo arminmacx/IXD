@@ -900,8 +900,14 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def quit_application(self) -> None:
+    def quit_application(self, force_after: float = 0.0) -> None:
         """Shut the whole application down, not just the window.
+
+        ``force_after`` is for the one case where lingering is worse than
+        leaving something unfinished: an update is staged and the new version
+        is waiting for this process to end before it can replace it. Qt is
+        asked to stop as usual, and if this process is somehow still here a
+        few seconds later it stops anyway.
 
         The application deliberately keeps running when its window is closed —
         that is what lets downloads continue from the tray — which means
@@ -917,6 +923,20 @@ class MainWindow(QMainWindow):
         self.bridge.detach()
         self.tray.hide()
         self.close()
+
+        if force_after > 0:
+            def leave() -> None:
+                # The service first, so the database closes cleanly, and then
+                # out — whatever else is still holding the event loop. The
+                # updater is watching this process id and can do nothing until
+                # it is gone.
+                try:
+                    self.service.shutdown()
+                except Exception:       # noqa: BLE001 - going anyway
+                    pass
+                os._exit(0)
+
+            QTimer.singleShot(int(force_after * 1000), leave)
 
         from PySide6.QtWidgets import QApplication
         QApplication.quit()

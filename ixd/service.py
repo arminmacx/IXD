@@ -753,7 +753,9 @@ class DownloadService:
             return False, ("the release publishes nothing this build can use: "
                            + ", ".join(str(a.get("name")) for a in release.assets))
 
-        staging = Path(config.DATA_DIR) / "update"
+        # Next to the application for a portable build, so an update never
+        # appears somewhere the user did not put the program.
+        staging = updates.staging_root(Path(config.DATA_DIR) / "update")
         try:
             archive = updates.download(self.client(), asset, staging, progress)
             unpacked = updates.stage(archive, staging / "unpacked")

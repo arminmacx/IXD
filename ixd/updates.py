@@ -128,6 +128,32 @@ class Release:
 # ----------------------------------------------------------------------
 # what this build is
 # ----------------------------------------------------------------------
+def staging_root(fallback: Path) -> Path:
+    """Where an update is unpacked before it replaces anything.
+
+    Beside the application, when the application is portable. Somebody who
+    unpacks a portable build into a folder of their own does not expect its
+    update to appear under `%APPDATA%\\IXD` — reported exactly that way — and
+    a portable copy that leaves things elsewhere is not really portable.
+
+    The data directory remains the fallback, for an install whose own folder
+    is not writable. That build cannot replace itself either, so nothing is
+    unpacked there in practice.
+    """
+    root = install_root()
+    if root is not None:
+        beside = root.parent / f"{root.name}-update"
+        try:
+            beside.mkdir(parents=True, exist_ok=True)
+            probe = beside / ".writable"
+            probe.write_text("", encoding="ascii")
+            probe.unlink()
+            return beside
+        except OSError:
+            pass
+    return fallback
+
+
 def install_root() -> Path | None:
     """The folder this build lives in, or ``None`` when running from source."""
     if not getattr(sys, "frozen", False):
@@ -384,12 +410,28 @@ def apply(target: Path, wait_for: int = 0, timeout: float = 180.0,
     if staged == target:
         return False, "the update is already in place"
 
+    ended = ""
     if wait_for:
-        deadline = time.time() + timeout
+        # Politely first. The application has been asked to close and is
+        # writing out its database; interrupting that to save ten seconds is
+        # not a trade worth making.
+        deadline = time.time() + min(timeout, POLITE_WAIT_SECONDS)
         while time.time() < deadline and _alive(wait_for):
             time.sleep(0.2)
+
+        # Then plainly. A process that will not go is what the user saw as
+        # "the update did not finish — process 23688 is still running", with
+        # the new version downloaded, unpacked and checked, and nothing to
+        # show for it. By this point it has been told to quit and given time
+        # to do it; the update is what was asked for.
         if _alive(wait_for):
-            return False, f"process {wait_for} is still running"
+            ended = _end_process(wait_for)
+            deadline = time.time() + timeout
+            while time.time() < deadline and _alive(wait_for):
+                time.sleep(0.2)
+        if _alive(wait_for):
+            return False, (f"the previous version (process {wait_for}) would "
+                           f"not close{ended}")
 
     ok, detail = _replace_contents(staged, target)
     if not ok:
@@ -402,7 +444,55 @@ def apply(target: Path, wait_for: int = 0, timeout: float = 180.0,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as error:
             return True, f"updated, but could not start it again: {error}"
-    return True, f"updated {target}"
+    return True, f"updated {target}{ended}"
+
+
+#: How long the application is given to close on its own before it is closed
+#: for it. Long enough for a database flush and a tray icon; short enough that
+#: nobody sits watching a progress bar wondering.
+POLITE_WAIT_SECONDS = 25.0
+
+
+def _end_process(pid: int) -> str:
+    """Close a process that has been asked and has not gone.
+
+    Returns a note for the Log, because on a machine that is about to restart
+    into a different version this line is the only account of what happened.
+    """
+    if sys.platform.startswith("win"):
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_TERMINATE = 0x0001
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                             wintypes.DWORD)
+            kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, ctypes.c_uint)
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, int(pid))
+            if not handle:
+                return " (it was already gone)"
+            try:
+                kernel32.TerminateProcess(handle, 0)
+            finally:
+                kernel32.CloseHandle(handle)
+            return " (it had to be closed)"
+        except Exception as error:      # noqa: BLE001
+            return f" (it could not be closed: {error})"
+
+    import signal
+    for attempt, sig in ((0, signal.SIGTERM), (1, signal.SIGKILL)):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            return " (it was already gone)"
+        for _ in range(20):
+            if not _alive(pid):
+                return " (it had to be closed)" if attempt else " (it was asked again)"
+            time.sleep(0.1)
+    return " (it could not be closed)"
 
 
 #: How long a locked file is given before the update gives up on it. Windows
@@ -525,4 +615,14 @@ def _alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+    # A child that has exited but has not been waited on still answers signal
+    # 0 — it is a zombie, and it is holding nothing. Where the kernel will say
+    # so, ask it.
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
+            state = handle.read().rsplit(") ", 1)[1].split(" ", 1)[0]
+        if state == "Z":
+            return False
+    except (OSError, IndexError):
+        pass
     return True

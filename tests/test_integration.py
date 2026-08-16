@@ -2875,11 +2875,50 @@ def test_an_update_survives_a_folder_windows_will_not_rename() -> None:
     check("a week-old staging folder is cleaned up", not ancient.exists())
     check("and a recent one is not", first.parent.exists(), str(first.parent))
 
+    # A process that will not go is closed rather than reported. Reported as
+    # "the update did not finish — process 23688 is still running", with the
+    # new version downloaded, unpacked, checked, and nothing to show for it.
+    stubborn = subprocess.Popen([sys.executable, "-c",
+                                 "import signal, time\n"
+                                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                 "time.sleep(300)"])
+    time.sleep(0.6)
+    check("a process ignoring a polite request is seen as alive",
+          updates._alive(stubborn.pid))
+    note = updates._end_process(stubborn.pid)
+    stubborn.wait(timeout=5)
+    check("and it is closed anyway", not updates._alive(stubborn.pid), note)
+    check("with a note saying so, for the Log", "closed" in note, note)
+
+    # Staging goes beside a portable application, not into a data directory
+    # the user never chose: reported as updates appearing under %APPDATA%
+    # for a build unpacked into a folder of their own.
+    original_root = updates.install_root
+    try:
+        updates.install_root = lambda: root / "portable" / "ixd"
+        (root / "portable" / "ixd").mkdir(parents=True, exist_ok=True)
+        where = updates.staging_root(root / "data" / "update")
+        check("an update is unpacked beside the application it replaces",
+              where == root / "portable" / "ixd-update", str(where))
+        check("and not inside it, which the swap itself would delete",
+              (root / "portable" / "ixd") not in where.parents
+              and where != root / "portable" / "ixd", str(where))
+        updates.install_root = lambda: None
+        check("a source run still uses the data directory",
+              updates.staging_root(root / "data" / "update")
+              == root / "data" / "update")
+    finally:
+        updates.install_root = original_root
+
     # The Windows liveness check, verified the way §3.22 taught: read the
     # source, and read the stdlib's own wintypes for the names it uses.
     source_text = (Path(updates.__file__)).read_text(encoding="utf-8")
     windows_branch = source_text[source_text.index("if sys.platform.startswith(\"win\"):",
                                                    source_text.index("def _alive")):]
+    check("the Windows branch of the liveness check reads the exit code",
+          "GetExitCodeProcess" in source_text, "it does not")
+    check("and the Windows branch of ending a process asks for that plainly",
+          "TerminateProcess" in source_text, "it does not")
     check("the Windows branch does not use the call that kills a process",
           "os.kill" not in windows_branch.split("try:\n        os.kill")[0],
           "os.kill appears in the Windows path")
