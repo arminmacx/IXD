@@ -2251,6 +2251,199 @@ def test_a_schedule_can_actually_be_added() -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_it_can_tell_you_there_is_a_newer_version() -> None:
+    """Checking, refusing to install what it cannot, and installing what it can.
+
+    Nothing here talks to GitHub: a local origin answers like the release feed
+    does, and the "new version" is a folder this test builds. What is being
+    tested is the decision — that a check is one read and never an install,
+    that a build installed from a package refuses to replace itself, that a
+    download whose size does not match is thrown away, that an archive without
+    the launcher in it is refused *before* anything is moved, and that a swap
+    that does happen leaves a working folder behind.
+    """
+    print("\n[it can tell you there is a newer version]")
+    import tarfile as _tarfile
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from ixd import updates
+    from ixd.core.events import EventType
+    from ixd.service import DownloadService
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-updates-"))
+    config.DATA_DIR = root
+    config.TEMP_DIR = root / "incomplete"
+    config.LOG_DIR = root / "logs"
+    config.IPC_PORT_FILE = root / "ipc.json"
+    config.ensure_dirs()
+
+    # -- the arithmetic that decides everything ------------------------
+    check("1.0.10 is newer than 1.0.9, which string order gets wrong",
+          updates.is_newer("1.0.10", "1.0.9"))
+    check("a tag with a v is the same version", not updates.is_newer("v1.0.6", "1.0.6"))
+    check("and an older one is not newer", not updates.is_newer("1.0.5", "1.0.6"))
+    check("running from source is never self-updating",
+          updates.self_update_kind() == "")
+
+    # -- a feed that answers like the real one -------------------------
+    published = {
+        "tag_name": "v9.9.9", "name": "IXD 9.9.9",
+        "body": "## Fixed\n\n- Everything.",
+        "html_url": "https://example.invalid/releases/v9.9.9",
+        "assets": [{"name": "ixd-linux-x86_64-selfupdate.tar.gz", "size": 0,
+                    "browser_download_url": ""}],
+    }
+    feed_body = json.dumps(published).encode()
+
+    class Feed(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            body = feed_body if self.path.startswith("/feed") else archive_bytes
+            kind = ("application/json" if self.path.startswith("/feed")
+                    else "application/gzip")
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    # The "new version": a folder with a launcher in it, packed as the real
+    # portable archive is.
+    newer = root / "newer" / "ixd"
+    newer.mkdir(parents=True)
+    (newer / "ixd").write_text("#!/bin/sh\necho new\n", encoding="utf-8")
+    (newer / "keep.txt").write_text("data", encoding="utf-8")
+    archive_path = root / "ixd-linux-x86_64-selfupdate.tar.gz"
+    with _tarfile.open(archive_path, "w:gz") as bundle:
+        bundle.add(newer, arcname="ixd")
+    archive_bytes = archive_path.read_bytes()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Feed)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    published["assets"][0]["size"] = len(archive_bytes)
+    published["assets"][0]["browser_download_url"] = f"{origin}/asset.tar.gz"
+    feed_body = json.dumps(published).encode()
+
+    settings = Settings(root / "settings.json")
+    settings.set("download_dir", str(root / "out"))
+    service = DownloadService(settings, Database(root / "state.sqlite3"))
+
+    seen: list[dict] = []
+    service.events.subscribe(lambda _e, p: seen.append(p),
+                             EventType.UPDATE_AVAILABLE)
+    try:
+        # Plain http to somewhere else is refused outright: an update is the
+        # last thing to take from a connection anybody can rewrite. Loopback
+        # is allowed, which is the only reason the rest of this can be tested.
+        settings.set("updates_feed", "http://updates.example.invalid/feed")
+        raised = ""
+        try:
+            service.check_for_updates(force=True)
+        except Exception as error:  # noqa: BLE001
+            raised = str(error)
+        check("a plain-http update feed from the network is refused",
+              "https" in raised.lower(), raised or "it was accepted")
+        settings.set("updates_feed", f"{origin}/feed")
+        live = service.check_for_updates(force=True)
+        check("a loopback feed is read, and reports the newer version",
+              live is not None and live.version == "9.9.9",
+              str(live.version if live else None))
+        check("and the window is told exactly once",
+              len(seen) == 1 and seen[0].get("version") == "9.9.9", str(seen))
+
+        release = live or updates.Release()
+        check("the feed's tag becomes a version", release.version == "9.9.9",
+              release.version)
+        check("and it is newer than what is running", release.newer)
+        check("the asset for this platform is found",
+              (release.asset("linux", ".tar.gz") or {}).get("name")
+              == "ixd-linux-x86_64-selfupdate.tar.gz",
+              str(release.asset("linux", ".tar.gz")))
+
+        # A build that was not marked self-updating refuses to install.
+        started, detail = service.install_update(release)
+        check("a build that is not self-updating refuses to replace itself",
+              started is False and "package" in detail, detail)
+
+        # The download, and what happens when the size does not match.
+        staging = root / "staging"
+        lying = dict(release.assets[0])
+        lying["size"] = len(archive_bytes) + 1
+        refused = ""
+        try:
+            updates.download(service.client(), lying, staging)
+        except Exception as error:  # noqa: BLE001
+            refused = str(error)
+        check("a download that is not the size the feed promised is thrown away",
+              "refusing" in refused, refused or "it was kept")
+
+        fetched = updates.download(service.client(), release.assets[0], staging)
+        check("and the right one is kept", fetched.exists()
+              and fetched.stat().st_size == len(archive_bytes), str(fetched))
+
+        # Unpacking, and the check that happens before anything is moved.
+        unpacked = updates.stage(fetched, staging / "unpacked", launcher="ixd")
+        check("the archive unpacks to a folder holding the launcher",
+              (unpacked / "ixd").exists(), str(unpacked))
+        wrong = staging / "wrong.tar.gz"
+        with _tarfile.open(wrong, "w:gz") as bundle:
+            bundle.add(newer / "keep.txt", arcname="something/else.txt")
+        rejected = ""
+        try:
+            updates.stage(wrong, staging / "unpacked2", launcher="ixd")
+        except Exception as error:  # noqa: BLE001
+            rejected = str(error)
+        check("an archive that is not this application is refused",
+              "does not contain" in rejected, rejected or "it was accepted")
+
+        # The flag that does the swap is not a copy-this-anywhere command:
+        # only a build published as self-updating may use it, whatever folder
+        # it is pointed at.
+        original_root = updates.install_root
+        original_kind = updates.self_update_kind
+        try:
+            updates.install_root = lambda: unpacked          # pretend frozen
+            updates.self_update_kind = lambda: ""            # but unmarked
+            ok, why = updates.apply(root / "installed-nowhere", relaunch=False)
+            check("an unmarked build refuses to apply an update",
+                  ok is False and "self-updating" in why, why)
+            check("and it left nothing behind",
+                  not (root / "installed-nowhere").exists())
+        finally:
+            updates.install_root = original_root
+            updates.self_update_kind = original_kind
+
+        # And the swap itself, done directly rather than through a relaunch.
+        target = root / "installed"
+        target.mkdir()
+        (target / "ixd").write_text("old", encoding="utf-8")
+        (target / "stale.txt").write_text("gone", encoding="utf-8")
+        moved = _swap_for_test(unpacked, target)
+        check("the swap puts the new version in place",
+              (target / "ixd").read_text().startswith("#!"), moved)
+        check("and leaves nothing of the old one behind",
+              not (target / "stale.txt").exists())
+        check("with no leftover .previous folder",
+              not target.with_name(target.name + ".previous").exists())
+    finally:
+        server.shutdown()
+        service.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _swap_for_test(staged: Path, target: Path) -> str:
+    """`updates.apply` without the frozen-build check, which a test cannot be."""
+    aside = target.with_name(target.name + ".previous")
+    shutil.rmtree(aside, ignore_errors=True)
+    os.replace(target, aside)
+    shutil.copytree(staged, target, symlinks=True, dirs_exist_ok=True)
+    shutil.rmtree(aside, ignore_errors=True)
+    return str(target)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -4350,7 +4543,8 @@ def main() -> int:
                  test_the_queue_finishes_with_a_choice,
                  test_the_scheduler_is_reachable_and_stoppable,
                  test_cancelling_closes_the_download_window,
-                 test_a_schedule_can_actually_be_added):
+                 test_a_schedule_can_actually_be_added,
+                 test_it_can_tell_you_there_is_a_newer_version):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

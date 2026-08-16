@@ -131,6 +131,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # The registration is refreshed on every start, so a rebuilt or moved
     # application does not leave the session launching a path that is gone.
     "launch_at_startup": False,
+    # --- updates ---------------------------------------------------------
+    # Checked once a day, in the background, against the project's release
+    # feed. On by default and plainly switchable: it is one HTTPS request that
+    # says nothing about the user, but it is still a request they did not ask
+    # for, so it is a checkbox rather than an assumption.
+    "updates_check_automatically": True,
+    "updates_feed": "https://api.github.com/repos/arminmacx/IXD/releases/latest",
+    #: When the last check ran, and the newest version it saw. The second is
+    #: what stops the window announcing the same release every launch.
+    "updates_last_check": 0,
+    "updates_last_seen": "",
     # What to do once every download has finished: nothing, exit, sleep,
     # hibernate or shutdown. It fires **once** and resets itself — a machine
     # that shuts down every time a download ends is a machine nobody can use,

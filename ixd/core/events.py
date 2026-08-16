@@ -36,6 +36,9 @@ class EventType:
     COMPLETION_ARMED = "completion.armed"
     COMPLETION_CANCELLED = "completion.cancelled"
     COMPLETION_FIRED = "completion.fired"
+    #: A newer version has been published. Carries the version, the notes and
+    #: whether this build is one that can replace itself.
+    UPDATE_AVAILABLE = "update.available"
     PROXY_ROTATED = "proxy.rotated"
     ENGINE_STATS = "engine.stats"
     LOG = "engine.log"

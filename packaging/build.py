@@ -451,6 +451,73 @@ def build_windows_source() -> Path:
 
 
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# the build that can replace itself
+# ----------------------------------------------------------------------
+#: The name each platform's self-updating archive is published under. The
+#: build writes it into its own marker so a running copy asks for exactly the
+#: file it came from rather than guessing from the platform at run time.
+SELF_UPDATE_ASSETS = {
+    "linux": "ixd-linux-x86_64-selfupdate.tar.gz",
+    "darwin": "ixd-macos-arm64-selfupdate.zip",
+    "win32": f"ixd-{VERSION}-windows-x64-selfupdate.zip",
+}
+
+
+def _platform_key() -> str:
+    if IS_WINDOWS:
+        return "win32"
+    if IS_MACOS:
+        return "darwin"
+    return "linux"
+
+
+def build_self_updating(binary_dir: Path) -> Path | None:
+    """Package a second copy that is allowed to update itself.
+
+    The binaries are identical; what differs is one file. A build says whether
+    it may replace its own folder — it is never inferred at run time, because
+    an unpacked `.deb` in `/opt` looks exactly like a portable folder and
+    replacing that one leaves a machine whose next package upgrade fails.
+
+    Published beside the ordinary archives, never instead of them: somebody
+    who wants a build that touches nothing by itself keeps having one.
+    """
+    section("Self-updating build")
+    asset = SELF_UPDATE_ASSETS[_platform_key()]
+    staging = DIST / "selfupdate"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    copy = staging / binary_dir.name
+    shutil.copytree(binary_dir, copy, symlinks=True)
+    # The marker sits beside the launcher, because that is where the running
+    # program looks for it: `Path(sys.executable).parent`. Inside an .app
+    # bundle that is `Contents/MacOS`, not the bundle's own folder.
+    beside = copy
+    if copy.suffix == ".app" and (copy / "Contents" / "MacOS").is_dir():
+        beside = copy / "Contents" / "MacOS"
+    (beside / "update-channel.json").write_text(json.dumps({
+        "self_update": True,
+        "kind": "portable",
+        "asset": asset,
+        "version": VERSION,
+    }, indent=2) + "\n", encoding="utf-8")
+
+    target = DIST / asset
+    target.unlink(missing_ok=True)
+    if target.suffix == ".zip":
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(copy.rglob("*")):
+                if path.is_file() or path.is_symlink():
+                    archive.write(path, str(path.relative_to(staging)))
+    else:
+        with tarfile.open(target, "w:gz") as archive:
+            archive.add(copy, arcname=copy.name)
+    shutil.rmtree(staging, ignore_errors=True)
+    log(f"wrote {target.name} ({target.stat().st_size / 1048576:.1f} MB)")
+    return target
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build Internet Xtreme Downloader")
     parser.add_argument("--package", action="store_true",
@@ -460,6 +527,8 @@ def main() -> int:
     parser.add_argument("--icons", action="store_true", help="only regenerate icons")
     parser.add_argument("--no-clean", action="store_true",
                         help="keep previous build artefacts")
+    parser.add_argument("--self-update", action="store_true",
+                        help="also produce the archive that may replace itself")
     arguments = parser.parse_args()
 
     DIST.mkdir(parents=True, exist_ok=True)
@@ -470,6 +539,16 @@ def main() -> int:
 
     if arguments.extension:
         package_extension()
+        return 0
+
+    # `--self-update` on its own packages what is already built. CI calls it
+    # after the platform's own build script has run, and a second PyInstaller
+    # pass to produce an archive that differs by one file is ten minutes
+    # nobody gets back.
+    existing = DIST / "ixd"
+    if arguments.self_update and not arguments.package and existing.exists():
+        build_self_updating(existing)
+        section("Done")
         return 0
 
     build_icons()
@@ -488,6 +567,9 @@ def main() -> int:
         # never the machine asking for it.
         if not IS_WINDOWS:
             build_windows_source()
+
+    if arguments.self_update or arguments.package:
+        build_self_updating(binary)
 
     section("Done")
     for path in sorted(DIST.iterdir()):

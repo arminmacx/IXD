@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time as _time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTime
@@ -539,6 +540,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(_scrollable(self._build_queues()), "Queues")
         tabs.addTab(_scrollable(self._build_schedules()), "Scheduler")
         tabs.addTab(_scrollable(self._build_integration()), "Integration")
+        tabs.addTab(_scrollable(self._build_updates()), "Updates")
         layout.addWidget(tabs, 1)
         self._tabs = tabs
 
@@ -549,6 +551,93 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    # -- Updates --------------------------------------------------------
+    def _build_updates(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        from ... import __version__ as running_version
+        from ... import updates as update_module
+
+        current = QLabel(f"You are running version {running_version}.")
+        current.setObjectName("Title")
+        layout.addWidget(current)
+
+        kind = update_module.self_update_kind()
+        how = QLabel(
+            "This build can install a new version itself."
+            if kind else
+            "This build was installed from a package, so a new version is "
+            "downloaded from its release page and installed the way this one "
+            "was. Nothing is replaced behind your back."
+        )
+        how.setObjectName("Subtle")
+        how.setWordWrap(True)
+        layout.addWidget(how)
+
+        box = QGroupBox("Checking")
+        form = QVBoxLayout(box)
+        self.updates_automatic = QCheckBox(
+            "Check for a new version automatically (once a day)")
+        self.updates_automatic.setChecked(
+            self.settings.get_bool("updates_check_automatically", True))
+        form.addWidget(self.updates_automatic)
+
+        last = self.settings.get("updates_last_check") or 0
+        when = ("never" if not last else
+                _time.strftime("%Y-%m-%d %H:%M", _time.localtime(float(last))))
+        self.updates_when = QLabel(f"Last checked: {when}")
+        self.updates_when.setObjectName("Subtle")
+        form.addWidget(self.updates_when)
+
+        row = QHBoxLayout()
+        self.updates_now = QPushButton("Check now")
+        self.updates_now.clicked.connect(self._check_updates_now)
+        row.addWidget(self.updates_now)
+        row.addStretch(1)
+        form.addLayout(row)
+        layout.addWidget(box)
+
+        note = QLabel(
+            "The check is one HTTPS request to the project's release page. It "
+            "sends nothing about you or about what you download, and it goes "
+            "through the proxy and interface configured under Network. "
+            "Switching it off means checking here when you feel like it."
+        )
+        note.setObjectName("Subtle")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        extension_note = QLabel(
+            "A new version writes the browser extension out again. After "
+            "updating, reload it from your browser's extensions page so the "
+            "browser runs the new one — the folder it loads from does not "
+            "change."
+        )
+        extension_note.setObjectName("Subtle")
+        extension_note.setWordWrap(True)
+        layout.addWidget(extension_note)
+
+        layout.addStretch(1)
+        return page
+
+    def _check_updates_now(self) -> None:
+        """The manual half. Reports whatever it finds, including nothing."""
+        from .update_dialog import UpdateDialog
+
+        # Saved first: someone who ticks the box and presses Check expects the
+        # tick to have meant something.
+        self.settings.set("updates_check_automatically",
+                          self.updates_automatic.isChecked())
+        UpdateDialog(self.service, {}, self).exec()
+        last = self.settings.get("updates_last_check") or 0
+        if last:
+            self.updates_when.setText(
+                "Last checked: "
+                + _time.strftime("%Y-%m-%d %H:%M", _time.localtime(float(last))))
 
     def show_tab(self, title: str) -> bool:
         """Open on a named tab. Returns whether there was one."""
@@ -1605,6 +1694,7 @@ class SettingsDialog(QDialog):
             "prefer_progressive": self.prefer_progressive.isChecked(),
             "youtube_po_token": self.po_token.text().strip(),
             "youtube_visitor_data": self.visitor_data.text().strip(),
+            "updates_check_automatically": self.updates_automatic.isChecked(),
             "completion_action": self.completion_combo.currentData(),
             "completion_grace_seconds": self.completion_grace.value(),
         })

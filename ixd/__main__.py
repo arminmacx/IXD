@@ -62,6 +62,13 @@ def _parse_arguments(argv: list[str]) -> argparse.Namespace:
                         help="queue a URL in the running instance and exit")
     parser.add_argument("--media", action="store_true",
                         help="treat --add URLs as media pages to extract")
+    # The other half of an update: run by the *staged* copy, never by a user.
+    # A program cannot replace the folder it is running from, so the new build
+    # is what waits for the old one to exit and does the swap.
+    parser.add_argument("--apply-update", metavar="FOLDER", default="",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--wait-for", type=int, default=0,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"Internet Xtreme Downloader {__version__}")
     # A browser's own argument is not one argparse knows, and it must not be
     # treated as a URL to queue either.
@@ -383,6 +390,15 @@ def _focus(window) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parse_arguments(list(sys.argv[1:] if argv is None else argv))
+
+    if arguments.apply_update:
+        from pathlib import Path
+        from . import updates
+
+        ok, detail = updates.apply(Path(arguments.apply_update),
+                                   wait_for=arguments.wait_for)
+        print(detail)
+        return 0 if ok else 1
 
     if arguments.native_host:
         return _run_native_host()

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from . import config
+from . import __version__
 from .config import Settings
 from .core.db import Database
 from .core.engine import DownloadEngine
@@ -41,6 +42,7 @@ from .core.models import (
 from .core.routing import parse_proxy_url
 from .core.scheduler import Scheduler
 from .power import CompletionAction, parse as parse_completion_action, perform
+from . import updates
 from .core.muxing import MuxError, combine as combine_tracks
 from .extractors import (
     audio_track_rank,
@@ -528,6 +530,7 @@ class DownloadService:
         #: not start two timers.
         self._completion_lock = threading.Lock()
         self._completion_timer: threading.Timer | None = None
+        self._update_timer: threading.Timer | None = None
         self._extract_lock = threading.Lock()
         self._extracts: dict[tuple, tuple[float, MediaInfo]] = {}
         #: Transfers the browser is reading on this application's behalf.
@@ -582,6 +585,23 @@ class DownloadService:
         self.events.subscribe(self._on_download_failed, EventType.DOWNLOAD_FAILED)
         self.db.log_event("Service started")
 
+        # Not on the start-up path: a check that has to answer before the
+        # window appears is a check that delays the window when a network is
+        # slow. It runs a minute in, on its own thread, and only if it is both
+        # allowed and due.
+        if self.settings.get_bool("updates_check_automatically", True):
+            timer = threading.Timer(60.0, self._background_update_check)
+            timer.name = "ixd-update-check"
+            timer.daemon = True
+            timer.start()
+            self._update_timer = timer
+
+    def _background_update_check(self) -> None:
+        try:
+            self.check_for_updates()
+        except Exception:               # noqa: BLE001 - never fatal
+            pass
+
     def _on_log_setting_changed(self, key: str, value: Any) -> None:
         """Take effect when the box is ticked, not at the next launch."""
         if key != "keep_log":
@@ -619,6 +639,100 @@ class DownloadService:
     # call off is the difference between a convenience and a machine that
     # turns itself off while somebody is using it — the timer runs even with
     # no window at all, which is what `--background` needs.
+    # -- newer versions -------------------------------------------------
+    #
+    # Asked for as "tell me there is a new one instead of making me look".
+    # Three rules shape it:
+    #
+    #   * **One request a day, and only if it was allowed.** The setting is a
+    #     checkbox and it is honoured here rather than in the window, so the
+    #     daemon and the GUI behave the same.
+    #   * **It uses the application's own HTTP client**, which means the proxy,
+    #     the interface binding and the TLS setting the user chose. An updater
+    #     that opens its own socket is a hole in all three.
+    #   * **A check never installs anything.** It reports; what happens next is
+    #     the user's decision, and for a packaged build there is nothing this
+    #     process is allowed to do anyway.
+    def check_for_updates(self, force: bool = False) -> updates.Release | None:
+        """Ask whether a newer version exists. Returns it, or ``None``."""
+        if not force and not self.settings.get_bool("updates_check_automatically", True):
+            return None
+        if not force:
+            last = float(self.settings.get("updates_last_check") or 0)
+            if time.time() - last < updates.CHECK_INTERVAL_SECONDS:
+                return None
+
+        feed = str(self.settings.get("updates_feed") or updates.DEFAULT_FEED)
+        try:
+            release = updates.check(self.client(), feed)
+        except Exception as error:      # noqa: BLE001 - reported, never fatal
+            self.db.log_event(f"Update check failed: {error}", level="warning")
+            if force:
+                raise
+            return None
+
+        self.settings.set("updates_last_check", time.time())
+        if not release.newer:
+            self.db.log_event(
+                f"Update check: {__version__} is the newest published version.")
+            return None
+
+        kind = updates.self_update_kind()
+        self.db.log_event(
+            f"Version {release.version} is available (this build "
+            + ("can install it itself)" if kind else "installs from a package)"),
+        )
+        # Announced once per version. A window that says the same thing at
+        # every launch is one people stop reading.
+        if self.settings.get("updates_last_seen") != release.version:
+            self.settings.set("updates_last_seen", release.version)
+        self.events.emit(
+            EventType.UPDATE_AVAILABLE,
+            version=release.version,
+            notes=release.notes,
+            page_url=release.page_url,
+            self_update=bool(kind),
+        )
+        return release
+
+    def install_update(self, release: updates.Release,
+                       progress: Any = None) -> tuple[bool, str]:
+        """Fetch the new build, check it, and hand the swap to it.
+
+        Returns ``(started, detail)``. When it returns ``True`` the application
+        is about to be replaced and should quit: the staged copy is already
+        waiting for this process to end.
+        """
+        if not updates.self_update_kind():
+            return False, "this build installs from a package, not from itself"
+        asset = release.asset(*updates.asset_patterns())
+        if asset is None:
+            return False, ("the release publishes nothing this build can use: "
+                           + ", ".join(str(a.get("name")) for a in release.assets))
+
+        staging = Path(config.DATA_DIR) / "update"
+        try:
+            archive = updates.download(self.client(), asset, staging, progress)
+            unpacked = updates.stage(archive, staging / "unpacked")
+        except Exception as error:      # noqa: BLE001 - reported to the caller
+            self.db.log_event(f"Update download failed: {error}", level="warning")
+            return False, str(error)
+
+        target = updates.install_root()
+        if target is None:
+            return False, "an update can only replace a built copy"
+        self.db.log_event(
+            f"Installing version {release.version} over {target} — the "
+            "application will restart. The browser extension is written out "
+            "again on the next start; reload it from the extensions page.")
+        try:
+            updates.relaunch_into(unpacked, target)
+        except Exception as error:      # noqa: BLE001
+            self.db.log_event(f"Could not start the installer: {error}",
+                              level="warning")
+            return False, str(error)
+        return True, str(release.version)
+
     def unfinished_work(self) -> list[Download]:
         """Downloads that still have somewhere to go.
 
@@ -830,6 +944,9 @@ class DownloadService:
             timer, self._completion_timer = self._completion_timer, None
         if timer is not None:
             timer.cancel()
+        if self._update_timer is not None:
+            self._update_timer.cancel()
+            self._update_timer = None
         self.scheduler.stop()
         self.engine.shutdown(wait=True, timeout=8.0)
         self.db.log_event("Service stopped")

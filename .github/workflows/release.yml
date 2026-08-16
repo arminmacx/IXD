@@ -95,6 +95,12 @@ jobs:
 
       # A folder of files is not something to hand somebody. Each platform's
       # portable build is collapsed into one archive next to its installer.
+      #
+      # Two of them, and the difference is one file. The `-selfupdate` archive
+      # carries `update-channel.json`, which is the only thing that lets a
+      # build replace its own folder — written at build time on purpose, so an
+      # unpacked `.deb` in /opt can never be mistaken for a portable copy. The
+      # ordinary archives keep behaving exactly as they always have.
       - name: Portable archive (Linux)
         if: runner.os == 'Linux'
         run: tar -C dist -czf dist/ixd-linux-x86_64.tar.gz ixd
@@ -108,6 +114,14 @@ jobs:
           else
             tar -czf ixd-macos-arm64.tar.gz ixd
           fi
+
+      - name: Self-updating archive
+        shell: bash
+        run: |
+          "${IXD_PYTHON:-python3}" packaging/build.py --self-update --no-clean
+        env:
+          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
+        continue-on-error: true
 
       - name: What was produced
         shell: bash

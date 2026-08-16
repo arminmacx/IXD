@@ -346,7 +346,21 @@ class MainWindow(QMainWindow):
         bar.setObjectName("StatusBar")
         self.status_left = QLabel("Ready")
         self.status_right = QLabel("")
+        # Where a newer version announces itself: a line at the bottom of the
+        # window, in the accent colour, that is a link rather than a dialog.
+        # A modal box on top of somebody's downloads to tell them about a
+        # version number is how an update prompt becomes something people
+        # learn to dismiss without reading.
+        self.update_notice = QLabel("")
+        self.update_notice.setObjectName("UpdateNotice")
+        self.update_notice.setStyleSheet(
+            f"color: {self._palette.accent}; font-weight: 600;")
+        self.update_notice.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_notice.setVisible(False)
+        self.update_notice.mousePressEvent = (
+            lambda _event: self.open_update_dialog())
         bar.addWidget(self.status_left, 1)
+        bar.addWidget(self.update_notice)
         bar.addPermanentWidget(self.status_right)
 
     def _build_tray(self) -> None:
@@ -542,6 +556,27 @@ class MainWindow(QMainWindow):
         if tab:
             dialog.show_tab(tab)
         dialog.exec()
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # a newer version
+    # ------------------------------------------------------------------
+    def _offer_update(self, payload: dict) -> None:
+        version = str(payload.get("version") or "")
+        if not version:
+            return
+        self._update_payload = dict(payload)
+        self.update_notice.setText(f"  ●  Version {version} is available  ")
+        self.update_notice.setToolTip(
+            "A newer version has been published. Click to see what changed.")
+        self.update_notice.setVisible(True)
+        self.tray.notify("Update available", f"Version {version} is ready.")
+
+    def open_update_dialog(self) -> None:
+        from .widgets.update_dialog import UpdateDialog
+
+        UpdateDialog(self.service, getattr(self, "_update_payload", {}),
+                     self).exec()
         self.refresh()
 
     def open_scheduler(self) -> None:
@@ -837,6 +872,8 @@ class MainWindow(QMainWindow):
                 "Source link expired",
                 "A download is waiting for a refreshed link.",
             )
+        elif event_type == EventType.UPDATE_AVAILABLE:
+            self._offer_update(payload)
         elif event_type == EventType.COMPLETION_ARMED:
             self._show_completion_countdown(payload)
         elif event_type == EventType.COMPLETION_CANCELLED:
