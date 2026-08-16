@@ -2263,6 +2263,7 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
     that does happen leaves a working folder behind.
     """
     print("\n[it can tell you there is a newer version]")
+    import re
     import tarfile as _tarfile
     import threading as _threading
     from ixd.core.models import Download, DownloadStatus
@@ -2363,6 +2364,54 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
               (release.asset("linux", ".tar.gz") or {}).get("name")
               == "ixd-linux-x86_64-selfupdate.tar.gz",
               str(release.asset("linux", ".tar.gz")))
+
+        # -- a marker may not name one release's file ------------------
+        #
+        # Reported from Windows on 1.0.8: "the release publishes nothing this
+        # build can use", followed by a list containing the file it wanted.
+        # The build had recorded `ixd-1.0.8-windows-x64-selfupdate.zip` and
+        # searched a 1.0.9 release for that exact string.
+        published_names = [
+            "Internet-Xtreme-Downloader-1.0.9.dmg", "ixd-1.0.9-windows-source.zip",
+            "ixd-1.0.9-windows-x64-selfupdate.zip", "ixd-1.0.9-windows-x64.zip",
+            "ixd-extension-chrome-1.0.9.zip", "ixd-linux-x86_64-selfupdate.tar.gz",
+            "ixd-linux-x86_64.tar.gz", "ixd-macos-arm64-selfupdate.zip",
+            "ixd-macos-arm64.zip", "ixd_1.0.9_amd64.deb",
+        ]
+        next_release = updates.Release(
+            version="1.0.9", assets=[{"name": n} for n in published_names])
+
+        def chosen_with(marker_asset: str, platform_shape: list) -> str:
+            candidates = ([(marker_asset,)] if marker_asset else []) + platform_shape
+            for pattern in candidates:
+                found = next_release.asset(*pattern)
+                if found:
+                    return str(found["name"])
+            return ""
+
+        windows_shape = [("windows", "selfupdate", ".zip"), ("windows", ".zip")]
+        check("a marker naming last release's file still finds this one",
+              chosen_with("ixd-1.0.8-windows-x64-selfupdate.zip", windows_shape)
+              == "ixd-1.0.9-windows-x64-selfupdate.zip",
+              chosen_with("ixd-1.0.8-windows-x64-selfupdate.zip", windows_shape))
+        check("a build with no marker at all finds it too",
+              chosen_with("", windows_shape)
+              == "ixd-1.0.9-windows-x64-selfupdate.zip",
+              chosen_with("", windows_shape))
+        check("and the self-updating archive is preferred over the plain one",
+              chosen_with("windows-x64-selfupdate.zip", windows_shape)
+              == "ixd-1.0.9-windows-x64-selfupdate.zip",
+              chosen_with("windows-x64-selfupdate.zip", windows_shape))
+
+        # The rule itself, on every platform, without building them: nothing a
+        # build writes into its own marker may carry a version number.
+        build_source = (Path(__file__).resolve().parents[1]
+                        / "packaging" / "build.py").read_text(encoding="utf-8")
+        table = re.search(r"SELF_UPDATE_PATTERNS = \{(.*?)\}", build_source, re.S)
+        patterns = re.findall(r'"([^"]*selfupdate[^"]*)"', table.group(1) if table else "")
+        check("every platform records a version-free pattern",
+              bool(patterns) and not any(re.search(r"\d+\.\d+", p) for p in patterns),
+              str(patterns))
 
         # A build that was not marked self-updating refuses to install.
         started, detail = service.install_update(release)

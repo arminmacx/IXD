@@ -748,7 +748,7 @@ class DownloadService:
         """
         if not updates.self_update_kind():
             return False, "this build installs from a package, not from itself"
-        asset = release.asset(*updates.asset_patterns())
+        asset = updates.choose_asset(release)
         if asset is None:
             return False, ("the release publishes nothing this build can use: "
                            + ", ".join(str(a.get("name")) for a in release.assets))

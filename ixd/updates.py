@@ -163,17 +163,44 @@ def self_update_kind() -> str:
     return str(described.get("kind") or "portable")
 
 
-def asset_patterns() -> tuple[str, ...]:
-    """Which published file this build takes its updates from."""
-    described = marker()
-    named = described.get("asset")
-    if named:
-        return (str(named),)
+def platform_patterns() -> list[tuple[str, ...]]:
+    """How this platform's self-updating archive is named, in order of fit."""
     if sys.platform.startswith("win"):
-        return ("windows", ".zip")
+        return [("windows", "selfupdate", ".zip"), ("windows", ".zip")]
     if sys.platform == "darwin":
-        return ("macos", ".zip")
-    return ("linux", ".tar.gz")
+        return [("macos", "selfupdate", ".zip"), ("macos", ".zip")]
+    return [("linux", "selfupdate", ".tar.gz"), ("linux", ".tar.gz")]
+
+
+def asset_patterns() -> list[tuple[str, ...]]:
+    """Every way of naming the file this build should take, best first.
+
+    A marker may name the archive its build was published as — but **it must
+    never contain a version number**, and one release did. The Windows build
+    of 1.0.8 recorded `ixd-1.0.8-windows-x64-selfupdate.zip` and then looked
+    for that exact string in the 1.0.9 release, which of course publishes
+    `ixd-1.0.9-…`. It reported that the release "publishes nothing this build
+    can use" while listing the very file it wanted.
+
+    So the marker's name is one candidate among several rather than the only
+    one, and the platform's own shape is always tried after it. A stale or
+    over-specific marker now costs nothing.
+    """
+    candidates: list[tuple[str, ...]] = []
+    named = str(marker().get("asset") or "").strip()
+    if named:
+        candidates.append((named,))
+    candidates.extend(platform_patterns())
+    return candidates
+
+
+def choose_asset(release: "Release") -> dict[str, Any] | None:
+    """The published file this build should take, or ``None``."""
+    for pattern in asset_patterns():
+        found = release.asset(*pattern)
+        if found is not None:
+            return found
+    return None
 
 
 # ----------------------------------------------------------------------

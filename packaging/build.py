@@ -463,6 +463,17 @@ SELF_UPDATE_ASSETS = {
     "win32": f"ixd-{VERSION}-windows-x64-selfupdate.zip",
 }
 
+#: What the build records in its own marker — the same file, with the version
+#: taken out. A marker that names one release's file cannot match the next
+#: one's: 1.0.8 on Windows recorded `ixd-1.0.8-windows-x64-selfupdate.zip`,
+#: searched the 1.0.9 release for that exact string, and reported that nothing
+#: it could use had been published while listing the file it wanted.
+SELF_UPDATE_PATTERNS = {
+    "linux": "ixd-linux-x86_64-selfupdate.tar.gz",
+    "darwin": "ixd-macos-arm64-selfupdate.zip",
+    "win32": "windows-x64-selfupdate.zip",
+}
+
 
 def _platform_key() -> str:
     if IS_WINDOWS:
@@ -499,7 +510,7 @@ def build_self_updating(binary_dir: Path) -> Path | None:
     (beside / "update-channel.json").write_text(json.dumps({
         "self_update": True,
         "kind": "portable",
-        "asset": asset,
+        "asset": SELF_UPDATE_PATTERNS[_platform_key()],
         "version": VERSION,
     }, indent=2) + "\n", encoding="utf-8")
 
