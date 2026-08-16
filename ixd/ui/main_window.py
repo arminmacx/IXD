@@ -89,6 +89,9 @@ class MainWindow(QMainWindow):
         self.taskbar = TaskbarProgress()
         self.taskbar.attach(self)
         self._taskbar_note = ""
+        #: Whether the taskbar backend has already been seen working. One line
+        #: proves it is live; the rest is noise in a log kept for defects.
+        self._taskbar_confirmed = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -417,21 +420,38 @@ class MainWindow(QMainWindow):
         self._log_taskbar_state()
 
     def _log_taskbar_state(self) -> None:
-        """Put what the platform did in the log, once per distinct message.
+        """Put what the platform did in the log — every refusal, one success.
 
-        Progress on the icon never fails loudly — it is decoration, and no
-        transfer depends on it. But silence made "the bar does not show on
-        Windows" a report with nothing behind it twice over, so success is
-        recorded as well as refusal. The message carries no percentage, so it
-        is written when the situation changes rather than every second.
+        Progress on the icon never fails loudly: it is decoration, and no
+        transfer depends on it. Silence about it made "the bar does not show
+        on Windows" a report with nothing behind it twice over, which is why
+        success is recorded at all (§3.22, §3.14u58).
+
+        But it is confirmed working on both platforms now, and a line every
+        time the state changes — normal, clear, indeterminate, and once per
+        window — is a log full of the one thing that is *not* going wrong.
+        The first success says the backend is live and names the windows it
+        drew on; after that only refusals are written, and a refusal after a
+        success is itself a change worth seeing.
         """
         message = self.taskbar.diagnostic()
         if not message or message == self._taskbar_note:
             return
         self._taskbar_note = message
         drew = message.startswith("ITaskbarList3")
-        self.service.db.log_event(f"Taskbar progress: {message}",
-                                  level="info" if drew else "warning")
+        if drew:
+            if self._taskbar_confirmed:
+                return
+            self._taskbar_confirmed = True
+            self.service.db.log_event(
+                f"Taskbar progress: {message} — working; further updates are "
+                "not logged."
+            )
+            return
+        # A refusal is always written, and the next success after one is
+        # written too, so a backend that recovers says so.
+        self._taskbar_confirmed = False
+        self.service.db.log_event(f"Taskbar progress: {message}", level="warning")
 
     def _update_detail(self) -> None:
         if self._selected_id is None:

@@ -3029,6 +3029,77 @@ def test_the_initialisation_segment_does_not_shift_every_iv() -> None:
           [s for s in explicit if not s.init][0].key_iv == "0x0123")
 
 
+def test_a_manifest_is_a_list_of_qualities_not_a_file() -> None:
+    """A stream published at five resolutions was offered as one row.
+
+    `hls.parse_master` and `dash.parse_mpd` were written, tested and never
+    called by anything on the extraction path — so outside YouTube and Vimeo,
+    which build their own format lists, the panel showed "the video" for a site
+    that had published 1080p, 720p and 480p. Measured against a real public
+    stream before the fix: one unlabelled format. After: five, with heights.
+    """
+    print("\n[a manifest is a list of qualities, not a file]")
+    from tests.fixtures import TestOrigin
+    from ixd.core.http_client import HttpClient
+    from ixd.core.net import NetworkProfile
+    from ixd.extractors.generic import GenericExtractor
+
+    master = (
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=8200000,RESOLUTION=1920x1080,CODECS=\"avc1.640028,mp4a.40.2\"\n"
+        "v1080.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=4200000,RESOLUTION=1280x720,CODECS=\"avc1.4d401f,mp4a.40.2\"\n"
+        "v720.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=854x480,CODECS=\"avc1.4d401e,mp4a.40.2\"\n"
+        "v480.m3u8\n"
+    )
+    media = ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n"
+             "#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n")
+
+    with TestOrigin(b"\x00" * 4096) as origin:
+        client = HttpClient(NetworkProfile())
+        origin.state.routes["/master.m3u8"] = (master.encode(), "application/vnd.apple.mpegurl")
+        origin.state.routes["/only.m3u8"] = (media.encode(), "application/vnd.apple.mpegurl")
+        origin.state.routes["/page.html"] = (
+            b'<html><head><title>A Film</title></head><body>'
+            b'<script>var player = {"file": "/master.m3u8"};</script>'
+            b'</body></html>',
+            "text/html; charset=utf-8",
+        )
+
+        # 1. The manifest asked for directly — which is what the panel asks
+        #    about, because it is what the player was seen fetching.
+        info = GenericExtractor(client).extract(origin.url("/master.m3u8"))
+        heights = sorted(f.height for f in info.formats)
+        check("every rendition is offered, not the manifest as one file",
+              len(info.formats) == 3, str([f.format_id for f in info.formats]))
+        check("and each one knows its size on screen",
+              heights == [480, 720, 1080], str(heights))
+        check("each keeps the manifest it came from",
+              all(f.manifest_url.endswith("/master.m3u8") for f in info.formats),
+              str([f.manifest_url for f in info.formats]))
+        check("and each is still an HLS stream",
+              all(f.protocol == "m3u8" for f in info.formats),
+              str([f.protocol for f in info.formats]))
+
+        # 2. A page that only mentions the manifest gets the same treatment.
+        page = GenericExtractor(client).extract(origin.url("/page.html"))
+        check("a page pointing at a manifest offers its qualities too",
+              len(page.formats) == 3, str([f.format_id for f in page.formats]))
+
+        # 3. A media playlist is one rendition and must stay one row: expanding
+        #    it would offer a menu of segments.
+        single = GenericExtractor(client).extract(origin.url("/only.m3u8"))
+        check("a media playlist is still a single download",
+              len(single.formats) == 1, str([f.format_id for f in single.formats]))
+
+        # 4. An origin that refuses the manifest falls back rather than failing.
+        origin.state.routes["/gone.m3u8"] = (b"", "application/vnd.apple.mpegurl")
+        fallback = GenericExtractor(client).extract(origin.url("/gone.m3u8"))
+        check("an unreadable manifest still yields something to download",
+              len(fallback.formats) == 1, str([f.format_id for f in fallback.formats]))
+
+
 def test_a_webm_stream_publishes_an_index_too() -> None:
     """Matroska keeps its index in `Cues`, not in a `sidx`.
 
@@ -3098,6 +3169,7 @@ def main() -> int:
                  test_the_walk_does_not_stop_at_the_first_whole_stream,
                  test_protobuf, test_sabr_framing,
                  test_a_webm_stream_publishes_an_index_too,
+        test_a_manifest_is_a_list_of_qualities_not_a_file,
                  test_the_published_index_decides_where_to_continue,
                  test_sabr_request_shape,
         test_a_session_context_is_handed_back, test_attested_endpoint_preference,

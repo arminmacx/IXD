@@ -47,7 +47,7 @@
       "applicationCategory": "UtilitiesApplication",
       "applicationSubCategory": "Download manager",
       "operatingSystem": "Linux, Windows 10/11, macOS",
-      "softwareVersion": "1.0.4",
+      "softwareVersion": "1.0.5",
       "url": "https://arminmacx.github.io/IXD/",
       "downloadUrl": "https://github.com/arminmacx/IXD/releases/latest",
       "installUrl": "https://github.com/arminmacx/IXD/releases/latest",
@@ -652,7 +652,7 @@ footer{border-top:1px solid var(--line);padding:48px 0;margin-top:40px}
 <main>
 <div class="wrap">
   <div class="hero">
-    <a class="pill rise d1" href="https://github.com/arminmacx/IXD/releases/latest"><span class="dot"></span> <b>v1.0.4</b> · Linux · Windows · macOS</a>
+    <a class="pill rise d1" href="https://github.com/arminmacx/IXD/releases/latest"><span class="dot"></span> <b>v1.0.5</b> · Linux · Windows · macOS</a>
     <h1>
       <span class="line l1"><span>The download manager</span></span>
       <span class="line l2"><span class="grad">that depends on nothing</span></span>
@@ -699,44 +699,53 @@ footer{border-top:1px solid var(--line);padding:48px 0;margin-top:40px}
   <div class="wrap story-grid">
     <div class="story-media">
       <div class="frame">
-        <div class="bar"><i></i><i></i><i></i><em>Internet Xtreme Downloader</em></div>
+        <div class="bar"><i></i><i></i><i></i><em id="frame-label">A page you are watching</em></div>
         <div class="shots">
           <picture>
+            <source srcset="panel-qualities.webp" type="image/webp">
+            <img class="on" data-step="0" src="panel-qualities.png" width="1320" height="1664" alt="The IXD panel on a video page, listing the qualities the site publishes: 1080p, 720p, 480p, 288p and 184p." loading="lazy" decoding="async">
+          </picture>
+          <picture>
             <source srcset="screenshot-main.webp" type="image/webp">
-            <img class="on" data-step="0" src="screenshot-main.png" width="2480" height="1520" alt="IXD download list with per-chunk progress bars and a live speed graph." loading="lazy" decoding="async">
+            <img data-step="1" src="screenshot-main.png" width="2480" height="1520" alt="IXD download list with per-chunk progress bars and a live speed graph." loading="lazy" decoding="async">
           </picture>
           <picture>
             <source srcset="screenshot-download.webp" type="image/webp">
-            <img data-step="1" src="screenshot-download.png" width="1120" height="1240" alt="A single IXD transfer, showing its chunks and speed history." loading="lazy" decoding="async">
+            <img data-step="2" src="screenshot-download.png" width="1120" height="1240" alt="A single IXD transfer, showing its chunks and speed history." loading="lazy" decoding="async">
           </picture>
           <picture>
             <source srcset="screenshot-network.webp" type="image/webp">
-            <img data-step="2" src="screenshot-network.png" width="1800" height="1320" alt="IXD network settings: proxies, connection counts and speed limits." loading="lazy" decoding="async">
+            <img data-step="3" src="screenshot-network.png" width="1800" height="1320" alt="IXD network settings: proxies, connection counts and speed limits." loading="lazy" decoding="async">
           </picture>
           <picture>
             <source srcset="screenshot-settings.webp" type="image/webp">
-            <img data-step="3" src="screenshot-settings.png" width="1800" height="1320" alt="IXD general settings." loading="lazy" decoding="async">
+            <img data-step="4" src="screenshot-settings.png" width="1800" height="1320" alt="IXD general settings." loading="lazy" decoding="async">
           </picture>
         </div>
       </div>
     </div>
     <div class="story-copy">
-      <div class="step live" data-step="0">
+      <div class="step live" data-step="0" data-frame="A page you are watching">
+        <span class="tag">On the page</span>
+        <h3>Video and music, from wherever you are watching</h3>
+        <p>The extension puts a panel on any page that is playing something and lists the qualities the site itself publishes — YouTube up to 2160p, Vimeo, and any site streaming HLS or DASH. Pick one and it is in the download list; above 1080p the video and audio arrive separately and are combined into one file.</p>
+      </div>
+      <div class="step" data-step="1" data-frame="Internet Xtreme Downloader">
         <span class="tag">The list</span>
         <h3>Everything at once, and each chunk of it</h3>
         <p>Every transfer with its own progress, speed, ETA and integrity state. The bar is not an estimate: it is the chunks, drawn as they fill, so a download that has stalled looks different from one that is slow.</p>
       </div>
-      <div class="step" data-step="1">
+      <div class="step" data-step="2" data-frame="Internet Xtreme Downloader">
         <span class="tag">One transfer</span>
         <h3>Open it and see the connections</h3>
         <p>Per-connection ranges, the speed history, the server's own digest checked against the file. A connection that finishes early takes work from the busiest one still running, so the end of a download is as parallel as the start.</p>
       </div>
-      <div class="step" data-step="2">
+      <div class="step" data-step="3" data-frame="Internet Xtreme Downloader">
         <span class="tag">Network</span>
         <h3>Routed however you need it</h3>
         <p>HTTP, HTTPS and SOCKS5 with authentication, the system proxy followed automatically, a rotating pool, and traffic pinned to one interface regardless of the default route. All of it written here — nothing is delegated to curl.</p>
       </div>
-      <div class="step" data-step="3">
+      <div class="step" data-step="4" data-frame="Internet Xtreme Downloader">
         <span class="tag">Settings</span>
         <h3>Quiet by default</h3>
         <p>Categories, queues, speed limits, schedules and browser integration in one place. It registers the messaging bridge with every browser it finds on its own, so the extension connects the first time it is loaded.</p>
@@ -857,7 +866,7 @@ footer{border-top:1px solid var(--line);padding:48px 0;margin-top:40px}
   <div class="wrap">
     <div class="center">
       <p class="eyebrow">Download</p>
-      <h2 id="download-h">Get IXD 1.0.4</h2>
+      <h2 id="download-h">Get IXD 1.0.5</h2>
       <p class="sub">Every build is produced by the same scripts, on a clean runner, and the release names the commit it was built from.</p>
     </div>
     <div class="plats">
@@ -1105,6 +1114,12 @@ footer{border-top:1px solid var(--line);padding:48px 0;margin-top:40px}
         const index = entry.target.dataset.step;
         steps.forEach((s) => s.classList.toggle('live', s === entry.target));
         shots.forEach((img) => img.classList.toggle('on', img.dataset.step === index));
+        // The window's own title bar says what is in it: a page for the
+        // in-page panel, the application for its own screens.
+        const label = document.getElementById('frame-label');
+        if (label && entry.target.dataset.frame) {
+          label.textContent = entry.target.dataset.frame;
+        }
       }
     }, {rootMargin: '-45% 0px -45% 0px'});
     steps.forEach((step) => live.observe(step));

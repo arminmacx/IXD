@@ -121,7 +121,15 @@ class Browser:
         self.binary = find_browser()
         if not self.binary:
             raise RuntimeError("no Chrome-family browser is installed")
-        self.profile = Path(tempfile.mkdtemp(prefix="ixd-browser-"))
+        # Not /tmp. A snap-confined browser — which is what `/snap/bin/chromium`
+        # is, and what this machine's `find_browser()` picks — runs with a
+        # private `/tmp` of its own and cannot see the host's, so a profile put
+        # there is invisible to it along with the messaging manifest inside it.
+        # `$HOME` is what the snap's `home` interface grants, and only
+        # non-hidden paths within it, so the directory is named plainly and
+        # removed on close.
+        self.profile = Path(tempfile.mkdtemp(prefix="ixd-browser-",
+                                             dir=str(Path.home())))
         self.timeout = timeout
         self._id = 0
         port = self._free_port()
@@ -168,13 +176,14 @@ class Browser:
         _sys.path.insert(0, str(REPO))
         from ixd import integration                       # noqa: PLC0415
 
-        launcher = integration.launcher_path()
-        if not launcher or not Path(launcher).exists():
+        launcher = self._host_launcher(integration)
+        if not launcher:
             return
         identity = (REPO / "extension" / "chrome-extension-id.txt")
         extension_id = identity.read_text().strip() if identity.exists() else ""
         if not extension_id:
             return
+        self.bridge_note = f"host: {launcher}"
         hosts = self.profile / "NativeMessagingHosts"
         hosts.mkdir(parents=True, exist_ok=True)
         (hosts / "com.ixd.downloader.json").write_text(_json.dumps({
@@ -184,6 +193,26 @@ class Browser:
             "type": "stdio",
             "allowed_origins": [f"chrome-extension://{extension_id}/"],
         }, indent=2))
+
+    def _host_launcher(self, integration) -> str:
+        """The messaging host this particular browser is able to execute.
+
+        A snap browser may not run anything from a dotted path in `$HOME`
+        (context.md §3.12), so the application installs a relay inside the
+        snap's own area and registers *that*. A test that registers the plain
+        launcher instead hands the browser a path its confinement refuses, and
+        the failure — "Specified native messaging host not found" — looks
+        exactly like a panel that is broken.
+        """
+        if "/snap/" in str(self.binary):
+            for name in ("chromium", "chrome", "google-chrome"):
+                relay = Path.home() / "snap" / name / "common" / "ixd" / "ixd-native-host"
+                if relay.exists():
+                    return str(relay)
+        launcher = integration.launcher_path()
+        if launcher and Path(launcher).exists():
+            return str(launcher)
+        return ""
 
     @staticmethod
     def _free_port() -> int:

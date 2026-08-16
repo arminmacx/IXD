@@ -248,8 +248,13 @@ class DownloadWindow(QDialog):
         self.refresh()
 
     def _cancel(self) -> None:
+        # Cancelling ends the download, and this window is the download's.
+        # Leaving it open on a cancelled transfer — which is what it used to
+        # do, sitting there reading "Cancelled" — asks the user to close the
+        # same thing twice. The row stays in the main list, which is where a
+        # cancelled download belongs.
         self.service.cancel(self.download_id)
-        self.refresh()
+        self.close()
 
     def _open_folder(self) -> None:
         from PySide6.QtCore import QUrl

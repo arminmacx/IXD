@@ -75,8 +75,21 @@ class GenericExtractor(Extractor):
     url_patterns = (r"^https?://",)
 
     def extract(self, url: str) -> MediaInfo:
-        # A direct media or manifest link needs no scraping at all.
+        # A direct media or manifest link needs no scraping at all — but a
+        # *manifest* is not a file, it is a list of qualities, and the panel
+        # asks about the manifest the player was seen fetching. Returning one
+        # row for it is what made a five-rendition stream look like a single
+        # "Video" everywhere outside YouTube and Vimeo.
         if looks_like_media_url(url):
+            protocol = _protocol_for(url)
+            renditions = self._expand_manifest(url, protocol, "")
+            if renditions:
+                return MediaInfo(
+                    title=filename_from_url(url),
+                    formats=renditions,
+                    webpage_url=url,
+                    extractor=self.name,
+                )
             return self._direct(url)
 
         # Ask what is at the far end before reading it. Without this step a
@@ -112,6 +125,17 @@ class GenericExtractor(Extractor):
         formats: list[MediaFormat] = []
         for index, (candidate, note) in enumerate(candidates.items()):
             protocol = _protocol_for(candidate)
+            # A manifest is a *list* of qualities, and offering it as one row
+            # hands the user "the video" where the site published five of
+            # them. Reported as a panel that shows one entry on sites this
+            # application is supposed to be good at: the parsers were here and
+            # tested, but nothing on the extraction path ever called them, so
+            # only YouTube and Vimeo — which build their own format lists —
+            # ever produced a choice.
+            expanded = self._expand_manifest(candidate, protocol, note)
+            if expanded:
+                formats.extend(expanded)
+                continue
             extension = "mp4"
             if protocol == "m3u8":
                 extension = "mp4"
@@ -310,6 +334,51 @@ class GenericExtractor(Extractor):
                     continue
                 if candidate not in found:
                     found.append(candidate)
+        return found
+
+    #: How much of a manifest is worth reading. A master playlist is a few
+    #: kilobytes; anything vastly larger is a *media* playlist listing every
+    #: segment of a long film, and that is not what is being looked for here.
+    MANIFEST_READ_LIMIT = 512 * 1024
+
+    def _expand_manifest(self, url: str, protocol: str,
+                         note: str) -> list[MediaFormat]:
+        """The qualities a manifest publishes, or nothing if it publishes none.
+
+        Fetched rather than assumed: an address ending in `.m3u8` may be a
+        master playlist listing five renditions or a media playlist listing
+        one film's segments, and only its first line says which. A media
+        playlist, an unreadable one, or an origin that refuses all fall back
+        to offering the manifest itself — one row that downloads is better
+        than a menu that is wrong.
+        """
+        if protocol not in ("m3u8", "dash"):
+            return []
+        try:
+            text = self.client.get_text(url, limit=self.MANIFEST_READ_LIMIT)
+        except Exception:  # noqa: BLE001 - the single-row fallback is the point
+            return []
+        if not text:
+            return []
+
+        try:
+            if protocol == "m3u8":
+                if not hls.is_master_playlist(text):
+                    return []
+                found = hls.parse_master(text, url)
+            else:
+                found = dash.parse_mpd(text, url)
+        except Exception:  # noqa: BLE001 - a manifest we cannot read is not fatal
+            return []
+
+        # One rendition is not a choice, and the row it would replace already
+        # carries the note the page gave it.
+        if len(found) < 2:
+            return []
+        for fmt in found:
+            fmt.manifest_url = fmt.manifest_url or url
+            if note and note not in (fmt.note or ""):
+                fmt.note = f"{fmt.note} · {note}".strip(" ·")
         return found
 
     @staticmethod

@@ -2098,6 +2098,106 @@ service.shutdown()
           "SETTING_AFTER nothing" in output, detail)
 
 
+def test_cancelling_closes_the_download_window() -> None:
+    """Cancel ends the download, and the window is the download's.
+
+    Reported: pressing Cancel in a download's own window cancelled the
+    transfer and left the window sitting there reading "Cancelled", so the
+    same thing had to be dismissed twice. The row belongs in the main list;
+    the window does not.
+
+    Also here: the taskbar's own log line. It is confirmed working on both
+    platforms, and a line every time the state changes fills the log with the
+    one thing that is not going wrong — so the first success is written and
+    the rest are not, while every refusal still is.
+    """
+    print("\n[cancelling closes the window, and the taskbar says its piece once]")
+    script = '''
+import sys, tempfile
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-cancel-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.models import Download, DownloadStatus
+from ixd.service import DownloadService
+from ixd.ui.main_window import MainWindow
+from ixd.ui.widgets.download_window import DownloadWindow
+
+app = QApplication([])
+settings = Settings(root / "settings.json")
+settings.set("download_dir", str(root / "out"))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = MainWindow(service)
+
+download = Download(url="https://example.invalid/big.bin", filename="big.bin",
+                    total_size=1000, downloaded=100,
+                    status=DownloadStatus.PAUSED)
+download.id = service.db.insert_download(download)
+
+DownloadWindow.show_for(service, download.id, window._palette, window)
+app.processEvents()
+opened = DownloadWindow._open.get(download.id)
+print("OPENED", opened is not None and opened.isVisible())
+opened._cancel()
+app.processEvents()
+print("STILL_OPEN", download.id in DownloadWindow._open)
+print("STATUS", service.get_download(download.id).status.value)
+
+# The taskbar line, written once however often the state changes.
+window.taskbar.diagnostic = lambda: "ITaskbarList3 normal on 1 window(s): 0x1=ok"
+window._log_taskbar_state()
+window.taskbar.diagnostic = lambda: "ITaskbarList3 clear on 2 window(s): 0x1=ok, 0x2=ok"
+window._log_taskbar_state()
+window.taskbar.diagnostic = lambda: "ITaskbarList3 normal on 2 window(s): 0x1=ok, 0x2=ok"
+window._log_taskbar_state()
+lines = [e["message"] for e in service.db.recent_events(200)
+         if "Taskbar progress" in e["message"]]
+print("TASKBAR_LINES", len(lines))
+print("TASKBAR_SAYS_WORKING", any("working" in line for line in lines))
+
+# A refusal is always written, and so is the recovery after it.
+window.taskbar.diagnostic = lambda: "no backend: cannot import name 'ULONGLONG'"
+window._log_taskbar_state()
+window.taskbar.diagnostic = lambda: "ITaskbarList3 normal on 1 window(s): 0x9=ok"
+window._log_taskbar_state()
+lines = [e["message"] for e in service.db.recent_events(200)
+         if "Taskbar progress" in e["message"]]
+print("AFTER_REFUSAL", len(lines))
+service.shutdown()
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-cancel-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("cancelling closes the window", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-600:] or "") + (process.stderr[-400:] or "")
+    check("the download's window opens", "OPENED True" in output, detail)
+    check("cancelling closes it", "STILL_OPEN False" in output, detail)
+    check("and the download really is cancelled",
+          "STATUS cancelled" in output, detail)
+    check("the taskbar writes one line, not one per state change",
+          "TASKBAR_LINES 1" in output, detail)
+    check("and that line says the backend is working",
+          "TASKBAR_SAYS_WORKING True" in output, detail)
+    check("a refusal is still written, and so is the recovery after it",
+          "AFTER_REFUSAL 3" in output, detail)
+
+
 def test_it_can_start_with_the_session() -> None:
     """Launch at startup, minimised — registered where the session looks.
 
@@ -4195,7 +4295,8 @@ def main() -> int:
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container,
                  test_the_queue_finishes_with_a_choice,
-                 test_the_scheduler_is_reachable_and_stoppable):
+                 test_the_scheduler_is_reachable_and_stoppable,
+                 test_cancelling_closes_the_download_window):
         try:
             test()
         except Exception as exc:  # noqa: BLE001
