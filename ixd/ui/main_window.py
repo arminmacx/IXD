@@ -560,6 +560,14 @@ class MainWindow(QMainWindow):
         """
         from .widgets.browser_dialog import BrowserDownloadDialog
 
+        # Logged because "I clicked download and nothing happened" is otherwise
+        # unanswerable: the extension has already cancelled the browser's own
+        # download and gone quiet, so this line is the only evidence that the
+        # hand-over arrived and reached a window (§423).
+        self.service.db.log_event(
+            "Asking where to put "
+            f"{payload.get('filename') or payload.get('url') or 'a download'}")
+
         dialog = BrowserDownloadDialog(self.service, self, payload)
         self._browser_dialogs.add(dialog)
         dialog.finished.connect(
