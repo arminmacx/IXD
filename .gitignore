@@ -29,12 +29,6 @@ native-host/com.ixd.downloader*.json
 
 # --- working files, kept locally and never published --------------------
 backups/
-# The build diary and the working instructions. They are a real engineering
-# record, but they are notes to whoever is building this — not documentation
-# for anyone using it — and they are backed up separately.
-instruction.md
-context.md
-session-log.md
 # Launch copy — drafts for Reddit and Product Hunt. They are working notes
 # about how to talk about the project, not part of it, and a repository is a
 # strange place to publish an unposted post.
