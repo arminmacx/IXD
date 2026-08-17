@@ -4,10 +4,12 @@
 
 # IXD — Internet Xtreme Downloader
 
-**A download manager that depends on nothing.**
-Multi-threaded transfers, native media extraction, browser integration,
-proxy routing and scheduling — with no `yt-dlp`, no `ffmpeg`, no `curl`,
-and no runtime dependency beyond Qt.
+**A free download manager for Windows, Linux and macOS that depends on
+nothing.**
+Multi-threaded accelerated transfers, byte-exact resume, native media
+extraction, browser integration, proxy routing and scheduling — with no
+`yt-dlp`, no `ffmpeg`, no `curl`, and no runtime dependency beyond Qt.
+Open source, no ads, no account, no paid tier.
 
 **[ixd — the website](https://arminmacx.github.io/IXD/)** · [Download](https://github.com/arminmacx/IXD/releases/latest) · [Report a problem](../../issues/new/choose)
 
