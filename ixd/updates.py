@@ -218,6 +218,21 @@ def platform_patterns() -> list[tuple[str, ...]]:
     return [("linux", "selfupdate", ".tar.gz"), ("linux", ".tar.gz")]
 
 
+def download_patterns() -> list[tuple[str, ...]]:
+    """What a person on this platform should be handed, best first.
+
+    Not the same question as :func:`asset_patterns`, which answers "what may
+    this build install *itself* from". This one is for a build that cannot —
+    a `.deb`, or one of the 1.0.16/1.0.17 installs that shipped without a
+    marker — and the right answer there is the installer, then the archive.
+    """
+    if sys.platform.startswith("win"):
+        return [("windows", "setup", ".exe"), ("windows", "x64", ".zip")]
+    if sys.platform == "darwin":
+        return [("macos", ".pkg"), ("macos", ".dmg"), ("macos", ".zip")]
+    return [("amd64", ".deb"), ("linux", ".tar.gz")]
+
+
 def asset_patterns() -> list[tuple[str, ...]]:
     """Every way of naming the file this build should take, best first.
 

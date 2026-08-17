@@ -6029,6 +6029,10 @@ def test_an_installed_build_can_update_itself() -> None:
              "browser_download_url": "https://example.invalid/zip"},
             {"name": "ixd-linux-x86_64-selfupdate.tar.gz", "size": 83,
              "browser_download_url": "https://example.invalid/tgz"},
+            {"name": "ixd-1.0.17-macos-arm64.pkg", "size": 37,
+             "browser_download_url": "https://example.invalid/pkg"},
+            {"name": "ixd_1.0.17_amd64.deb", "size": 118,
+             "browser_download_url": "https://example.invalid/deb"},
         ])
         chosen = updates.choose_asset(release)
         check("and takes the installer the release publishes",
@@ -6070,6 +6074,26 @@ def test_an_installed_build_can_update_itself() -> None:
 
         check("running an installer is refused where it is not the route",
               _refuses_installer(updates, root))
+
+        # A build that cannot install anything still has to hand somebody the
+        # right file. "Open the release page" — thirteen assets, in a browser —
+        # was the whole of the old answer, and it is what the user described as
+        # "only open the repo".
+        was = sys.platform
+        for platform, expected in (("win32", "windows-x64-setup.exe"),
+                                   ("darwin", "macos-arm64.pkg"),
+                                   ("linux", "amd64.deb")):
+            sys.platform = platform
+            try:
+                picked = next((release.asset(*p)
+                               for p in updates.download_patterns()
+                               if release.asset(*p)), None)
+                check(f"a {platform} build is pointed at its own file",
+                      picked is not None
+                      and str(picked.get("name", "")).endswith(expected),
+                      str(picked))
+            finally:
+                sys.platform = was
     finally:
         if previous_frozen is None:
             del sys.frozen

@@ -128,6 +128,13 @@ class UpdateDialog(QDialog):
         self.notes.setMarkdown(notes or "No release notes were published.")
         self.install_button.setEnabled(bool(version) and bool(kind))
         self.install_button.setVisible(bool(kind))
+        # When there is no install button, this one has to be worth pressing.
+        url, name = self._direct_download()
+        self.page_button.setText(
+            "Download the installer" if url and name.endswith(".exe")
+            else "Download the update" if url
+            else "Open the download page")
+        self.page_button.setToolTip(name or "")
         self.page_button.setEnabled(True)
         self.extension_note.setVisible(bool(version))
 
@@ -168,9 +175,32 @@ class UpdateDialog(QDialog):
         self.install_button.setEnabled(False)
 
     # ------------------------------------------------------------------
+    def _direct_download(self) -> tuple[str, str]:
+        """The file this machine should take, and what to call the button.
+
+        A build that cannot replace itself used to offer one thing: *open the
+        release page* — a list of thirteen files, on a page, in a browser, for
+        somebody who has just been told there is an update. That was the whole
+        of the answer, and it is the part of this the user described as "only
+        open the repo".
+
+        So when the release publishes something this platform can use, the
+        button goes straight at that file instead. It is still a download and
+        still a manual install; it is just not a scavenger hunt.
+        """
+        release = self._release
+        if release is None:
+            return "", ""
+        for pattern in updates.download_patterns():
+            found = release.asset(*pattern)
+            if found and found.get("browser_download_url"):
+                return str(found["browser_download_url"]), str(found.get("name") or "")
+        return "", ""
+
     def _open_page(self) -> None:
+        url, _ = self._direct_download()
         QDesktopServices.openUrl(QUrl(
-            str(self.payload.get("page_url") or updates.DEFAULT_PAGE)))
+            url or str(self.payload.get("page_url") or updates.DEFAULT_PAGE)))
 
     def _install(self) -> None:
         release = self._release
