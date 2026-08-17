@@ -3361,6 +3361,16 @@ class DownloadEngine:
         self._shutdown = threading.Event()
         self._supervisor: threading.Thread | None = None
         self._paused_queues: set[int] = set()
+        #: Downloads somebody started by hand while their queue was paused.
+        #:
+        #: A paused queue holds back everything in it, and until this existed
+        #: that included a download the user had just pressed Resume on: the
+        #: slot check refused it, the status went back to `QUEUED`, and nothing
+        #: said why. "It keeps everything in the queue even if you start
+        #: manually the one you want" — and it did. An explicit instruction
+        #: about one download outranks a policy about its queue, so that
+        #: download is exempt until it is paused, cancelled or removed.
+        self._started_by_hand: set[int] = set()
         #: One lock per server-driven endpoint; see `sabr_session_lock`.
         self._sabr_locks: dict[str, threading.Lock] = {}
         #: Set by the service: given a refresh recipe and a position in
@@ -3548,18 +3558,36 @@ class DownloadEngine:
             self._pump_event.set()
         return download
 
-    def start_download(self, download_id: int, force: bool = False) -> bool:
-        """Begin or resume a download, subject to concurrency limits."""
+    def start_download(self, download_id: int, force: bool = False,
+                       by_hand: bool = False) -> bool:
+        """Begin or resume a download, subject to concurrency limits.
+
+        `by_hand` is somebody pressing Resume on this one download. It exempts
+        it from its queue's pause — not from the concurrency limits, which are
+        about the machine rather than about policy — and the exemption lasts
+        until the download is paused, cancelled or removed, so the supervisor
+        picks it up too when a slot frees.
+        """
         with self._lock:
             task = self._tasks.get(download_id)
             if task is not None and task.running:
                 return False
+            if by_hand:
+                self._started_by_hand.add(download_id)
 
         download = self.db.get_download(download_id)
         if download is None:
             return False
         if download.status is DownloadStatus.COMPLETED and not force:
             return False
+
+        if by_hand and download.queue_id is not None and self.is_queue_paused(
+                download.queue_id):
+            queue = self.db.get_queue(download.queue_id)
+            self.db.log_event(
+                f"Started {download.filename} by hand — its queue "
+                f"({queue.name if queue else download.queue_id}) is paused, "
+                "and the rest of it stays that way.", download_id)
 
         if not force and not self._has_free_slot(download):
             self.db.update_download_fields(download_id, status=DownloadStatus.QUEUED)
@@ -3573,9 +3601,23 @@ class DownloadEngine:
         task.start()
         return True
 
+    def allow_by_hand(self, download_id: int) -> None:
+        """Exempt one download from its queue's pause, without starting it.
+
+        For "Resume all", which hands its downloads to the supervisor in
+        priority order rather than starting them itself — the ordering inside a
+        queue is the point of having one, and calling `start_download` in list
+        order would throw it away.
+        """
+        with self._lock:
+            self._started_by_hand.add(download_id)
+
     def pause_download(self, download_id: int) -> None:
         with self._lock:
             task = self._tasks.get(download_id)
+            # Pausing withdraws the exemption: the next thing to start this is
+            # the queue, on the queue's terms.
+            self._started_by_hand.discard(download_id)
         if task is not None and task.running:
             task.pause()
         else:
@@ -3586,6 +3628,7 @@ class DownloadEngine:
     def cancel_download(self, download_id: int) -> None:
         with self._lock:
             task = self._tasks.get(download_id)
+            self._started_by_hand.discard(download_id)
         if task is not None and task.running:
             task.cancel()
         else:
@@ -3791,13 +3834,19 @@ class DownloadEngine:
         queue_id = download.queue_id
         if queue_id is None:
             return True
-        if self.is_queue_paused(queue_id):
+
+        # An explicit "start this one" outranks its queue being held — but not
+        # the machine's own limits, which is why this sits below the
+        # concurrency check and above the policy ones.
+        with self._lock:
+            by_hand = download.id in self._started_by_hand
+        if not by_hand and self.is_queue_paused(queue_id):
             return False
 
         queue = self.db.get_queue(queue_id)
         if queue is None:
             return True
-        if not queue.enabled:
+        if not by_hand and not queue.enabled:
             return False
 
         limit = 1 if queue.mode is QueueMode.SEQUENTIAL else max(1, queue.max_concurrent)

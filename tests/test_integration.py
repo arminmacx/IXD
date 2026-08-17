@@ -5961,6 +5961,168 @@ shutil.rmtree(root, ignore_errors=True)
     check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
 
 
+def test_starting_one_download_by_hand_beats_a_paused_queue() -> None:
+    """Reported: "it keeps everything in queue even if you start manually".
+
+    A paused queue holds back everything in it, and that included the download
+    somebody had just pressed Resume on: `_has_free_slot` refused it,
+    `start_download` wrote the status back to *Queued*, and nothing anywhere
+    said why. The queue is a policy; pressing Resume on one row is an
+    instruction, and an instruction about one download outranks a policy about
+    its queue.
+
+    What must *not* change: the rest of the queue stays held, the machine's own
+    concurrency limit still applies, and pausing that download again puts it
+    back under the queue's rule.
+    """
+    print("\n[starting one download by hand beats a paused queue]")
+    from ixd.core.models import Download, DownloadStatus
+    from ixd.service import DownloadService
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-byhand-"))
+    config.DATA_DIR = root
+    config.TEMP_DIR = root / "incomplete"
+    config.LOG_DIR = root / "logs"
+    config.IPC_PORT_FILE = root / "ipc.json"
+    config.ensure_dirs()
+    settings = Settings(root / "settings.json")
+    settings.set("download_dir", str(root / "out"))
+    service = DownloadService(settings, Database(root / "state.sqlite3"))
+    engine = service.engine
+
+    queue_id = service.list_queues()[0].id
+    rows = []
+    for name in ("wanted.bin", "the-rest.bin"):
+        row = Download(url=f"https://example.invalid/{name}", filename=name,
+                       dest_dir=str(root / "out"), queue_id=queue_id,
+                       status=DownloadStatus.PAUSED)
+        row.id = service.db.insert_download(row)
+        rows.append(row)
+    wanted, rest = rows
+
+    engine.pause_queue(queue_id)
+    check("the queue is held", engine.is_queue_paused(queue_id))
+    check("and holds everything in it while it is",
+          not engine._has_free_slot(service.db.get_download(wanted.id)))
+
+    # The transfer itself is never started — the socket would go nowhere and
+    # that is not what is under test. `start_download` decides first.
+    engine.allow_by_hand(wanted.id)
+    check("pressing Resume on one download lets that one through",
+          engine._has_free_slot(service.db.get_download(wanted.id)))
+    check("and only that one — the rest of the queue stays held",
+          not engine._has_free_slot(service.db.get_download(rest.id)))
+    # And the route the buttons actually take: Resume in the window, the
+    # right-click menu and the download window all land on `service.resume`.
+    engine._started_by_hand.discard(wanted.id)
+    service.db.update_download_fields(wanted.id, status=DownloadStatus.PAUSED.value)
+    service.resume(wanted.id)
+    check("Resume in the window is what marks it, not the test",
+          wanted.id in engine._started_by_hand)
+    check("so the supervisor lets it through when a slot frees",
+          engine._has_free_slot(service.db.get_download(wanted.id)))
+    engine.pause_download(wanted.id)
+    engine.allow_by_hand(wanted.id)
+
+    # The limit that is about the machine, not about policy, still applies.
+    settings.set("max_concurrent_downloads", 0)   # clamped to 1 by the check
+    class _Busy:
+        running, postprocessing = True, False
+        def __init__(self, download): self.download = download
+    other = Download(url="https://example.invalid/x", filename="x.bin",
+                     dest_dir=str(root / "out"), status=DownloadStatus.DOWNLOADING)
+    other.id = service.db.insert_download(other)
+    engine._tasks[other.id] = _Busy(other)
+    check("but the concurrency limit is not overridden by it",
+          not engine._has_free_slot(service.db.get_download(wanted.id)))
+    engine._tasks.pop(other.id)
+
+    engine.pause_download(wanted.id)
+    check("pausing it again puts it back under the queue's rule",
+          not engine._has_free_slot(service.db.get_download(wanted.id)))
+
+    # "Resume all" is the same instruction about everything.
+    service.resume_all()
+    check("“Resume all” releases what the paused queue was holding",
+          engine._has_free_slot(service.db.get_download(rest.id)))
+
+    service.shutdown()
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_stream_says_how_big_it_is_before_it_starts() -> None:
+    """Reported: every YouTube video said "size not published".
+
+    A transfer that has not begun has `total_size == 0` — it learns its size
+    from the first response — and the file-info window opens before a byte is
+    fetched. What the *site* declared has been in the stream's session context
+    since extraction, which is why the row in the list showed a size while the
+    window in front of it said there was none.
+    """
+    print("\n[a stream says how big it is before it starts]")
+    import json as _json
+    from ixd.core.models import Download, DownloadStatus
+    from ixd.service import DownloadService
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-size-"))
+    config.DATA_DIR = root
+    config.TEMP_DIR = root / "incomplete"
+    config.LOG_DIR = root / "logs"
+    config.IPC_PORT_FILE = root / "ipc.json"
+    config.ensure_dirs()
+    settings = Settings(root / "settings.json")
+    settings.set("download_dir", str(root / "out"))
+    service = DownloadService(settings, Database(root / "state.sqlite3"))
+
+    video = Download(url="https://example.invalid/v", filename="A Video.mp4",
+                     status=DownloadStatus.PAUSED, mux_group="1:video",
+                     sabr_context={"size": 193_000_000})
+    video.id = service.db.insert_download(video)
+    audio = Download(url="https://example.invalid/a", filename="A Video.m4a",
+                     status=DownloadStatus.PAUSED, mux_group="1:audio",
+                     sabr_context={"size": 9_000_000})
+    audio.id = service.db.insert_download(audio)
+
+    check("a fresh row still reports no transferred size",
+          service.db.get_download(video.id).total_size == 0)
+    check("but the size the site declared is known",
+          service.expected_total(video.id) == 202_000_000,
+          str(service.expected_total(video.id)))
+    check("and it is the sum of both halves, not the video alone",
+          service.expected_total(video.id) > 193_000_000)
+    check("asked from either half", service.expected_total(audio.id) == 202_000_000)
+
+    # Once the transfer knows its own size, that is what counts.
+    service.db.update_download_fields(video.id, total_size=195_000_000)
+    check("a real measurement replaces the declaration",
+          service.expected_total(video.id) == 204_000_000,
+          str(service.expected_total(video.id)))
+
+    lonely = Download(url="https://example.invalid/z", filename="z.bin",
+                      status=DownloadStatus.PAUSED)
+    lonely.id = service.db.insert_download(lonely)
+    check("a download with nothing declared reports nothing, rather than lying",
+          service.expected_total(lonely.id) == 0)
+
+    # The list had the same hole, and only for streams with no partner.
+    solo = Download(url="https://example.invalid/s", filename="Just Audio.m4a",
+                    status=DownloadStatus.PAUSED,
+                    sabr_context={"size": 4_500_000})
+    solo.id = service.db.insert_download(solo)
+    shown = {row.id: row for row in service.list_for_display()}
+    check("the list shows a declared size for an unpaired stream too",
+          shown[solo.id].total_size == 4_500_000,
+          str(shown[solo.id].total_size))
+    check("and still nothing for a download that declared nothing",
+          shown[lonely.id].total_size == 0)
+    check("while a pair is still shown as one file of both sizes",
+          shown[video.id].total_size == 204_000_000,
+          str(shown[video.id].total_size))
+
+    service.shutdown()
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — integration test suite")
@@ -6022,6 +6184,8 @@ def main() -> int:
                  test_an_update_survives_a_folder_windows_will_not_rename,
                  test_a_link_clicked_in_the_browser_asks_first,
                  test_a_stream_chosen_in_the_panel_asks_too,
+                 test_starting_one_download_by_hand_beats_a_paused_queue,
+                 test_a_stream_says_how_big_it_is_before_it_starts,
                  test_the_window_comes_forward_when_the_browser_asks,
                  test_an_all_queues_schedule_can_still_choose_its_downloads):
         try:

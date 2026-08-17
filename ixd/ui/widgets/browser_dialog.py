@@ -293,7 +293,13 @@ class BrowserDownloadDialog(QDialog):
         if name:
             self.filename_edit.setText(name)
         self.filename_edit.setEnabled(True)
-        size = int(download.get("total_size") or 0)
+        # Not `total_size`: a transfer that has not started has none, and this
+        # window opens before anything is fetched — which is why every YouTube
+        # video said "size not published" while the list showed the size. What
+        # the site declared is in the stream's session context, and a pair is
+        # the sum of its halves.
+        size = (self.service.expected_total(self.download_id)
+                if self.download_id else 0) or int(download.get("total_size") or 0)
         parts = [f"{size / 1048576:.1f} MB" if size else "size not published"]
         companions = (self.service.mux_companions(self.download_id)
                       if self.download_id else [])

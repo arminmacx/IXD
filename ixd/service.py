@@ -2169,6 +2169,14 @@ class DownloadService:
                 if (row.status is DownloadStatus.COMPLETED
                         and partner.status is not DownloadStatus.COMPLETED):
                     row.status = partner.status
+            elif not row.total_size:
+                # The same fallback for a stream with no partner — an audio
+                # track on its own, or a quality published whole. Only the
+                # paired branch had it, so those rows sat at "unknown size"
+                # until the first response came back, which is the other half
+                # of "it doesn't grab the size for YouTube". Display only: the
+                # stored row still learns its size from the transfer.
+                row.total_size = self._expected_size(row)
             shown.append(row)
         return shown
 
@@ -2181,6 +2189,23 @@ class DownloadService:
             return int((download.sabr_context or {}).get("size") or 0)
         except (TypeError, ValueError):
             return 0
+
+    def expected_total(self, download_id: int) -> int:
+        """What the finished file will weigh, before a byte has been fetched.
+
+        A transfer that has not started reports `total_size == 0` — it learns
+        its own size from the first response — so anything asking a fresh row
+        how big it is gets nothing. What the *site* declared is kept in the
+        stream's session context from the moment it was extracted, and a paired
+        quality is the sum of both halves.
+
+        This is the same arithmetic `list_for_display` does for the row in the
+        list. It is here as well because the file-info window asks before the
+        row has ever been drawn, and answered "size not published" for every
+        YouTube video while the list beside it showed the size.
+        """
+        return sum(self._expected_size(row)
+                   for row in self.mux_companions(download_id))
 
     def get_download(self, download_id: int) -> Download | None:
         download = self.db.get_download(download_id)
@@ -2196,7 +2221,14 @@ class DownloadService:
         return download
 
     def resume(self, download_id: int) -> bool:
-        return self.engine.start_download(download_id)
+        """Somebody pressed Resume on this one download.
+
+        `by_hand` is what tells the engine this is an instruction about a
+        download rather than the queue's own turn coming round — see
+        `_started_by_hand`. Without it, Resume inside a paused queue put the
+        row straight back to *Queued* and said nothing.
+        """
+        return self.engine.start_download(download_id, by_hand=True)
 
     def pause(self, download_id: int) -> None:
         self.engine.pause_download(download_id)
@@ -2243,6 +2275,11 @@ class DownloadService:
         for download in self.db.list_downloads():
             if download.status in (DownloadStatus.PAUSED, DownloadStatus.ERROR,
                                    DownloadStatus.SCHEDULED):
+                # "All" means all, including the ones a paused queue is
+                # holding — otherwise pressing this while a schedule has a
+                # queue down does nothing and explains nothing, which is the
+                # same complaint as the single Resume in a different shape.
+                self.engine.allow_by_hand(download.id)
                 self.db.update_download_fields(download.id, status=DownloadStatus.QUEUED)
         self.engine._pump_event.set()
 
