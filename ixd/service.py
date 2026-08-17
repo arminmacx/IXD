@@ -2207,6 +2207,24 @@ class DownloadService:
     def remove(self, download_id: int, delete_files: bool = False) -> None:
         self.engine.remove_download(download_id, delete_files)
 
+    def mux_companions(self, download_id: int) -> list["Download"]:
+        """Every row that becomes the same file as this one, itself included.
+
+        A chosen quality is **one** file, and above 360p it arrives as two
+        streams (§3.3). So anything done to a paired download has to be done to
+        its partner or the result is half of a film: starting one and leaving
+        the other queues a video that waits for ever for its sound, and
+        removing one leaves an orphan nothing will ever combine.
+        """
+        download = self.db.get_download(download_id)
+        if download is None:
+            return []
+        if not download.mux_group:
+            return [download]
+        token = download.mux_group.rsplit(":", 1)[0]
+        return [row for row in self.db.list_downloads()
+                if row.mux_group and row.mux_group.rsplit(":", 1)[0] == token]
+
     def swap_link(self, download_id: int, new_url: str) -> bool:
         return self.engine.swap_link(download_id, new_url)
 
@@ -2658,6 +2676,10 @@ class DownloadService:
             visitor_data=(params.get("visitorData", "")
                           or params.get("visitor_data", "")),
             queue_id=params.get("queue_id"),
+            # False when a window is going to ask about this one first: the row
+            # is created and the streams are resolved, and nothing is fetched
+            # until somebody says so.
+            start=bool(params.get("start", True)),
             options={
                 "player_request": (params.get("playerRequest", "")
                                    or params.get("player_request", "")),

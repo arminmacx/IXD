@@ -68,11 +68,21 @@ class BrowserDownloadDialog(QDialog):
 
     queued = Signal(int)
 
-    def __init__(self, service: "DownloadService", parent, payload: dict[str, Any]) -> None:
+    def __init__(self, service: "DownloadService", parent, payload: dict[str, Any],
+                 *, media: bool = False) -> None:
         super().__init__(parent)
         self.service = service
         self.payload = dict(payload)
         self.download_id: int | None = None
+        #: A stream chosen in the page's panel, rather than a file the browser
+        #: was about to fetch. The difference is that the engine has to read
+        #: the page before there is anything to name or size — so this window
+        #: opens on what is known, and fills in when that returns. It is opened
+        #: at the moment of the click precisely *because* that read is slow:
+        #: on a challenged connection it is twelve seconds (§3.51), and twelve
+        #: seconds of nothing is what "it didn't work" looks like.
+        self.media = media
+        self._resolved = False
 
         self.setWindowTitle("Download file info")
         # A top-level window rather than a panel over the main one: the main
@@ -107,8 +117,13 @@ class BrowserDownloadDialog(QDialog):
         form.addRow("Address", self.url_edit)
 
         self.filename_edit = QLineEdit(self._initial_name())
-        self.filename_edit.setPlaceholderText("Named by the server")
+        self.filename_edit.setPlaceholderText(
+            "The stream names itself" if self.media else "Named by the server")
         form.addRow("File name", self.filename_edit)
+
+        if self.media:
+            self.quality_label = QLabel(self._quality_text())
+            form.addRow("Quality", self.quality_label)
 
         folder_row = QHBoxLayout()
         folder_row.setSpacing(8)
@@ -121,7 +136,9 @@ class BrowserDownloadDialog(QDialog):
         folder_row.addWidget(browse)
         form.addRow("Save in", folder_row)
 
-        self.info_label = QLabel("Asking the server about this file…")
+        self.info_label = QLabel(
+            "Reading the stream…" if self.media
+            else "Asking the server about this file…")
         self.info_label.setObjectName("Muted")
         self.info_label.setWordWrap(True)
         form.addRow("", self.info_label)
@@ -146,10 +163,14 @@ class BrowserDownloadDialog(QDialog):
         self._fill_queue_menu()
         self.later_button.setMenu(self.later_menu)
 
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        # Cancelling a stream has something to undo: the engine has already
+        # made the row (paused) while this window was on screen, and leaving it
+        # behind means a download nobody asked for sitting in the list.
+        self.rejected.connect(self._discard_media)
 
-        for button in (self.start_button, self.later_button, cancel):
+        for button in (self.start_button, self.later_button, self.cancel_button):
             button.setMinimumWidth(160)
             buttons.addWidget(button)
         buttons.addStretch(1)
@@ -165,7 +186,15 @@ class BrowserDownloadDialog(QDialog):
         # Not the address: it is read-only, and opening with the caret in a
         # field nobody can type in is the window pointing at the wrong thing.
         self.start_button.setFocus()
-        self._probe()
+        if self.media:
+            # There is nothing to start until the engine has resolved the
+            # stream, and nothing to probe: the engine is already talking to
+            # the site. Both buttons come alive in `media_ready`.
+            self.start_button.setEnabled(False)
+            self.later_button.setEnabled(False)
+            self.filename_edit.setEnabled(False)
+        else:
+            self._probe()
 
     # ------------------------------------------------------------------
     def _initial_name(self) -> str:
@@ -175,8 +204,23 @@ class BrowserDownloadDialog(QDialog):
         supplied = str(self.payload.get("filename") or "").strip()
         if supplied:
             return sanitize_filename(supplied)
+        if self.media:
+            # A stream is named after its media, never its address (§3.3), and
+            # the engine is the one that knows. The page's title is the best
+            # thing to show in the meantime, and it is usually the answer.
+            return str(self.payload.get("title") or "").strip()
         url = str(self.payload.get("url") or "")
         return filename_from_url(url) if url else ""
+
+    def _quality_text(self) -> str:
+        quality = str(self.payload.get("quality") or "").strip()
+        container = str(self.payload.get("container") or "").strip()
+        if self.payload.get("format_id") and not quality:
+            quality = "the quality chosen in the page"
+        parts = [quality or "best available"]
+        if container:
+            parts.append(container.lstrip("."))
+        return " · ".join(parts)
 
     def _fill_queue_menu(self) -> None:
         queues = self.service.list_queues()
@@ -240,12 +284,137 @@ class BrowserDownloadDialog(QDialog):
             f"The server did not answer a size query: {message}. "
             "It can still be downloaded.")
 
+    # -- what the engine came back with, for a stream -------------------
+    def media_ready(self, download: dict[str, Any]) -> None:
+        """The engine resolved the stream; the row exists and is paused."""
+        self._resolved = True
+        self.download_id = int(download.get("id") or 0) or None
+        name = str(download.get("filename") or "")
+        if name:
+            self.filename_edit.setText(name)
+        self.filename_edit.setEnabled(True)
+        size = int(download.get("total_size") or 0)
+        parts = [f"{size / 1048576:.1f} MB" if size else "size not published"]
+        companions = (self.service.mux_companions(self.download_id)
+                      if self.download_id else [])
+        if len(companions) > 1:
+            # Said plainly, because two rows appear in the list for one file
+            # and that has been reported as a bug more than once.
+            parts.append("video and audio, combined into one file when both "
+                         "have arrived")
+        self.info_label.setText(" · ".join(parts))
+        self.start_button.setEnabled(True)
+        self.later_button.setEnabled(True)
+        self.start_button.setFocus()
+
+    def media_failed(self, message: str) -> None:
+        """The engine could not resolve the stream at all."""
+        self._resolved = True
+        self.info_label.setText(message)
+        self.start_button.setEnabled(False)
+        self.later_button.setEnabled(False)
+        self.cancel_button.setText("Close")
+
+    def media_delegated(self) -> None:
+        """The browser is fetching this one; there is nothing here to start.
+
+        The address is refused to this application and served to the page that
+        minted it (§271), so the extension reads the bytes and hands them over.
+        That transfer is already under way by the time this arrives — there is
+        no paused row to offer, and a window with buttons that do nothing is
+        worse than one that says so.
+        """
+        self._resolved = True
+        self.info_label.setText(
+            "This stream is only served to the browser, so the browser is "
+            "fetching it and handing the bytes over. It is already running — "
+            "watch it in the main window.")
+        self.start_button.setEnabled(False)
+        self.later_button.setEnabled(False)
+        self.cancel_button.setText("Close")
+
+    def _discard_media(self) -> None:
+        """Cancelled: take the paused row, and its pair, back out again."""
+        if not self.media or self.download_id is None:
+            return
+        for row in self.service.mux_companions(self.download_id) or []:
+            try:
+                self.service.remove(row.id, delete_files=True)
+            except Exception:  # noqa: BLE001 - nothing to escalate to here
+                pass
+        self.service.db.log_event("A stream was cancelled before it started.")
+        self.download_id = None
+        self.queued.emit(0)
+
     # -- the three ways out ---------------------------------------------
     def _start_now(self) -> None:
+        if self.media:
+            self._release_media(queue_id=None, start=True)
+            return
         self._queue_it(queue_id=None, start=True)
 
     def _download_later(self, queue_id: int) -> None:
+        if self.media:
+            self._release_media(queue_id=queue_id, start=False)
+            return
         self._queue_it(queue_id=queue_id, start=False)
+
+    def _chosen_folder(self) -> str | None:
+        folder = self.folder_edit.text().strip()
+        if not folder:
+            return ""
+        try:
+            Path(folder).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.info_label.setText(f"Cannot use that folder: {exc}")
+            return None
+        return folder
+
+    def _release_media(self, *, queue_id: int | None, start: bool) -> None:
+        """Apply the answers to the row the engine already made, and let it go.
+
+        Every field is written to **all** the rows that become this one file,
+        because a paired quality is two of them and moving one of a pair is how
+        a video ends up in one folder and its sound in another.
+        """
+        if self.download_id is None:
+            return
+        folder = self._chosen_folder()
+        if folder is None:
+            return
+
+        companions = self.service.mux_companions(self.download_id) or []
+        chosen_name = self.filename_edit.text().strip()
+        for row in companions:
+            fields: dict[str, Any] = {}
+            if folder:
+                fields["dest_dir"] = folder
+            if queue_id is not None:
+                fields["queue_id"] = queue_id
+            # The name is the finished file's, so it belongs to the video half
+            # of a pair — the audio keeps its own, and the muxer names the
+            # output from the video. Renaming both would collide them.
+            primary = (len(companions) == 1
+                       or str(row.mux_group or "").endswith(":video"))
+            if chosen_name and primary:
+                fields["filename"] = chosen_name
+            if fields:
+                self.service.db.update_download_fields(row.id, **fields)
+
+        self.service.settings.set(
+            "confirm_browser_downloads", self.ask_check.isChecked())
+        if start:
+            for row in companions:
+                self.service.resume(row.id)
+        else:
+            queue = self.service.db.get_queue(queue_id) if queue_id else None
+            where = f"“{queue.name}”" if queue else "its queue"
+            self.service.db.log_event(
+                f"{chosen_name or 'The stream'} is waiting in {where} — "
+                f"{queue_schedule_hint(self.service, queue_id)}",
+                self.download_id)
+        self.queued.emit(int(self.download_id))
+        self.accept()
 
     def _queue_it(self, *, queue_id: int | None, start: bool) -> None:
         folder = self.folder_edit.text().strip()

@@ -388,6 +388,11 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
         # somebody has seen where it is going. Only where there is a window to
         # ask in — `--background` keeps the immediate `add` it always had.
         server.register("add", lambda params: _ask_before_adding(service, window, params))
+        # A quality chosen in the page's panel. Same window, opened before the
+        # engine reads the page rather than after — see `_ask_before_adding_media`.
+        server.register(
+            "add_media",
+            lambda params: _ask_before_adding_media(service, window, params))
 
     for url in urls:
         try:
@@ -480,6 +485,48 @@ def _ask_before_adding(service, window, params: dict) -> dict:
     supplied = str(params.get("filename") or "").strip()
     name = sanitize_filename(supplied) if supplied else filename_from_url(url)
     return {"confirming": True, "url": url, "filename": name}
+
+
+def _ask_before_adding_media(service, window, params: dict) -> dict:
+    """Open the file-info window for a stream chosen in the page's panel.
+
+    The order matters and it is the opposite of `_ask_before_adding`. There the
+    address is already known, so the window can ask everything and the engine
+    is told afterwards. Here the engine has to read the page before there *is*
+    a name, a size or a stream — seconds, and twelve of them on a challenged
+    connection (context.md §3.51) — so the window opens first on what is known
+    and the extraction runs behind it.
+
+    Which means the extraction still happens **inside this call**, and that is
+    deliberate: `add_media` answers a refused address by asking the extension
+    to fetch it instead (`browser_fetch`), and that answer only exists while
+    the extension is still waiting on this reply. Asking first and extracting
+    afterwards would take that route away, and it is the one some videos have.
+    """
+    if not service.settings.get_bool("confirm_browser_downloads", True):
+        result = service.handle_command("add_media", params)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "could not add the stream"))
+        return result["result"]
+
+    token = f"media-{time.time_ns()}"
+    _on_the_window(window, lambda: window.confirm_media_download(token, dict(params)))
+
+    # Paused: the row is made, the streams are resolved, and not a byte is
+    # fetched until the window is answered.
+    result = service.handle_command("add_media", {**params, "start": False})
+    if not result.get("ok"):
+        error = str(result.get("error") or "the stream could not be read")
+        _on_the_window(window, lambda: window.media_download_failed(token, error))
+        raise RuntimeError(error)
+
+    payload = result["result"] or {}
+    if payload.get("browser_fetch"):
+        _on_the_window(window, lambda: window.media_download_delegated(token))
+        return payload
+
+    _on_the_window(window, lambda: window.media_download_ready(token, dict(payload)))
+    return {**payload, "confirming": True}
 
 
 def _focus(window) -> bool:

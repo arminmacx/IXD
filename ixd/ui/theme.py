@@ -317,6 +317,14 @@ def stylesheet(palette: Palette = DARK) -> str:
         font-weight: 600;
     }}
     QPushButton#Primary:hover {{ background: {p.accent}; }}
+    /* A primary button that cannot be pressed has to *look* like one. The
+       general `QPushButton:disabled` rule above is overridden by the id
+       selector, so without this a disabled Start button was drawn in full
+       accent — the most inviting thing on screen, and inert. */
+    QPushButton#Primary:disabled {{
+        background: {p.glass};
+        color: {p.text_faint};
+    }}
     QPushButton#Danger:hover {{ border-color: {p.bad}; color: {p.bad}; }}
 
     QPushButton#NavItem {{

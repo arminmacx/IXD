@@ -5530,6 +5530,209 @@ shutil.rmtree(root, ignore_errors=True)
           "DIRECT False 2" in output, detail)
 
 
+def test_a_stream_chosen_in_the_panel_asks_too() -> None:
+    """The same window for a quality chosen in the page, opened the other way.
+
+    A plain link is known before it is asked about, so the window asks and the
+    engine is told afterwards. A stream is not: the engine has to read the page
+    before there is a name, a size or anything to start — seconds, and twelve
+    of them on a challenged connection — so the window opens **first**, on what
+    the click already knew, and fills in when the engine comes back. That
+    ordering is what is checked here, along with the two things it must not
+    break: the row stays paused until the window is answered, and a paired
+    quality is moved, started and cancelled as one file rather than two.
+
+    The engine is replaced by a stub. What is under test is the hand-off, not
+    YouTube — and a test that needs YouTube to answer is a test that fails when
+    YouTube is challenging this connection, which it is (§424).
+    """
+    print("\n[a stream chosen in the panel asks too]")
+    script = '''
+import sys, tempfile, shutil, socket, threading, time
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-media-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.models import Download, DownloadStatus
+from ixd.ipc.server import IPCClient, IPCServer
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+from ixd import __main__ as entry
+
+app = QApplication(sys.argv[:1]); apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+settings.set("ipc_port", probe.getsockname()[1]); probe.close()
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+
+# A stand-in for the engine's part: slow, and it produces the pair a real
+# 1080p choice produces. Nothing about the window depends on it being real.
+resolved = {"when": 0.0}
+def slow_add_media(url, format_id="", **kwargs):
+    time.sleep(1.0)
+    rows = []
+    for kind, name in (("video", "A Video.mp4"), ("audio", "A Video.m4a")):
+        row = Download(url=f"{url}#{kind}", filename=name, dest_dir=str(out),
+                       total_size=1048576 * (50 if kind == "video" else 5),
+                       status=DownloadStatus.QUEUED)
+        row.id = service.db.insert_download(row)
+        rows.append(row)
+    group = f"{rows[0].id}-test"
+    for row, kind in zip(rows, ("video", "audio")):
+        service.db.update_download_fields(
+            row.id, mux_group=f"{group}:{kind}",
+            status=DownloadStatus.PAUSED.value if not kwargs.get("start", True)
+            else DownloadStatus.QUEUED.value)
+    resolved["when"] = time.monotonic()
+    return service.db.get_download(rows[0].id)
+service.add_media = slow_add_media
+
+server = IPCServer(service)
+server.register("add_media",
+                lambda p: entry._ask_before_adding_media(service, window, p))
+server.start()
+
+answers = {}
+def as_the_panel_does():
+    with IPCClient(timeout=30.0) as client:
+        answers["sent"] = time.monotonic()
+        answers["reply"] = client.call("add_media", {
+            "url": "https://example.invalid/watch?v=1", "quality": "1080p",
+            "title": "A Video", "cookies": "s=1"})
+        answers["back"] = time.monotonic()
+threading.Thread(target=as_the_panel_does, daemon=True).start()
+
+said = []
+tries = {"n": 0}
+seen_early = {}
+def inspect():
+    tries["n"] += 1
+    dialog = next(iter(window._media_dialogs.values()), None)
+    if dialog is not None and "opened" not in seen_early:
+        # Caught while the engine is still reading: the window is up, its
+        # buttons are not, and nothing has been queued.
+        seen_early["opened"] = True
+        said.append(f"OPENED_BEFORE_ENGINE {dialog.isVisible()}")
+        said.append(f"BUTTONS_WAIT {dialog.start_button.isEnabled()}")
+        said.append(f"SAYS {dialog.info_label.text()}")
+        said.append(f"SHOWS_QUALITY {dialog.quality_label.text()}")
+        said.append(f"NOTHING_YET {len(service.list_downloads())}")
+    if "reply" not in answers and tries["n"] < 120:
+        QTimer.singleShot(50, window, inspect)
+        return
+    if dialog is None:
+        said.append("NO_WINDOW")
+        app.quit(); return
+    # Give the queued hand-off back to the window a turn of the loop.
+    if not dialog.start_button.isEnabled() and tries["n"] < 120:
+        QTimer.singleShot(50, window, inspect)
+        return
+    reply = (answers.get("reply") or {}).get("result") or {}
+    said.append(f"REPLY_CONFIRMING {bool(reply.get('confirming'))}")
+    said.append(f"BUTTONS_LIVE {dialog.start_button.isEnabled()}")
+    said.append(f"NAMED {dialog.filename_edit.text()}")
+    said.append(f"SAYS_PAIR {'combined into one file' in dialog.info_label.text()}")
+    rows = service.list_downloads()
+    said.append(f"ROWS {len(rows)} PAUSED "
+                f"{all(r.status is DownloadStatus.PAUSED for r in rows)}")
+
+    elsewhere = root / "elsewhere"
+    dialog.folder_edit.setText(str(elsewhere))
+    queues = service.list_queues()
+    dialog._download_later(queues[1].id)
+    rows = service.list_downloads()
+    said.append(f"BOTH_MOVED {all(r.queue_id == queues[1].id for r in rows)}")
+    said.append(f"BOTH_IN_FOLDER {all(r.dest_dir == str(elsewhere) for r in rows)}")
+    said.append(f"STILL_PAUSED {all(r.status is DownloadStatus.PAUSED for r in rows)}")
+    said.append(f"COMPANIONS {len(service.mux_companions(rows[0].id))}")
+    app.quit()
+
+QTimer.singleShot(100, window, inspect)
+QTimer.singleShot(30000, app.quit)
+app.exec()
+server.stop()
+print("\\n".join(said))
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-media-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("a stream chosen in the panel opens the window", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-600:] or "") + (process.stderr[-400:] or "")
+    check("the window is up before the engine has finished reading",
+          "OPENED_BEFORE_ENGINE True" in output, detail)
+    check("with its buttons held until there is something to start",
+          "BUTTONS_WAIT False" in output, detail)
+    check("saying so", "SAYS Reading the stream…" in output, detail)
+    check("and showing the quality that was clicked",
+          "SHOWS_QUALITY 1080p" in output, detail)
+    check("nothing is queued while it reads", "NOTHING_YET 0" in output, detail)
+    check("the extension is told the application is asking",
+          "REPLY_CONFIRMING True" in output, detail)
+    check("the buttons come alive when the stream is resolved",
+          "BUTTONS_LIVE True" in output, detail)
+    check("the engine's name for it is filled in",
+          "NAMED A Video.mp4" in output, detail)
+    check("a pair says it will become one file", "SAYS_PAIR True" in output, detail)
+    check("both halves exist and neither has started",
+          "ROWS 2 PAUSED True" in output, detail)
+    check("“Download later” moves both halves to the queue",
+          "BOTH_MOVED True" in output, detail)
+    check("and both to the folder that was chosen",
+          "BOTH_IN_FOLDER True" in output, detail)
+    check("still paused, waiting for the schedule",
+          "STILL_PAUSED True" in output, detail)
+    check("a paired quality is two rows and one file",
+          "COMPANIONS 2" in output, detail)
+
+    # -- cancelling, and the one case with nothing to offer -------------
+    second = script.replace("""    dialog._download_later(queues[1].id)""",
+                            """    dialog.reject()""")
+    second = second.replace(
+        """    rows = service.list_downloads()
+    said.append(f"BOTH_MOVED {all(r.queue_id == queues[1].id for r in rows)}")
+    said.append(f"BOTH_IN_FOLDER {all(r.dest_dir == str(elsewhere) for r in rows)}")
+    said.append(f"STILL_PAUSED {all(r.status is DownloadStatus.PAUSED for r in rows)}")
+    said.append(f"COMPANIONS {len(service.mux_companions(rows[0].id))}")""",
+        """    said.append(f"AFTER_CANCEL {len(service.list_downloads())}")""")
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-media-home2-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", second], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("cancelling a stream takes both halves back out", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+    detail = (process.stdout.strip()[-400:] or "") + (process.stderr[-400:] or "")
+    check("cancelling takes the paused rows back out, both of them",
+          "AFTER_CANCEL 0" in process.stdout, detail)
+
+
 def test_the_window_comes_forward_when_the_browser_asks() -> None:
     """`focus` and `present`, driven over the socket the browser reaches.
 
@@ -5818,6 +6021,7 @@ def main() -> int:
                  test_the_extension_sits_where_an_update_leaves_it,
                  test_an_update_survives_a_folder_windows_will_not_rename,
                  test_a_link_clicked_in_the_browser_asks_first,
+                 test_a_stream_chosen_in_the_panel_asks_too,
                  test_the_window_comes_forward_when_the_browser_asks,
                  test_an_all_queues_schedule_can_still_choose_its_downloads):
         try:

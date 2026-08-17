@@ -73,6 +73,9 @@ class MainWindow(QMainWindow):
         #: yet. Held because they are shown, not executed — a dialog with no
         #: reference to it is collected the moment the method that made it ends.
         self._browser_dialogs: set = set()
+        #: The same windows, addressable by the token the IPC handler minted,
+        #: so the answer that arrives seconds later reaches the right one.
+        self._media_dialogs: dict[str, object] = {}
 
         self.setWindowTitle(f"Internet Xtreme Downloader {__version__}")
         self.setWindowIcon(application_icon())
@@ -576,6 +579,49 @@ class MainWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    # -- a stream chosen in the page ------------------------------------
+    #
+    # Opened the moment the click arrives and filled in when the engine comes
+    # back, because the engine's part is slow: reading a watch page is seconds,
+    # and on a challenged connection twelve of them (§3.51). The window is what
+    # turns that into a wait somebody can see.
+    def confirm_media_download(self, token: str, payload: dict) -> None:
+        from .widgets.browser_dialog import BrowserDownloadDialog
+
+        self.service.db.log_event(
+            f"Asking about “{payload.get('title') or payload.get('url')}” — "
+            "reading the stream")
+        dialog = BrowserDownloadDialog(self.service, self, payload, media=True)
+        self._browser_dialogs.add(dialog)
+        self._media_dialogs[token] = dialog
+        dialog.finished.connect(
+            lambda _result, d=dialog, t=token: self._forget_media(t, d))
+        dialog.queued.connect(lambda _id: self.refresh())
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _forget_media(self, token: str, dialog) -> None:
+        self._browser_dialogs.discard(dialog)
+        self._media_dialogs.pop(token, None)
+
+    def media_download_ready(self, token: str, download: dict) -> None:
+        dialog = self._media_dialogs.get(token)
+        if dialog is not None:
+            dialog.media_ready(download)
+        self.refresh()
+
+    def media_download_failed(self, token: str, message: str) -> None:
+        dialog = self._media_dialogs.get(token)
+        if dialog is not None:
+            dialog.media_failed(message)
+
+    def media_download_delegated(self, token: str) -> None:
+        dialog = self._media_dialogs.get(token)
+        if dialog is not None:
+            dialog.media_delegated()
+        self.refresh()
 
     def open_log(self) -> None:
         from .widgets.log_dialog import LogDialog

@@ -1783,7 +1783,9 @@ async function sendMediaPage(pageUrl, tab) {
     poToken: tokenFor(tab ? tab.id : -1),
     visitorData: visitorFor(tab ? tab.id : -1),
   });
-  notify("Sent to Internet Xtreme Downloader", result.filename || pageUrl);
+  if (!result.confirming) {
+    notify("Sent to Internet Xtreme Downloader", result.filename || pageUrl);
+  }
 }
 
 // ---------------------------------------------------------------------------
