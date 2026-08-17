@@ -416,17 +416,34 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
     return app.exec()
 
 
-def _present(service, window, params: dict) -> dict:
-    """Open the Add dialog on an address the browser handed over."""
+def _on_the_window(window, work) -> None:
+    """Run ``work`` on the thread the window lives on.
+
+    Everything registered on the IPC server is called from the socket's own
+    thread, and a widget may only be touched from the main one — so the hand-off
+    is the whole job of these handlers.
+
+    **The second argument is not optional.** `QTimer.singleShot(0, callable)`
+    creates the timer in the *calling* thread, and the IPC thread has no event
+    loop to run it, so it never fires: measured here, the no-context form
+    delivered nothing while the same call with a context object delivered.
+    Given a context object the timer is created against that object's thread,
+    which is the one with the event loop. Three handlers shipped without it.
+    """
     from PySide6.QtCore import QTimer
 
+    QTimer.singleShot(0, window, work)
+
+
+def _present(service, window, params: dict) -> dict:
+    """Open the Add dialog on an address the browser handed over."""
     result = service.handle_command("present", params)
     if not result.get("ok"):
         raise RuntimeError(result.get("error", "could not accept the page"))
     url = params.get("url", "") or ""
-    QTimer.singleShot(0, lambda: (window.showNormal(), window.raise_(),
-                                  window.activateWindow(),
-                                  window.open_add_dialog(url)))
+    _on_the_window(window, lambda: (window.showNormal(), window.raise_(),
+                                    window.activateWindow(),
+                                    window.open_add_dialog(url)))
     return {"opened": True, "url": url}
 
 
@@ -439,7 +456,6 @@ def _ask_before_adding(service, window, params: dict) -> dict:
     `confirming`, so the extension does not also raise a notification saying
     the download was sent — the window on screen is the notification.
     """
-    from PySide6.QtCore import QTimer
     from .core.http_client import filename_from_url, sanitize_filename
 
     if not service.settings.get_bool("confirm_browser_downloads", True):
@@ -459,7 +475,7 @@ def _ask_before_adding(service, window, params: dict) -> dict:
         "referer": str(params.get("referrer") or params.get("referer") or ""),
         "headers": dict(params.get("headers") or {}),
     })
-    QTimer.singleShot(0, lambda: window.confirm_browser_download(dict(params)))
+    _on_the_window(window, lambda: window.confirm_browser_download(dict(params)))
 
     supplied = str(params.get("filename") or "").strip()
     name = sanitize_filename(supplied) if supplied else filename_from_url(url)
@@ -468,10 +484,8 @@ def _ask_before_adding(service, window, params: dict) -> dict:
 
 def _focus(window) -> bool:
     """Bring the existing window forward (invoked over IPC)."""
-    from PySide6.QtCore import QTimer
-
-    QTimer.singleShot(0, lambda: (window.showNormal(), window.raise_(),
-                                  window.activateWindow()))
+    _on_the_window(window, lambda: (window.showNormal(), window.raise_(),
+                                    window.activateWindow()))
     return True
 
 

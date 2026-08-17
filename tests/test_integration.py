@@ -5368,26 +5368,31 @@ def test_a_link_clicked_in_the_browser_asks_first() -> None:
     """A download the browser hands over opens IDM's file-info window.
 
     Reported: clicking a link in the browser started the transfer with no
-    window, no choice of folder and no way to defer it. Everything here is
-    driven headless — the reply the extension gets, the window that follows it,
-    the queue menu, and what "Download later" actually writes to the database.
+    window, no choice of folder and no way to defer it.
 
-    The one thing this cannot show is the window on a screen. What it can show
-    is that the transfer has *not* begun when the reply is sent, which is the
-    defect: the browser's own download was already cancelled by then.
+    **Driven over a real control socket**, from the socket's own thread, which
+    is the only way this can be tested. The first version of this test called
+    the handler directly on the main thread and passed while the shipped build
+    did nothing at all: `QTimer.singleShot(0, callable)` creates its timer in
+    the *calling* thread, and the IPC thread has no event loop to run it, so
+    the window was scheduled and never opened. The extension got `ok`, showed
+    no notification because the application said it was asking, and the user
+    saw nothing whatsoever (session-log §423).
     """
     print("\n[a link clicked in the browser asks first]")
     script = '''
-import sys, tempfile, shutil
+import sys, tempfile, shutil, socket, threading
 from pathlib import Path
 from ixd import config
 root = Path(tempfile.mkdtemp(prefix="ixd-ask-"))
 config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
 config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from ixd.config import Settings
 from ixd.core.db import Database
 from ixd.core.models import DownloadStatus
+from ixd.ipc.server import IPCClient, IPCServer
 from ixd.service import DownloadService
 from ixd.ui import main_window as mw
 from ixd.ui.theme import DARK, apply_theme
@@ -5398,45 +5403,81 @@ apply_theme(app, DARK)
 settings = Settings(root / "settings.json")
 out = root / "out"; out.mkdir(parents=True, exist_ok=True)
 settings.set("download_dir", str(out))
+probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+settings.set("ipc_port", probe.getsockname()[1]); probe.close()
 service = DownloadService(settings, Database(root / "state.sqlite3"))
 window = mw.MainWindow(service, DARK)
+
+# Exactly the wiring `_run_gui` puts in place.
+server = IPCServer(service)
+server.register("add", lambda p: entry._ask_before_adding(service, window, p))
+server.start()
 
 payload = {"url": "https://example.invalid/big.zip", "filename": "big.zip",
            "cookies": "a=b", "referrer": "https://example.invalid/page",
            "userAgent": "TestBrowser/1", "headers": {}}
-reply = entry._ask_before_adding(service, window, dict(payload))
-print("CONFIRMING", bool(reply.get("confirming")), reply.get("filename"))
-print("NOTHING_QUEUED_YET", len(service.list_downloads()))
+answers = {}
+def as_the_extension_does():
+    with IPCClient(timeout=15.0) as client:
+        answers["add"] = client.call("add", dict(payload))
+    answers["queued_at_reply"] = len(service.list_downloads())
 
-app.processEvents()          # the window is opened on the event loop
-print("WINDOW_OPEN", len(window._browser_dialogs))
-print("MAIN_WINDOW_STILL_DOWN", window.isVisible())
-dialog = next(iter(window._browser_dialogs))
-print("URL_SHOWN", dialog.url_edit.text())
-print("URL_READONLY", dialog.url_edit.isReadOnly())
-print("NAME_SHOWN", dialog.filename_edit.text())
-print("FOLDER_DEFAULT", dialog.folder_edit.text() == str(out))
-print("MENU", "|".join(a.text() for a in dialog.later_menu.actions()))
+threading.Thread(target=as_the_extension_does, daemon=True).start()
 
+# Everything is inspected from *inside* the loop. Leaving the loop closes the
+# dialog — measured, `finished` fires during teardown — so a check made after
+# `exec()` returns reads a window that has already been dismissed and cannot
+# tell that from one that never opened.
+said = []
 elsewhere = root / "elsewhere"
-dialog.folder_edit.setText(str(elsewhere))
-queues = service.list_queues()
-dialog._download_later(queues[1].id)
+attempts = {"n": 0}
 
-rows = service.list_downloads()
-row = rows[0] if rows else None
-print("QUEUED", len(rows))
-if row is not None:
-    print("PAUSED", row.status is DownloadStatus.PAUSED)
-    print("IN_CHOSEN_QUEUE", row.queue_id == queues[1].id)
-    print("IN_CHOSEN_FOLDER", row.dest_dir == str(elsewhere), elsewhere.is_dir())
-    print("SESSION_KEPT", row.cookies == "a=b" and row.referer.endswith("/page"))
-print("DIALOG_GONE", len(window._browser_dialogs))
+def inspect():
+    attempts["n"] += 1
+    if "add" not in answers and attempts["n"] < 50:
+        QTimer.singleShot(100, window, inspect)
+        return
+    reply = (answers.get("add") or {}).get("result") or {}
+    said.append(f"CONFIRMING {bool(reply.get('confirming'))} {reply.get('filename')}")
+    said.append(f"NOTHING_QUEUED_YET {answers.get('queued_at_reply')}")
+    said.append(f"WINDOW_OPEN {len(window._browser_dialogs)}")
+    said.append(f"MAIN_WINDOW_STILL_DOWN {window.isVisible()}")
+    if not window._browser_dialogs:
+        app.quit()
+        return
+    dialog = next(iter(window._browser_dialogs))
+    said.append(f"URL_SHOWN {dialog.url_edit.text()}")
+    said.append(f"URL_READONLY {dialog.url_edit.isReadOnly()}")
+    said.append(f"NAME_SHOWN {dialog.filename_edit.text()}")
+    said.append(f"FOLDER_DEFAULT {dialog.folder_edit.text() == str(out)}")
+    said.append("MENU " + "|".join(a.text() for a in dialog.later_menu.actions()))
 
-# Turning the question off is the behaviour every earlier version had.
-settings.set("confirm_browser_downloads", False)
-direct = entry._ask_before_adding(service, window, dict(payload, url="https://example.invalid/two.zip", filename="two.zip"))
-print("DIRECT", bool(direct.get("confirming")), len(service.list_downloads()))
+    dialog.folder_edit.setText(str(elsewhere))
+    queues = service.list_queues()
+    dialog._download_later(queues[1].id)
+
+    rows = service.list_downloads()
+    row = rows[0] if rows else None
+    said.append(f"QUEUED {len(rows)}")
+    if row is not None:
+        said.append(f"PAUSED {row.status is DownloadStatus.PAUSED}")
+        said.append(f"IN_CHOSEN_QUEUE {row.queue_id == queues[1].id}")
+        said.append(f"IN_CHOSEN_FOLDER {row.dest_dir == str(elsewhere)} {elsewhere.is_dir()}")
+        said.append(f"SESSION_KEPT {row.cookies == 'a=b' and row.referer.endswith('/page')}")
+    said.append(f"DIALOG_GONE {len(window._browser_dialogs)}")
+
+    # Turning the question off is the behaviour every earlier version had.
+    settings.set("confirm_browser_downloads", False)
+    direct = entry._ask_before_adding(service, window, dict(
+        payload, url="https://example.invalid/two.zip", filename="two.zip"))
+    said.append(f"DIRECT {bool(direct.get('confirming'))} {len(service.list_downloads())}")
+    app.quit()
+
+QTimer.singleShot(200, window, inspect)
+QTimer.singleShot(20000, app.quit)      # never hang, whatever happens
+app.exec()
+server.stop()
+print("\\n".join(said))
 service.db.close()
 shutil.rmtree(root, ignore_errors=True)
 '''
@@ -5487,6 +5528,109 @@ shutil.rmtree(root, ignore_errors=True)
     check("and the window closes behind it", "DIALOG_GONE 0" in output, detail)
     check("with the question switched off it is queued straight away",
           "DIRECT False 2" in output, detail)
+
+
+def test_the_window_comes_forward_when_the_browser_asks() -> None:
+    """`focus` and `present`, driven over the socket the browser reaches.
+
+    Both had the same defect as the file-info window and neither had ever been
+    exercised from the thread they are actually called on: a second launch that
+    should raise the running window, and the extension's toolbar button handing
+    a page over. `QTimer.singleShot(0, callable)` from the IPC thread schedules
+    a timer in a thread with no event loop, so all three did nothing at all
+    (session-log §423). Nobody reported `focus` because a second launch also
+    prints a line and exits, which looks like something happened.
+    """
+    print("\n[the window comes forward when the browser asks]")
+    script = '''
+import sys, tempfile, shutil, socket, threading
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-fwd-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.ipc.server import IPCClient, IPCServer
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+from ixd.ui.widgets.add_dialog import AddDownloadDialog
+from ixd import __main__ as entry
+
+app = QApplication(sys.argv[:1]); apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+settings.set("download_dir", str(root / "out"))
+probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+settings.set("ipc_port", probe.getsockname()[1]); probe.close()
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+window.hide()
+
+server = IPCServer(service)
+server.register("focus", lambda p: entry._focus(window))
+server.register("present", lambda p: entry._present(service, window, p))
+server.start()
+
+page = "https://example.invalid/watch/1"
+answers = {}
+def as_the_extension_does():
+    with IPCClient(timeout=15.0) as client:
+        answers["focus"] = client.call("focus")
+        answers["present"] = client.call("present", {"url": page,
+                                                     "cookies": "s=1",
+                                                     "userAgent": "TestBrowser/1"})
+threading.Thread(target=as_the_extension_does, daemon=True).start()
+
+said = []
+tries = {"n": 0}
+def inspect():
+    tries["n"] += 1
+    modal = app.activeModalWidget()
+    if (len(answers) < 2 or modal is None) and tries["n"] < 60:
+        QTimer.singleShot(100, window, inspect)
+        return
+    said.append(f"FOCUS_RAISED {window.isVisible()}")
+    said.append(f"PRESENT_OK {(answers.get('present') or {}).get('ok')}")
+    said.append(f"ADD_DIALOG {isinstance(modal, AddDownloadDialog)}")
+    if isinstance(modal, AddDownloadDialog):
+        said.append(f"ON_THE_PAGE {modal.url_edit.text() == page}")
+        modal.reject()
+    app.quit()
+
+QTimer.singleShot(200, window, inspect)
+QTimer.singleShot(20000, app.quit)
+app.exec()
+server.stop()
+print("\\n".join(said))
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-fwd-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the window comes forward when asked", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
+    check("a second launch raises the window that is already running",
+          "FOCUS_RAISED True" in output, detail)
+    check("handing a page over is accepted", "PRESENT_OK True" in output, detail)
+    check("and opens the Add dialog on it", "ADD_DIALOG True" in output, detail)
+    check("with the address the browser handed over",
+          "ON_THE_PAGE True" in output, detail)
 
 
 def test_an_all_queues_schedule_can_still_choose_its_downloads() -> None:
@@ -5674,6 +5818,7 @@ def main() -> int:
                  test_the_extension_sits_where_an_update_leaves_it,
                  test_an_update_survives_a_folder_windows_will_not_rename,
                  test_a_link_clicked_in_the_browser_asks_first,
+                 test_the_window_comes_forward_when_the_browser_asks,
                  test_an_all_queues_schedule_can_still_choose_its_downloads):
         try:
             test()
