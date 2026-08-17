@@ -11,6 +11,10 @@
 ;
 ;     makensis -V2 packaging/installer-preview.nsi
 ;
+; It is written **outside `dist/`** on purpose: every `build.py --package` run
+; wipes that folder, and the first copy of this preview was quietly deleted by
+; the next build before anybody had run it.
+;
 ; The window is built by hand rather than by MUI2, which is the whole point:
 ; MUI2 draws the grey wizard everybody recognises.
 
@@ -21,7 +25,7 @@ Unicode true
 !include "WinMessages.nsh"
 
 Name "Internet Xtreme Downloader"
-OutFile "..\dist\ixd-installer-preview.exe"
+OutFile "..\..\XAI-notes\ixd-installer-preview.exe"
 RequestExecutionLevel user
 Caption "Internet Xtreme Downloader"
 BrandingText " "
@@ -205,7 +209,7 @@ Function BrandPanel
 
   !insertmacro Label $1 "Internet Xtreme" 28 86 200 20 $FontH1 ${C_TEXT} ${C_PANEL}
   !insertmacro Label $1 "Downloader" 28 106 200 20 $FontH1 ${C_TEXT} ${C_PANEL}
-  !insertmacro Label $1 "Version 1.0.16" 28 132 200 16 $FontSmall ${C_FAINT} ${C_PANEL}
+  !insertmacro Label $1 "Version 1.0.19" 28 132 200 16 $FontSmall ${C_FAINT} ${C_PANEL}
 
   StrCpy $2 0
   StrCpy $3 200
