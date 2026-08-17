@@ -5961,6 +5961,227 @@ shutil.rmtree(root, ignore_errors=True)
     check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
 
 
+def test_clicking_the_finished_notification_shows_the_file() -> None:
+    """Reported: *"when download finish windows notification shown … but when i
+    click on that its not open the folder location"*.
+
+    Qt emits `messageClicked` and nothing was connected to it, so the balloon
+    was a statement rather than a button. It now reveals the finished file —
+    selected in its folder where the desktop can do that, and the folder alone
+    where it cannot — and falls back to raising the window when the file has
+    been moved or deleted since.
+
+    The reveal itself launches a file manager, so it is intercepted here rather
+    than run: what is being checked is that the click reaches the right
+    download and the right path.
+    """
+    print("\n[clicking the finished notification shows the file]")
+    script = '''
+import sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-notify-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.events import EventType
+from ixd.core.models import Download, DownloadStatus
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+
+app = QApplication(sys.argv[:1]); apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+
+finished = out / "film.mp4"
+finished.write_bytes(b"x" * 64)
+row = Download(url="https://example.invalid/film.mp4", filename="film.mp4",
+               dest_dir=str(out), total_size=64, downloaded=64,
+               status=DownloadStatus.COMPLETED)
+row.id = service.db.insert_download(row)
+older = Download(url="https://example.invalid/old.bin", filename="old.bin",
+                 dest_dir=str(out), status=DownloadStatus.COMPLETED)
+older.id = service.db.insert_download(older)
+
+launched = []
+class FakePopen:
+    def __init__(self, command, **kwargs):
+        launched.append(list(command))
+mw.subprocess.Popen = FakePopen
+opened = []
+mw.QDesktopServices.openUrl = staticmethod(lambda url: opened.append(url.toLocalFile()))
+
+# The notification the engine's completion event raises.
+window._on_engine_event(EventType.DOWNLOAD_COMPLETED, {"download_id": row.id})
+print("REMEMBERED", window._notified_id == row.id)
+
+window._on_notification_clicked()
+print("LAUNCHED", len(launched), launched[-1] if launched else "")
+print("NAMES_THE_FILE", any("film.mp4" in part for part in (launched[-1] if launched else [])))
+
+# A second, older download must not steal the click.
+window._notified_id = older.id
+launched.clear(); opened.clear()
+window._on_notification_clicked()
+print("MISSING_FILE_FALLS_BACK", (not launched) and opened == [str(out)])
+
+# And with nothing to show at all, the window comes forward instead.
+window._notified_id = None
+launched.clear(); opened.clear()
+window.hide()
+window._on_notification_clicked()
+app.processEvents()
+print("RAISES_WINDOW", window.isVisible() and not launched)
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-notify-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the notification can be clicked", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-600:] or "") + (process.stderr[-400:] or "")
+    check("the notification remembers which download it is about",
+          "REMEMBERED True" in output, detail)
+    check("clicking it asks the desktop to show the file",
+          "LAUNCHED 1" in output, detail)
+    check("naming the file, not just the folder",
+          "NAMES_THE_FILE True" in output, detail)
+    check("a file that is no longer there opens the folder instead",
+          "MISSING_FILE_FALLS_BACK True" in output, detail)
+    check("and with nothing to show, the window comes forward",
+          "RAISES_WINDOW True" in output, detail)
+
+
+def test_the_toolbar_never_loses_its_buttons() -> None:
+    """Reported on a fresh 1.0.18 install: *"the top right where it says
+    setting was gone and guide was there and i had to resize the window to show
+    the settings button."*
+
+    The toolbar wanted 1213 px and the window's minimum is 940, so it had been
+    overflowing for a while; adding the Guide button pushed it past the default
+    width on a machine whose font is wider than this one's. Qt's answer to an
+    overflowing toolbar is to move the last items into a `»` menu, and the last
+    item was Settings.
+
+    It gives up words now instead of buttons, on a ladder: the search box
+    first, then the right-hand four — a cog and a clock are read as themselves
+    — and only then everything. What is checked here is the property the user
+    actually cares about: **every button is on the bar**, at every width this
+    window can be and at font sizes it might meet on somebody else's machine.
+    """
+    print("\n[the toolbar never loses its buttons]")
+    script = '''
+import re, sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-toolbar-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui import theme
+from ixd.ui.theme import DARK
+
+app = QApplication(sys.argv[:1])
+service = DownloadService(Settings(root / "settings.json"),
+                          Database(root / "state.sqlite3"))
+
+def scale_to(factor):
+    # The stylesheet pins every size in px, so scaling the application font
+    # changes nothing — measured, the "125%" run came back identical to the
+    # 100% one until this was done instead.
+    sheet = theme.stylesheet(DARK)
+    app.setStyleSheet(re.sub(
+        r"font-size:\\s*(\\d+)px",
+        lambda m: f"font-size: {max(1, round(int(m.group(1)) * factor))}px", sheet))
+
+worst = 0
+for factor in (1.0, 1.25, 1.5):
+    scale_to(factor)
+    window = mw.MainWindow(service, DARK)
+    for width in (940, 1000, 1100, 1240, 1600):
+        window.resize(width, 760)
+        window.show()
+        app.processEvents()
+        needed = window.toolbar.sizeHint().width()
+        over = needed - (width - 24)
+        worst = max(worst, over)
+        print(f"FIT {factor} {width} {needed} {over <= 0}")
+    # Nothing is ever left without a name to hover.
+    missing = [a.text() for a, _f, _s, _r in window._toolbar_labels
+               if not a.text().strip() or not a.toolTip().strip()]
+    print("NAMED", not missing, missing)
+    window.close()
+print("WORST_OVERFLOW", worst)
+
+# And the two ends of the ladder are really different, so it is adapting
+# rather than sitting in one state.
+scale_to(1.0)
+window = mw.MainWindow(service, DARK)
+window.resize(1600, 760); window.show(); app.processEvents()
+wide = window.action_settings.text()
+window.resize(940, 760); app.processEvents()
+narrow = window.action_settings.text()
+print("WIDE", wide)
+print("NARROW", narrow)
+print("ADAPTS", wide != narrow)
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-toolbar-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the toolbar fits", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-600:] or "") + (process.stderr[-400:] or "")
+    fits = [line for line in output.splitlines() if line.startswith("FIT ")]
+    check("every width and font size was measured", len(fits) == 15, str(len(fits)))
+    bad = [line for line in fits if line.endswith("False")]
+    check("and the toolbar fits in all of them", not bad, "; ".join(bad[:4]))
+    check("nothing overflows by even a pixel",
+          "WORST_OVERFLOW " in output
+          and int(output.split("WORST_OVERFLOW ")[1].split()[0]) <= 0,
+          detail)
+    check("every button keeps a name or a tooltip",
+          output.count("NAMED True") == 3, detail)
+    check("a wide window spells Settings out",
+          "WIDE ⚙  Settings" in output, detail)
+    check("a narrow one keeps the button and drops the word",
+          "NARROW ⚙" in output and "ADAPTS True" in output, detail)
+
+
 def test_an_installed_build_can_update_itself() -> None:
     """Reported against 1.0.16, installed from `setup.exe`: *"i cannot update
     the app and it says this build installed from a package … the download and
@@ -6549,6 +6770,8 @@ def main() -> int:
                  test_the_guide_names_the_folder_this_install_actually_uses,
                  test_the_guide_is_shown_once_and_can_be_opened_again,
                  test_an_installed_build_can_update_itself,
+                 test_the_toolbar_never_loses_its_buttons,
+                 test_clicking_the_finished_notification_shows_the_file,
                  test_starting_one_download_by_hand_beats_a_paused_queue,
                  test_a_stream_says_how_big_it_is_before_it_starts,
                  test_the_window_comes_forward_when_the_browser_asks,

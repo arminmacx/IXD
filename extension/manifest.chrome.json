@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvt34tPb1vWpF05ZVfrLPe0TH3Y3XmgXZ9jw+8tXKlpbODfy/Hfg9prTaPlgfd04eeLQAOjQS4ALTuFdwbiDRlivWv//spo9dkVfD0cpcTyAVn+X9Y2FLymOrE5o40tE9GV6Min8ZItP3EfVBzaSRDmtoMQZ+lkXj1HUTB7fWbFLzmslaoxlNhuQ341UPMVWdwmJYCKinLyQhbwDUvxZGywOUhsved6SYN18A8himSIJqfIC1gQOV7r3M3jtYVWh2Z/rm4oovS4ofhT8nRn9VPL7aaiAO3BfmTJIdrv1i0wYvllAVdm543E0rrM8/lmbNinGpd/6JlJqx91CGb2ZQ5QIDAQAB",
   "name": "Internet Xtreme Downloader",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "Send downloads and videos straight to Internet Xtreme Downloader for accelerated, resumable, multi-threaded transfers.",
   "minimum_chrome_version": "116",
   "background": {

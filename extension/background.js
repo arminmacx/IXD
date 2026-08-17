@@ -1646,24 +1646,45 @@ const MENU_LINK = "ixd-download-link";
 const MENU_MEDIA = "ixd-download-media";
 const MENU_PAGE = "ixd-download-page-media";
 
+const MENU_ITEMS = [
+  { id: MENU_LINK, title: "Download link with IXD", contexts: ["link"] },
+  { id: MENU_MEDIA, title: "Download this media with IXD",
+    contexts: ["video", "audio", "image"] },
+  { id: MENU_PAGE, title: "Download video on this page with IXD",
+    contexts: ["page"] },
+];
+
+// Only ever one build at a time. `removeAll` is asynchronous, so two calls
+// that overlap — and they do, because onInstalled and a worker restart are
+// independent events — clear once and create twice:
+//
+//   Unchecked runtime.lastError: Cannot create item with duplicate id
+//   ixd-download-link
+//
+// which is what a user saw in the console. Chaining them means the second
+// build waits for the first to finish rather than racing it.
+let menuWork = Promise.resolve();
+
 function buildMenus() {
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: MENU_LINK,
-      title: "Download link with IXD",
-      contexts: ["link"],
+  menuWork = menuWork.then(() => new Promise((done) => {
+    chrome.contextMenus.removeAll(() => {
+      // Read once, so removeAll's own result is never an unchecked error.
+      void chrome.runtime.lastError;
+      let left = MENU_ITEMS.length;
+      const finish = () => { if (--left === 0) done(); };
+      for (const item of MENU_ITEMS) {
+        // The callback is the point: reading `lastError` inside it is what
+        // marks the failure as handled. Without one, a duplicate — which is
+        // harmless, the item is already there — is reported as an unchecked
+        // error on every worker start.
+        chrome.contextMenus.create(item, () => {
+          void chrome.runtime.lastError;
+          finish();
+        });
+      }
     });
-    chrome.contextMenus.create({
-      id: MENU_MEDIA,
-      title: "Download this media with IXD",
-      contexts: ["video", "audio", "image"],
-    });
-    chrome.contextMenus.create({
-      id: MENU_PAGE,
-      title: "Download video on this page with IXD",
-      contexts: ["page"],
-    });
-  });
+  })).catch(() => {});
+  return menuWork;
 }
 
 // ---------------------------------------------------------------------------

@@ -77,6 +77,9 @@ class MainWindow(QMainWindow):
         #: so the answer that arrives seconds later reaches the right one.
         self._media_dialogs: dict[str, object] = {}
         self._guide = None
+        #: The download the last notification was about, so clicking it opens
+        #: that one rather than the newest.
+        self._notified_id: int | None = None
 
         self.setWindowTitle(f"Internet Xtreme Downloader {__version__}")
         self.setWindowIcon(application_icon())
@@ -110,7 +113,7 @@ class MainWindow(QMainWindow):
     # construction
     # ------------------------------------------------------------------
     def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
+        self.toolbar = toolbar = QToolBar("Main")
         toolbar.setObjectName("Toolbar")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(18, 18))
@@ -132,8 +135,10 @@ class MainWindow(QMainWindow):
         self.action_pause.triggered.connect(self.pause_selected)
         toolbar.addAction(self.action_pause)
 
-        self.action_remove = QAction("✕  Remove from list", self)
+        self.action_remove = QAction("✕  Remove", self)
         self.action_remove.setShortcut(QKeySequence.StandardKey.Delete)
+        self.action_remove.setToolTip(
+            "Remove from the list — it asks what to do with the file")
         # `triggered(bool)` hands its checked flag to any slot that will take an
         # argument, and this one takes `ids` — so a direct connection called
         # `remove_selected(False)` and fell out of the "nothing to remove"
@@ -159,7 +164,7 @@ class MainWindow(QMainWindow):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search downloads…")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setFixedWidth(220)
+        self.search_edit.setFixedWidth(190)
         self.search_edit.textChanged.connect(self._on_search)
         toolbar.addWidget(self.search_edit)
 
@@ -193,6 +198,99 @@ class MainWindow(QMainWindow):
         self.action_settings = QAction("⚙  Settings", self)
         self.action_settings.triggered.connect(self.open_settings)
         toolbar.addAction(self.action_settings)
+
+        # What each button is called when there is room, and when there is not.
+        #
+        # Reported: on a fresh 1.0.18 install the Settings button was not on the
+        # toolbar until the window was made wider — it had been pushed into the
+        # overflow menu. Measured here afterwards: the toolbar wants 1213 px and
+        # the window's *minimum* is 940, so it has been overflowing for a while
+        # and adding "Guide" is what pushed it past the default width on a
+        # machine whose font is wider than this one's.
+        #
+        # A toolbar that silently hides Settings is worse than one with shorter
+        # words on it, so the words go first — glyph only, with the full name in
+        # the tooltip — and only if that is still not enough does anything move
+        # into the overflow.
+        #: Each entry is (action, full label, glyph, is-on-the-right). The
+        #: right-hand four give up their words first: a cog, a clock and a
+        #: question mark are read as themselves, where "Resume" and "Pause" are
+        #: the words somebody is looking for.
+        self._toolbar_labels: list[tuple[QAction, str, str, bool]] = [
+            (self.action_add, "＋  Add", "＋", False),
+            (self.action_resume, "▶  Resume", "▶", False),
+            (self.action_pause, "❚❚  Pause", "❚❚", False),
+            (self.action_remove, "✕  Remove", "✕", False),
+            (self.action_resume_all, "Resume all", "▶▶", False),
+            (self.action_pause_all, "Pause all", "❚❚❚", False),
+            (self.action_log, "🗒  Log", "🗒", True),
+            (self.action_schedule, "🕑  Scheduler", "🕑", True),
+            (self.action_guide, "?  Guide", "?", True),
+            (self.action_settings, "⚙  Settings", "⚙", True),
+        ]
+        for action, full, _short, _right in self._toolbar_labels:
+            if not action.toolTip() or action.toolTip() == action.text():
+                action.setToolTip(full.replace("  ", " ").strip())
+        self._toolbar_state: tuple[bool, bool] | None = None
+        #: Guards the measure-apply-measure loop against its own
+        #: relayout arriving back as another resize event.
+        self._fitting = False
+        self._fit_toolbar()
+
+    #: How narrow the search box may get before the labels are given up. It
+    #: stops being useful below this, and a search box nobody can read is not a
+    #: saving.
+    SEARCH_MIN_WIDTH = 130
+    SEARCH_WIDTH = 190
+
+    def _fit_toolbar(self) -> None:
+        """Choose labels that fit the window this is actually in.
+
+        Called on every resize. It settles on a state and only touches the
+        widgets when that state changes, because setting the text of a toolbar
+        action triggers a layout — and a layout that resizes is a resize event.
+        """
+        if not hasattr(self, "_toolbar_labels") or self._fitting:
+            return
+        available = max(0, self.width() - 24)
+
+        # Each state is applied and then measured, widest first, and the loop
+        # stops at the first one that fits. Measuring the state it is *already*
+        # in was the first attempt and it settles on the wrong answer: from
+        # compact, the toolbar measures small, so the labels are restored — and
+        # then nothing checks whether the restored labels fit. The window sat
+        # at 1100 px needing 1213 with every word showing.
+        self._fitting = True
+        try:
+            # Widest first, and each rung gives up the least it can: the
+            # search box, then the right-hand four, then the words entirely.
+            for left, right, search in (
+                    (False, False, self.SEARCH_WIDTH),
+                    (False, False, self.SEARCH_MIN_WIDTH),
+                    (False, True, self.SEARCH_MIN_WIDTH),
+                    (True, True, self.SEARCH_MIN_WIDTH)):
+                self._apply_toolbar_state(left, right, search)
+                if self.toolbar.sizeHint().width() <= available:
+                    return
+        finally:
+            self._fitting = False
+
+    def _apply_toolbar_state(self, compact_left: bool, compact_right: bool,
+                             search_width: int) -> None:
+        """Set the labels and the search width, only where they differ."""
+        if self.search_edit.width() != search_width:
+            self.search_edit.setFixedWidth(search_width)
+        state = (compact_left, compact_right)
+        if state == self._toolbar_state:
+            return
+        self._toolbar_state = state
+        for action, full, short, right in self._toolbar_labels:
+            compact = compact_right if right else compact_left
+            action.setText(short if compact else full)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._fit_toolbar()
 
     def _build_body(self) -> None:
         central = QWidget()
@@ -387,6 +485,9 @@ class MainWindow(QMainWindow):
         self.tray.add_requested.connect(self.open_add_dialog)
         self.tray.pause_all_requested.connect(self.service.pause_all)
         self.tray.resume_all_requested.connect(self.service.resume_all)
+        # Qt has emitted this all along and nothing listened, so the balloon
+        # that says a download finished did nothing when it was clicked.
+        self.tray.messageClicked.connect(self._on_notification_clicked)
         self.tray.show()
 
     # ------------------------------------------------------------------
@@ -890,6 +991,66 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(download.dest_dir))
 
+    def reveal_download(self, download_id: int) -> bool:
+        """Show a finished file where it landed, with the file selected.
+
+        `QDesktopServices.openUrl` on the folder is the portable half and it
+        opens the right window; it does not point at the file inside it, which
+        in a Downloads folder of two hundred things is not the same answer.
+        Every desktop has a way to say *this one*, so it is asked first and the
+        plain folder is what happens when it is not there.
+        """
+        download = self.service.get_download(download_id)
+        if download is None:
+            return False
+        path = download.filepath or ""
+        folder = download.dest_dir or (os.path.dirname(path) if path else "")
+        if path and os.path.isfile(path):
+            if sys.platform.startswith("win"):
+                # `explorer` answers 1 on success, which `check=True` would
+                # read as a failure and a traceback the user never asked for.
+                command = ["explorer", f"/select,{os.path.normpath(path)}"]
+            elif sys.platform == "darwin":
+                command = ["open", "-R", path]
+            else:
+                # Freedesktop's file manager interface, which every modern
+                # Linux file manager implements and none of them agree on the
+                # command line for.
+                command = ["dbus-send", "--session", "--print-reply",
+                           "--dest=org.freedesktop.FileManager1",
+                           "--type=method_call",
+                           "/org/freedesktop/FileManager1",
+                           "org.freedesktop.FileManager1.ShowItems",
+                           f"array:string:file://{path}", "string:"]
+            try:
+                subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                return True
+            except OSError:
+                pass
+        if folder and os.path.isdir(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            return True
+        return False
+
+    def _on_notification_clicked(self) -> None:
+        """The tray balloon is a button; it just never behaved like one.
+
+        Reported: *"when download finish windows notification shown … but when
+        i click on that its not open the folder location"*. Qt does emit
+        `messageClicked`, and nothing was connected to it.
+        """
+        download_id = self._notified_id
+        if download_id is None:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            return
+        if not self.reveal_download(download_id):
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
     def _open_file(self, download_id: int) -> None:
         download = self.service.get_download(download_id)
         if download is None or not os.path.isfile(download.filepath):
@@ -988,7 +1149,12 @@ class MainWindow(QMainWindow):
                 name = download.filename if download else "Download"
                 status = payload.get("hash_status", "")
                 suffix = " (verified)" if status == "verified" else ""
-                self.tray.notify("Download complete", f"{name}{suffix}")
+                # Remembered so the balloon can be clicked: Windows keeps it
+                # in the action centre long after the next one arrives, so what
+                # it opens has to be the download it is about.
+                self._notified_id = payload.get("download_id")
+                self.tray.notify("Download complete",
+                                 f"{name}{suffix} — click to show it in its folder")
         elif event_type == EventType.DOWNLOAD_NEEDS_LINK:
             self._expired_id = payload.get("download_id")
             self.tray.notify(
