@@ -5961,6 +5961,87 @@ shutil.rmtree(root, ignore_errors=True)
     check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
 
 
+def test_the_guide_names_the_folder_this_install_actually_uses() -> None:
+    """The user: *"the address where the extension installed need to be where
+    user selected during the installation."*
+
+    It is, and this is what pins it: the guide asks `integration` where the
+    folders are rather than printing a default, and `integration` answers from
+    where the application is running. Install it in two different places and
+    the guide says two different things.
+
+    The exception is the one worth being loud about — an all-users install
+    cannot be written to by the account running the application, so the folders
+    fall back to the data directory (§3.45). The guide carries a note saying so
+    rather than quietly printing a path nobody chose.
+
+    None of it writes anything: a lookup that materialises a folder is fine at
+    start-up and wrong in a window that only wants to say where it is.
+    """
+    print("\n[the guide names the folder this install actually uses]")
+    from ixd import config, integration
+    from ixd.ui.widgets.guide_dialog import extension_paths
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-guidepath-"))
+    previous_frozen = getattr(sys, "frozen", None)
+    previous_exe = sys.executable
+    previous_data = config.DATA_DIR
+    try:
+        config.DATA_DIR = root / "data"
+        config.DATA_DIR.mkdir(parents=True)
+        sys.frozen = True
+
+        # Where somebody said "just me" — %APPDATA%\IXD, or any writable folder.
+        chosen = root / "Chosen Folder"
+        chosen.mkdir()
+        (chosen / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        sys.executable = str(chosen / "ixd")
+
+        found = integration.extension_locations()
+        check("the folder is inside the installation somebody chose",
+              found["chrome"] == chosen / "extension", str(found["chrome"]))
+        check("and Firefox's beside it",
+              found["firefox"] == chosen / "extension-firefox",
+              str(found["firefox"]))
+        check("which the guide reports verbatim",
+              extension_paths()["chrome"] == str(chosen / "extension"),
+              extension_paths()["chrome"])
+        check("with nothing to explain away",
+              extension_paths()["note"] == "", extension_paths()["note"])
+        check("and it wrote nothing to answer",
+              not (chosen / "extension").exists())
+
+        # Install it somewhere else and the answer moves with it.
+        elsewhere = root / "Program Files" / "IXD"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        sys.executable = str(elsewhere / "ixd")
+        check("a second install in another folder is reported as that one",
+              extension_paths()["chrome"] == str(elsewhere / "extension"),
+              extension_paths()["chrome"])
+
+        # …unless the account running it cannot write there.
+        elsewhere.chmod(0o500)
+        try:
+            paths = extension_paths()
+            check("an all-users install falls back to the data directory",
+                  paths["chrome"] == str(config.DATA_DIR / "extension"),
+                  paths["chrome"])
+            check("and the guide says why, instead of printing a strange path",
+                  "read-only" in paths["note"] and str(elsewhere) in paths["note"],
+                  paths["note"])
+        finally:
+            elsewhere.chmod(0o700)
+    finally:
+        if previous_frozen is None:
+            del sys.frozen
+        else:
+            sys.frozen = previous_frozen
+        sys.executable = previous_exe
+        config.DATA_DIR = previous_data
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_starting_one_download_by_hand_beats_a_paused_queue() -> None:
     """Reported: "it keeps everything in queue even if you start manually".
 
@@ -6184,6 +6265,7 @@ def main() -> int:
                  test_an_update_survives_a_folder_windows_will_not_rename,
                  test_a_link_clicked_in_the_browser_asks_first,
                  test_a_stream_chosen_in_the_panel_asks_too,
+                 test_the_guide_names_the_folder_this_install_actually_uses,
                  test_starting_one_download_by_hand_beats_a_paused_queue,
                  test_a_stream_says_how_big_it_is_before_it_starts,
                  test_the_window_comes_forward_when_the_browser_asks,

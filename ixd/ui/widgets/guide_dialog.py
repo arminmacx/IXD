@@ -16,6 +16,7 @@ no guide.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
@@ -179,10 +180,7 @@ def draw_extension(p: QPainter, palette: Palette, paths: dict) -> None:
     _text(p, QRect(46, inner.bottom() - 34, ART_W - 92, 20),
           "…and choose this folder:", QColor(palette.text_dim), _font(12))
 
-    strip = QRect(30, 236, ART_W - 60, 44)
-    _card(p, strip, QColor(palette.background), _alpha(palette.accent, 0x66), 10)
-    _text(p, strip.adjusted(16, 0, -16, 0), paths.get("chrome", ""),
-          QColor(palette.accent), _font(12, QFont.Weight.DemiBold))
+    _folder_strip(p, palette, paths, "chrome")
 
 
 def draw_firefox(p: QPainter, palette: Palette, paths: dict) -> None:
@@ -209,10 +207,26 @@ def draw_firefox(p: QPainter, palette: Palette, paths: dict) -> None:
                    "Firefox's rule for unsigned extensions, not ours.",
           QColor(palette.text_dim), _font(12), wrap=True)
 
-    strip = QRect(30, 236, ART_W - 60, 44)
+    _folder_strip(p, palette, paths, "firefox")
+
+
+def _folder_strip(p: QPainter, palette: Palette, paths: dict, key: str) -> None:
+    """The folder, exactly as it is on this machine — and why, when it moved.
+
+    This is the one line in the guide that has to be *true* rather than
+    helpful, so it is the resolved path and never a description of one. When an
+    all-users install has pushed the folders out of the installation directory,
+    the reason goes underneath: a path nobody chose, with no explanation, reads
+    as the guide being wrong.
+    """
+    note = str(paths.get("note") or "")
+    strip = QRect(30, 232 if note else 236, ART_W - 60, 40)
     _card(p, strip, QColor(palette.background), _alpha(palette.accent, 0x66), 10)
-    _text(p, strip.adjusted(16, 0, -16, 0), paths.get("firefox", ""),
+    _text(p, strip.adjusted(16, 0, -16, 0), paths.get(key, ""),
           QColor(palette.accent), _font(12, QFont.Weight.DemiBold))
+    if note:
+        _text(p, QRect(34, strip.bottom() + 2, ART_W - 68, 26), note,
+              QColor(palette.text_faint), _font(11), wrap=True)
 
 
 def draw_panel(p: QPainter, palette: Palette, paths: dict) -> None:
@@ -341,6 +355,10 @@ class GuideArt(QWidget):
 
     def show_page(self, index: int) -> None:
         self._index = index
+        # Re-asked, not remembered. The folder follows the installation, and a
+        # guide reopened after a reinstall somewhere else would otherwise be
+        # pointing at where the last one was.
+        self._paths = extension_paths()
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -441,18 +459,32 @@ class GuideDialog(QDialog):
 def extension_paths() -> dict[str, str]:
     """Where the two folders actually are on this machine.
 
-    Asked rather than described. A guide that prints a path the application
-    does not use is a support request with a head start, and this path moves:
-    beside the application when that is writable, in the data directory when it
-    is not (context.md §3.45).
+    Asked rather than described, and asked **every time the guide is opened**
+    rather than baked in. The user's instruction: *"the address where the
+    extension installed need to be where user selected during the
+    installation"* — and it is, because `integration` resolves it from where
+    the application is actually running rather than from a default.
+
+    The one case where it is somewhere else is worth saying out loud instead of
+    silently printing a path nobody chose: an all-users install goes to
+    `Program Files`, the account running the application cannot write there,
+    and the folders fall back to the data directory (context.md §3.45).
     """
     from ... import integration
 
-    found = {}
-    for key, getter in (("chrome", integration.extension_dir),
-                        ("firefox", integration.firefox_extension_dir)):
-        try:
-            found[key] = str(getter())
-        except Exception:  # noqa: BLE001 - a guide never blocks a launch
-            found[key] = "(run the application once, then check the Log)"
-    return found
+    try:
+        found = integration.extension_locations()
+    except Exception:  # noqa: BLE001 - a guide never blocks a launch
+        return {"chrome": "(check the Log for the extension folder)",
+                "firefox": "(check the Log for the extension folder)",
+                "note": ""}
+
+    note = ""
+    if not found["beside_the_application"] and getattr(sys, "frozen", False):
+        note = ("Installed for everyone, so the folders are here rather than in "
+                f"{found['installation']} — that folder is read-only to you.")
+    return {
+        "chrome": str(found["chrome"]),
+        "firefox": str(found["firefox"]),
+        "note": note,
+    }

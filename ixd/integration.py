@@ -186,6 +186,37 @@ def extension_root() -> Path:
     return config.DATA_DIR
 
 
+def extension_locations() -> dict[str, Path]:
+    """Where the two folders are, without writing anything to find out.
+
+    `extension_dir` and `firefox_extension_dir` *materialise* the folder as a
+    side effect of answering — which is right at start-up and wrong everywhere
+    else. Anything that only wants to **say** where the extension is asks here.
+
+    The answer follows the install: an install into a writable directory keeps
+    the folders beside the application, which is the one the person chose in
+    the installer. An all-users install cannot, because the account running the
+    application cannot write to `Program Files`, and then it is the data
+    directory — see :func:`extension_root`. `beside_the_application` says which
+    of the two happened, so a guide can explain a path that is not the one
+    somebody typed into the installer instead of just printing it.
+    """
+    if getattr(sys, "frozen", False):
+        root = extension_root()
+        chrome = root / EXTENSION_DIR_NAME
+    else:
+        # A source run loads the checkout directly, and puts nothing beside it.
+        root = config.DATA_DIR
+        chrome = bundled_extension_source()
+    return {
+        "chrome": chrome,
+        "firefox": root / FIREFOX_EXTENSION_DIR_NAME,
+        "root": root,
+        "installation": installation_dir(),
+        "beside_the_application": root == installation_dir(),
+    }
+
+
 def retire_legacy_extension_copies(root: Path) -> list[str]:
     """Remove the data-directory copies once the real ones live elsewhere.
 
