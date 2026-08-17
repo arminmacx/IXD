@@ -1448,7 +1448,12 @@
 
   async function queueCaptured(entry, container) {
     closeMenu();
-    setLabel("Sending…", true);
+    // Acknowledged at once, for the same reason `queue` is: a manifest goes
+    // through media extraction, and that is the better part of ten seconds on
+    // some sites. Holding the panel on "Sending…" for it made the one path
+    // that already answered instantly look broken next to this one.
+    restoreLabel();
+    toast("Sent to IXD");
     const title = (document.title || "")
       .replace(/\s*[-|·—]\s*YouTube\s*$/, "").trim();
     try {
@@ -1463,8 +1468,9 @@
         // A captured media URL is a bare request with no name in it, so the
         // page's own title is what the file should be called.
         : await send({ type: "addCaptured", itag: entry.itag, title });
-      restoreLabel();
-      toast(`Sent to IXD: ${result.filename || "download"}`);
+      // Named once the engine knows the name, which is worth saying; the
+      // acknowledgement above has already happened.
+      if (result && result.filename) toast(`Sent to IXD: ${result.filename}`);
     } catch (error) {
       restoreLabel();
       toast(String(error.message || error), true);

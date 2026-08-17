@@ -1431,6 +1431,16 @@ class DownloadService:
                     po_token=str(merged.get("po_token") or ""),
                 )
 
+        # Timed, because "why does YouTube take a few seconds when a plain link
+        # is instant" is a question the log should answer rather than a session
+        # arguing about it. Reading a watch page is an InnerTube call, the page
+        # itself and the player's JavaScript; when the connection is challenged
+        # it is nine seconds to be told no (measured here, 9.05 s).
+        reading_started = time.monotonic()
+
+        def reading_time() -> str:
+            return f"{time.monotonic() - reading_started:.1f} s"
+
         try:
             info = self._analysed(url, client, merged)
         except (ExtractionError, IXDError):
@@ -1440,16 +1450,25 @@ class DownloadService:
             plan = _capture_plan(merged, wanted, allow_shortfall=True)
             if plan is None:
                 raise
+            # The time is on the refusal too. This is the slow case — being
+            # told no takes as long as being answered, and longer than the
+            # capture route that then runs — so a log that timed only the
+            # successes would time everything except the wait being asked about.
             self.db.log_event(
-                "The site would not answer an extraction request, so what the "
-                f"browser had already loaded was taken instead: "
-                f"{plan.describe()}.", None, "info",
+                "The site would not answer an extraction request "
+                f"(it took {reading_time()} to say so), so what the browser had "
+                f"already loaded was taken instead: {plan.describe()}.",
+                None, "info",
             )
             return self._queue_capture_plan(
                 plan, url=url, title=title, cookies=cookies,
                 user_agent=user_agent, referer=referer,
                 site_headers=site_headers, queue_id=queue_id, start=start,
             )
+        if time.monotonic() - reading_started >= 1.0:
+            self.db.log_event(
+                f"Reading the page for “{title or url}” took {reading_time()}.",
+                None, "info")
         info = _named_after_its_page(info, url, title)
 
         session_cookies = client.cookies.header_for(
@@ -1482,7 +1501,13 @@ class DownloadService:
         # fails after the user has walked away.
         refused = ""
         if chosen.sabr:
+            asking_started = time.monotonic()
             chosen, refused = self._servable_format(chosen, info, client, user_agent)
+            asking_took = time.monotonic() - asking_started
+            if asking_took >= 1.0:
+                self.db.log_event(
+                    "Asking the streaming server which qualities it will "
+                    f"actually serve took {asking_took:.1f} s.", None, "info")
             if chosen is None:
                 message = (
                     f"the streaming server would not serve any video track for "
@@ -2606,6 +2631,19 @@ class DownloadService:
             return {"browser_fetch": delegated.instruction}
 
     def _add_media_command(self, params: dict[str, Any]) -> dict[str, Any]:
+        started = time.monotonic()
+        download = self._add_media_from_browser(params)
+        took = time.monotonic() - started
+        # The whole click-to-row time, in one line. The phases inside it log
+        # themselves when they are slow, so a log that shows six seconds here
+        # and nothing else means the six seconds were not the page or the
+        # server — which is worth as much as knowing that they were.
+        self.db.log_event(
+            f"Queued “{download.get('filename') or 'a stream'}” "
+            f"{took:.1f} s after the click.", download.get("id"), "info")
+        return download
+
+    def _add_media_from_browser(self, params: dict[str, Any]) -> dict[str, Any]:
         download = self.add_media(
             params["url"],
             params.get("format_id", ""),
