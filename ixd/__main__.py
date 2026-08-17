@@ -384,6 +384,10 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
         # service has already remembered the session that made the address
         # work, so the dialog that opens is not starting from nothing.
         server.register("present", lambda params: _present(service, window, params))
+        # A link clicked in the browser: the transfer is not begun until
+        # somebody has seen where it is going. Only where there is a window to
+        # ask in — `--background` keeps the immediate `add` it always had.
+        server.register("add", lambda params: _ask_before_adding(service, window, params))
 
     for url in urls:
         try:
@@ -424,6 +428,42 @@ def _present(service, window, params: dict) -> dict:
                                   window.activateWindow(),
                                   window.open_add_dialog(url)))
     return {"opened": True, "url": url}
+
+
+def _ask_before_adding(service, window, params: dict) -> dict:
+    """Open the file-info window for a download the browser intercepted.
+
+    The reply is sent immediately and the window opens after it: the extension
+    is holding a cancelled browser download while it waits, and a person
+    reading the address takes as long as they take. What the reply carries is
+    `confirming`, so the extension does not also raise a notification saying
+    the download was sent — the window on screen is the notification.
+    """
+    from PySide6.QtCore import QTimer
+    from .core.http_client import filename_from_url, sanitize_filename
+
+    if not service.settings.get_bool("confirm_browser_downloads", True):
+        result = service.handle_command("add", params)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "could not add the download"))
+        return result["result"]
+
+    url = str(params.get("url") or "")
+    if not url:
+        raise RuntimeError("a download needs a URL")
+    # Remembered before the window opens, so the dialog's probe replays the
+    # session the browser established rather than asking the origin cold.
+    service.remember_browser_context(url, {
+        "cookies": str(params.get("cookies") or ""),
+        "user_agent": str(params.get("userAgent") or params.get("user_agent") or ""),
+        "referer": str(params.get("referrer") or params.get("referer") or ""),
+        "headers": dict(params.get("headers") or {}),
+    })
+    QTimer.singleShot(0, lambda: window.confirm_browser_download(dict(params)))
+
+    supplied = str(params.get("filename") or "").strip()
+    name = sanitize_filename(supplied) if supplied else filename_from_url(url)
+    return {"confirming": True, "url": url, "filename": name}
 
 
 def _focus(window) -> bool:

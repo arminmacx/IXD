@@ -217,6 +217,21 @@ def _arrow_rules(p: Palette) -> str:
     QComboBox::down-arrow {{ image: url({down}); width: 11px; height: 11px; }}
     QComboBox::down-arrow:on {{ image: url({up_lit}); }}
     QComboBox::down-arrow:disabled {{ image: url({down_off}); }}
+
+    /* A push button carrying a menu (`#WithMenu`). Styling `QPushButton` at
+       all hands its sub-controls to this sheet, and one with no image draws
+       nothing — so the arrow that says "there is a list behind this" simply
+       was not there. Same defect as the blank spin-box steppers. */
+    QPushButton#WithMenu {{ padding-right: 26px; }}
+    QPushButton#WithMenu::menu-indicator {{
+        image: url({down});
+        width: 11px;
+        height: 11px;
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+        right: 10px;
+    }}
+    QPushButton#WithMenu::menu-indicator:disabled {{ image: url({down_off}); }}
     """ + (f"""
     QCheckBox::indicator:checked {{ image: url({tick}); }}
     """ if tick else "")

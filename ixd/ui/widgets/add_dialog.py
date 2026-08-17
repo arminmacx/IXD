@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.models import MediaInfo
-from ..workers import Worker
+from ..workers import BackgroundCall
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...service import DownloadService
@@ -41,7 +41,11 @@ class AddDownloadDialog(QDialog):
         self._media: MediaInfo | None = None
         self._probe_info: dict | None = None
         self._probe_summary: str = ""
-        self._worker: Worker | None = None
+        #: The address the call in flight is about. Kept as state rather than
+        #: captured in a lambda: a connection made through a lambda has no
+        #: receiving object, so Qt cannot drop it when this window closes.
+        self._pending_url: str = ""
+        self._worker: BackgroundCall | None = None
         self.created_ids: list[int] = []
 
         layout = QVBoxLayout(self)
@@ -156,12 +160,19 @@ class AddDownloadDialog(QDialog):
 
         self._probe_info = None
         self._media = None
+        self._pending_url = url
         self._set_busy(True, "Contacting the server…")
-        worker = Worker(lambda: self.service.probe(url), self)
-        worker.succeeded.connect(lambda info, u=url: self._on_probed(info, u))
-        worker.failed.connect(lambda message, u=url: self._on_probe_failed(message, u))
+        worker = BackgroundCall(lambda: self.service.probe(url))
+        worker.succeeded.connect(self._probe_answered)
+        worker.failed.connect(self._probe_refused)
         self._worker = worker
         worker.start()
+
+    def _probe_answered(self, info: dict) -> None:
+        self._on_probed(info, self._pending_url)
+
+    def _probe_refused(self, message: str) -> None:
+        self._on_probe_failed(message, self._pending_url)
 
     def _on_probed(self, info: dict, url: str) -> None:
         self._probe_info = info
@@ -193,10 +204,9 @@ class AddDownloadDialog(QDialog):
         self._start_extraction(url, 0)
 
     def _start_extraction(self, url: str, size: int) -> None:
-        worker = Worker(lambda: self.service.extract(url), self)
+        worker = BackgroundCall(lambda: self.service.extract(url))
         worker.succeeded.connect(self._on_analyzed)
         worker.failed.connect(self._on_analyze_failed)
-        worker.finished.connect(lambda: setattr(self, "_worker", None))
         self._worker = worker
         worker.start()
 

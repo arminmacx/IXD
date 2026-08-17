@@ -5364,6 +5364,256 @@ def test_the_page_hook_supplies_what_the_session_withholds() -> None:
               f"{_page_key(watch)} vs {_page_key(watch + '&t=90s')}")
         service.db.close()
 
+def test_a_link_clicked_in_the_browser_asks_first() -> None:
+    """A download the browser hands over opens IDM's file-info window.
+
+    Reported: clicking a link in the browser started the transfer with no
+    window, no choice of folder and no way to defer it. Everything here is
+    driven headless — the reply the extension gets, the window that follows it,
+    the queue menu, and what "Download later" actually writes to the database.
+
+    The one thing this cannot show is the window on a screen. What it can show
+    is that the transfer has *not* begun when the reply is sent, which is the
+    defect: the browser's own download was already cancelled by then.
+    """
+    print("\n[a link clicked in the browser asks first]")
+    script = '''
+import sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-ask-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.models import DownloadStatus
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+from ixd import __main__ as entry
+
+app = QApplication(sys.argv[:1])
+apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+
+payload = {"url": "https://example.invalid/big.zip", "filename": "big.zip",
+           "cookies": "a=b", "referrer": "https://example.invalid/page",
+           "userAgent": "TestBrowser/1", "headers": {}}
+reply = entry._ask_before_adding(service, window, dict(payload))
+print("CONFIRMING", bool(reply.get("confirming")), reply.get("filename"))
+print("NOTHING_QUEUED_YET", len(service.list_downloads()))
+
+app.processEvents()          # the window is opened on the event loop
+print("WINDOW_OPEN", len(window._browser_dialogs))
+print("MAIN_WINDOW_STILL_DOWN", window.isVisible())
+dialog = next(iter(window._browser_dialogs))
+print("URL_SHOWN", dialog.url_edit.text())
+print("URL_READONLY", dialog.url_edit.isReadOnly())
+print("NAME_SHOWN", dialog.filename_edit.text())
+print("FOLDER_DEFAULT", dialog.folder_edit.text() == str(out))
+print("MENU", "|".join(a.text() for a in dialog.later_menu.actions()))
+
+elsewhere = root / "elsewhere"
+dialog.folder_edit.setText(str(elsewhere))
+queues = service.list_queues()
+dialog._download_later(queues[1].id)
+
+rows = service.list_downloads()
+row = rows[0] if rows else None
+print("QUEUED", len(rows))
+if row is not None:
+    print("PAUSED", row.status is DownloadStatus.PAUSED)
+    print("IN_CHOSEN_QUEUE", row.queue_id == queues[1].id)
+    print("IN_CHOSEN_FOLDER", row.dest_dir == str(elsewhere), elsewhere.is_dir())
+    print("SESSION_KEPT", row.cookies == "a=b" and row.referer.endswith("/page"))
+print("DIALOG_GONE", len(window._browser_dialogs))
+
+# Turning the question off is the behaviour every earlier version had.
+settings.set("confirm_browser_downloads", False)
+direct = entry._ask_before_adding(service, window, dict(payload, url="https://example.invalid/two.zip", filename="two.zip"))
+print("DIRECT", bool(direct.get("confirming")), len(service.list_downloads()))
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-ask-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("a browser download opens the file-info window", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
+    check("the extension is told the application is asking",
+          "CONFIRMING True big.zip" in output, detail)
+    check("and nothing is queued until it is answered",
+          "NOTHING_QUEUED_YET 0" in output, detail)
+    check("the window opens", "WINDOW_OPEN 1" in output, detail)
+    check("without dragging the main window out of the tray",
+          "MAIN_WINDOW_STILL_DOWN False" in output, detail)
+    check("it shows the address", "URL_SHOWN https://example.invalid/big.zip" in output,
+          detail)
+    check("and refuses to let it be edited", "URL_READONLY True" in output, detail)
+    check("the name the browser had is already in it",
+          "NAME_SHOWN big.zip" in output, detail)
+    check("the folder starts at the one in Settings",
+          "FOLDER_DEFAULT True" in output, detail)
+    check("“Download later” lists every queue",
+          "Main Queue" in output.split("MENU", 1)[-1].splitlines()[0]
+          and "Overnight" in output.split("MENU", 1)[-1].splitlines()[0]
+          if "MENU" in output else False, detail)
+    check("and says whether anything will start it",
+          "no schedule starts it yet" in output, detail)
+    check("choosing one queues the download", "QUEUED 1" in output, detail)
+    check("paused, waiting for the schedule", "PAUSED True" in output, detail)
+    check("in the queue that was chosen", "IN_CHOSEN_QUEUE True" in output, detail)
+    check("into the folder that was chosen", "IN_CHOSEN_FOLDER True True" in output,
+          detail)
+    check("carrying the session the browser established",
+          "SESSION_KEPT True" in output, detail)
+    check("and the window closes behind it", "DIALOG_GONE 0" in output, detail)
+    check("with the question switched off it is queued straight away",
+          "DIRECT False 2" in output, detail)
+
+
+def test_an_all_queues_schedule_can_still_choose_its_downloads() -> None:
+    """Reported: "it says the schedule is not attached to a queue".
+
+    The schedule dialog's first entry is "All queues" and stores `None`, and
+    "Downloads and order…" read that same `None` as *no* queue and refused —
+    so the default choice was the one combination the feature would not accept.
+    A schedule on every queue runs everything that is in a queue; the only
+    thing it cannot run is a download sitting in none, and that is what ticking
+    a row fixes.
+    """
+    print("\n[an all-queues schedule can still choose its downloads]")
+    script = '''
+import sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-allq-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication, QMessageBox
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.models import Download, DownloadStatus, Schedule
+from ixd.service import DownloadService
+from ixd.ui.widgets import settings_dialog as sd
+from ixd.ui.theme import DARK, apply_theme
+
+app = QApplication(sys.argv[:1])
+apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+queues = service.list_queues()
+main_queue, overnight = queues[0].id, queues[1].id
+
+# One already in a queue, one in none at all.
+inside = Download(url="https://example.invalid/a.bin", filename="a.bin",
+                  dest_dir=str(out), queue_id=overnight,
+                  status=DownloadStatus.PAUSED)
+inside.id = service.db.insert_download(inside)
+loose = Download(url="https://example.invalid/b.bin", filename="b.bin",
+                 dest_dir=str(out), queue_id=None, status=DownloadStatus.PAUSED)
+loose.id = service.db.insert_download(loose)
+
+schedule = Schedule(name="Nightly", queue_id=None, action_start="start")
+schedule.id = service.save_schedule(schedule)
+stored = [s for s in service.list_schedules() if s.id == schedule.id][0]
+print("STORED_ALL_QUEUES", stored.queue_id is None)
+
+# What the settings page does when "Downloads and order…" is clicked. The
+# message box is replaced: a real one would sit waiting for a click.
+asked = []
+class FakeBox:
+    class StandardButton:
+        Yes = 1
+    @staticmethod
+    def information(parent, title, text):
+        asked.append(text)
+sd.QMessageBox = FakeBox
+
+dialog = sd.ScheduleDownloadsDialog(service, stored)
+print("REFUSALS", len(asked))
+print("ROWS", dialog.table.rowCount())
+print("COVERED_TICKED", dialog._rows[0]["download"].id == inside.id,
+      dialog._rows[0]["checked"])
+print("LOOSE_UNTICKED", dialog._rows[1]["download"].id == loose.id,
+      dialog._rows[1]["checked"])
+print("TARGET_OFFERED", dialog.target_combo.count())
+
+# Tick the loose one into "Main Queue", and put it first.
+dialog.target_combo.setCurrentIndex(dialog.target_combo.findData(main_queue))
+dialog.table.item(1, 0).setCheckState(sd.Qt.CheckState.Checked)
+dialog.table.selectRow(1)
+dialog._move(-1)
+dialog._save()
+
+after = {d.id: d for d in service.list_downloads()}
+print("LOOSE_PLACED", after[loose.id].queue_id == main_queue)
+print("OTHER_LEFT_ALONE", after[inside.id].queue_id == overnight)
+print("ORDER", after[loose.id].priority > after[inside.id].priority)
+
+# And clearing a row takes it back out of every queue.
+again = sd.ScheduleDownloadsDialog(service, stored)
+again.table.item(0, 0).setCheckState(sd.Qt.CheckState.Unchecked)
+again._save()
+print("CLEARED", service.db.get_download(loose.id).queue_id is None)
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-allq-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("an all-queues schedule opens its download list", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
+    check("“All queues” is stored as it is chosen",
+          "STORED_ALL_QUEUES True" in output, detail)
+    check("and the download list opens instead of refusing",
+          "REFUSALS 0" in output, detail)
+    check("every unfinished download is offered", "ROWS 2" in output, detail)
+    check("one already in a queue is ticked", "COVERED_TICKED True True" in output,
+          detail)
+    check("one in no queue at all is not", "LOOSE_UNTICKED True False" in output,
+          detail)
+    check("with a queue to put newly ticked downloads in",
+          "TARGET_OFFERED 2" in output, detail)
+    check("ticking one puts it in that queue", "LOOSE_PLACED True" in output, detail)
+    check("and leaves the others where they already are",
+          "OTHER_LEFT_ALONE True" in output, detail)
+    check("the order of the list is the order they start in",
+          "ORDER True" in output, detail)
+    check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — integration test suite")
@@ -5422,7 +5672,9 @@ def main() -> int:
                  test_the_extension_folder_follows_the_application,
                  test_the_folder_the_browser_loads_always_has_a_manifest,
                  test_the_extension_sits_where_an_update_leaves_it,
-                 test_an_update_survives_a_folder_windows_will_not_rename):
+                 test_an_update_survives_a_folder_windows_will_not_rename,
+                 test_a_link_clicked_in_the_browser_asks_first,
+                 test_an_all_queues_schedule_can_still_choose_its_downloads):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

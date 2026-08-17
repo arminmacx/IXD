@@ -1151,6 +1151,9 @@ class DownloadService:
         return self.engine.add_download(
             payload["url"],
             filename=self._name_before_the_row_appears(payload),
+            # Where this one file goes, when somebody chose a folder for it in
+            # the window the interception opens. Empty means the setting.
+            dest_dir=str(payload.get("dest_dir") or ""),
             headers=headers,
             cookies=payload.get("cookies", "") or "",
             referer=payload.get("referrer", "") or payload.get("referer", "") or "",

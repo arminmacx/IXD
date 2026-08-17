@@ -196,6 +196,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ipc_port": 47615,
     "ipc_token": "",                    # generated on first run
     "browser_integration": True,
+    # A download the browser hands over opens a window first — the address, the
+    # folder it is going to, and start / start later / cancel. Off queues it
+    # straight away, which is what every version before this one did.
+    "confirm_browser_downloads": True,
     "intercept_min_size": 0,
     "intercept_extensions": [],         # empty = every extension the extension offers
     "ignored_hosts": ["localhost", "127.0.0.1"],

@@ -69,6 +69,10 @@ class MainWindow(QMainWindow):
         self._palette = palette
         self._quitting = False
         self._selected_id: int | None = None
+        #: The file-info windows the browser has opened and nobody has answered
+        #: yet. Held because they are shown, not executed — a dialog with no
+        #: reference to it is collected the moment the method that made it ends.
+        self._browser_dialogs: set = set()
 
         self.setWindowTitle(f"Internet Xtreme Downloader {__version__}")
         self.setWindowIcon(application_icon())
@@ -546,6 +550,25 @@ class MainWindow(QMainWindow):
         dialog.exec()
         self.refresh()
 
+    def confirm_browser_download(self, payload: dict) -> None:
+        """Ask about a download the browser handed over, IDM-style.
+
+        Shown, never executed: the browser can hand over three downloads before
+        anyone looks at the screen, and a modal window would make the second
+        and third wait behind the first. The main window is deliberately left
+        as it is — hidden in the tray is the normal state when this arrives.
+        """
+        from .widgets.browser_dialog import BrowserDownloadDialog
+
+        dialog = BrowserDownloadDialog(self.service, self, payload)
+        self._browser_dialogs.add(dialog)
+        dialog.finished.connect(
+            lambda _result, d=dialog: self._browser_dialogs.discard(d))
+        dialog.queued.connect(lambda _id: self.refresh())
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def open_log(self) -> None:
         from .widgets.log_dialog import LogDialog
 
@@ -855,7 +878,14 @@ class MainWindow(QMainWindow):
             # Closing it leaves the transfer running in the main window, and
             # opening the row brings it back — the window watches a download,
             # it does not own it.
-            if self.service.settings.get_bool("show_download_window", True):
+            #
+            # Unless it was added paused: "download later" means exactly that,
+            # and a progress window over a transfer that will not move until
+            # tonight is the opposite of what was asked for.
+            deferred = str(
+                (payload.get("download") or {}).get("status") or "") == "paused"
+            if not deferred and self.service.settings.get_bool(
+                    "show_download_window", True):
                 download_id = payload.get("download_id")
                 if download_id is not None:
                     self.open_download_window(int(download_id))

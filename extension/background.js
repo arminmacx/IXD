@@ -364,7 +364,10 @@ chrome.downloads.onCreated.addListener(async (item) => {
       userAgent: navigator.userAgent,
       headers: {},
     });
-    if (settings.notifyOnAdd) {
+    // `confirming` means the application put its own window on screen asking
+    // where this is going. That window is the notification; a second one
+    // saying "sent" would be announcing something that has not happened yet.
+    if (settings.notifyOnAdd && !result.confirming) {
       notify("Sent to Internet Xtreme Downloader", result.filename || url);
     }
   } catch (error) {
@@ -1762,7 +1765,11 @@ async function sendPlainDownload(url, tab) {
     referrer: (tab && tab.url) || "",
     userAgent: navigator.userAgent,
   });
-  notify("Sent to Internet Xtreme Downloader", result.filename || url);
+  // See the note in the interception listener: when the application is asking
+  // where the file goes, its window is the notification.
+  if (!result.confirming) {
+    notify("Sent to Internet Xtreme Downloader", result.filename || url);
+  }
 }
 
 async function sendMediaPage(pageUrl, tab) {

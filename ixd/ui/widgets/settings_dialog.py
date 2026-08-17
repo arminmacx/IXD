@@ -185,6 +185,14 @@ class ScheduleDownloadsDialog(QDialog):
     it out. The order of the list is the order they start in, written back as
     descending priority. Downloads already finished are not offered: there is
     nothing to schedule about them.
+
+    **A schedule set to "All queues" runs everything that is in a queue**, so
+    it belongs here like any other. It used to be refused — "this schedule is
+    not attached to a queue, so there is nothing for it to run" — which was the
+    dialog reading `queue_id is None` as *unset* when the combo above it says
+    *all*. Ticking a row that is already in a queue leaves it where it is; a
+    row in no queue at all has to be put in one, and which one is the combo at
+    the top of this window.
     """
 
     def __init__(self, service: "DownloadService", schedule: Schedule,
@@ -192,8 +200,12 @@ class ScheduleDownloadsDialog(QDialog):
         super().__init__(parent)
         self.service = service
         self.schedule = schedule
+        self.queues = [q for q in service.list_queues() if q.id is not None]
+        self.queue_names = {q.id: q.name for q in self.queues}
+        #: "All queues" — the schedule fires on every one of them.
+        self.all_queues = schedule.queue_id is None
         self.setWindowTitle(f"Downloads for “{schedule.name or 'schedule'}”")
-        self.setMinimumSize(640, 460)
+        self.setMinimumSize(720, 480)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
@@ -202,13 +214,27 @@ class ScheduleDownloadsDialog(QDialog):
         blurb = QLabel(
             "Tick the downloads this schedule should run. They start from the "
             "top, so put what matters first."
+            + (" This schedule runs every queue, so anything in any queue is "
+               "already covered." if self.all_queues else "")
         )
         blurb.setObjectName("Subtle")
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["", "File", "Size", "State"])
+        self.target_combo = QComboBox()
+        if self.all_queues:
+            # Only meaningful when the schedule covers every queue: a ticked
+            # download that is in no queue has to be put in one, and this says
+            # which. One already in a queue keeps it.
+            for queue in self.queues:
+                self.target_combo.addItem(queue.name, queue.id)
+            target_row = QHBoxLayout()
+            target_row.addWidget(QLabel("Put newly ticked downloads in"))
+            target_row.addWidget(self.target_combo, 1)
+            layout.addLayout(target_row)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["", "File", "Queue", "Size", "State"])
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(
@@ -247,18 +273,34 @@ class ScheduleDownloadsDialog(QDialog):
         self._load()
 
     # ------------------------------------------------------------------
+    def _covered(self, download) -> bool:
+        """Would this schedule already run that download?
+
+        For a schedule on one queue that is membership of it. For one on *all*
+        queues it is membership of any queue at all — an unassigned download is
+        the only thing nothing runs.
+        """
+        if self.all_queues:
+            return download.queue_id is not None
+        return download.queue_id == self.schedule.queue_id
+
+    def _target_queue_id(self) -> int | None:
+        """The queue a newly ticked download goes into."""
+        if not self.all_queues:
+            return self.schedule.queue_id
+        return self.target_combo.currentData()
+
     def _load(self) -> None:
-        """Everything schedulable, this schedule's own first and in order."""
-        queue_id = self.schedule.queue_id
+        """Everything schedulable, what this schedule runs first and in order."""
         candidates = [
             download for download in self.service.list_downloads()
             if download.status is not DownloadStatus.COMPLETED
         ]
-        # Already in this queue, in the order the engine would run them, then
-        # everything else — so the list opens showing what the schedule does.
-        mine = [d for d in candidates if d.queue_id == queue_id]
+        # Already run by this schedule, in the order the engine would start
+        # them, then everything else — so the list opens showing what it does.
+        mine = [d for d in candidates if self._covered(d)]
         mine.sort(key=lambda d: (-int(d.priority or 0), d.id or 0))
-        others = [d for d in candidates if d.queue_id != queue_id]
+        others = [d for d in candidates if not self._covered(d)]
         others.sort(key=lambda d: d.id or 0)
 
         self._rows = [{"download": d, "checked": True} for d in mine]
@@ -277,8 +319,10 @@ class ScheduleDownloadsDialog(QDialog):
             self.table.setItem(row, 1, QTableWidgetItem(
                 download.filename or download.url))
             self.table.setItem(row, 2, QTableWidgetItem(
-                _size_text(download.total_size)))
+                self.queue_names.get(download.queue_id, "—")))
             self.table.setItem(row, 3, QTableWidgetItem(
+                _size_text(download.total_size)))
+            self.table.setItem(row, 4, QTableWidgetItem(
                 download.status.value.title()))
 
     def _harvest(self) -> None:
@@ -306,20 +350,24 @@ class ScheduleDownloadsDialog(QDialog):
 
     def _save(self) -> None:
         self._harvest()
-        queue_id = self.schedule.queue_id
+        target = self._target_queue_id()
         chosen = [entry["download"] for entry in self._rows if entry["checked"]]
         # Descending, so the top of the list is what `_pump` starts first, and
         # spaced so a later insertion between two rows has somewhere to go.
         top = len(chosen) * 10
         for position, download in enumerate(chosen):
+            # A download this schedule already runs stays in the queue it is
+            # in — on an all-queues schedule that is any queue, and moving them
+            # all into one would be a reorganisation nobody asked for.
+            queue_id = download.queue_id if self._covered(download) else target
             self.service.db.update_download_fields(
                 download.id, queue_id=queue_id, priority=top - position * 10)
         for entry in self._rows:
             if entry["checked"]:
                 continue
             download = entry["download"]
-            if download.queue_id == queue_id:
-                # Cleared: out of this schedule's queue, but still a download.
+            if self._covered(download):
+                # Cleared: out of the queue, but still a download.
                 self.service.db.update_download_fields(
                     download.id, queue_id=None)
         self.accept()
@@ -1254,11 +1302,14 @@ class SettingsDialog(QDialog):
                 "Select a schedule first — this chooses what that schedule "
                 "runs.")
             return
-        if schedule.queue_id is None:
+        # `queue_id is None` is "All queues", not "no queue" — this used to
+        # refuse the most ordinary schedule anybody makes. The one thing that
+        # genuinely cannot be scheduled is a database with no queues in it.
+        if not [q for q in self.service.list_queues() if q.id is not None]:
             QMessageBox.information(
                 self, "Scheduler",
-                "This schedule is not attached to a queue, so there is nothing "
-                "for it to run. Edit it and choose a queue first.")
+                "There are no queues yet, so there is nothing for a schedule "
+                "to run. Add one on the Queues page first.")
             return
         dialog = ScheduleDownloadsDialog(self.service, schedule, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -1409,6 +1460,19 @@ class SettingsDialog(QDialog):
             self.settings.get_bool("browser_integration", True)
         )
         form.addRow("", self.browser_integration)
+
+        self.confirm_browser = QCheckBox(
+            "Ask before each one — address, folder, and whether to start it now"
+        )
+        self.confirm_browser.setChecked(
+            self.settings.get_bool("confirm_browser_downloads", True)
+        )
+        self.confirm_browser.setToolTip(
+            "A link clicked in the browser opens a window first, with “Start "
+            "download”, “Download later” into a queue, and Cancel. Unticked, "
+            "it is queued and started without asking."
+        )
+        form.addRow("", self.confirm_browser)
 
         self.ipc_port = QSpinBox()
         self.ipc_port.setRange(1024, 65535)
@@ -1717,6 +1781,7 @@ class SettingsDialog(QDialog):
             "ipv6_enabled": self.ipv6.isChecked(),
 
             "browser_integration": self.browser_integration.isChecked(),
+            "confirm_browser_downloads": self.confirm_browser.isChecked(),
             "ipc_port": self.ipc_port.value(),
             "preferred_video_quality": self.quality_combo.currentText(),
             "preferred_video_container":

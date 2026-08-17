@@ -139,7 +139,13 @@ class IPCServer(socketserver.ThreadingTCPServer):
         return self.server_address[1]
 
     def register(self, command: str, handler: Callable[[dict[str, Any]], Any]) -> None:
-        """Add a command the service itself does not implement (e.g. `focus`)."""
+        """Add a command the service does not implement, or replace one.
+
+        `focus` is the first kind. `add` is the second: the service queues a
+        download, and a process with a window in front of somebody asks about
+        it first — so the window registers over it and the daemon, which has
+        nobody to ask, keeps the immediate behaviour.
+        """
         self._extra_handlers[command] = handler
 
     def dispatch(self, command: str, params: dict[str, Any]) -> dict[str, Any]:

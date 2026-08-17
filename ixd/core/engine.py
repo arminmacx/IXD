@@ -3528,17 +3528,24 @@ class DownloadEngine:
 
         self.db.insert_download(download)
         self.db.log_event(f"Added {download.filename}", download.id)
+
+        # Settled *before* the event goes out. A subscriber is told a download
+        # was added and is entitled to act on what it is told: the window opens
+        # a progress view for one that is starting and leaves a deferred one
+        # alone, and it could not tell them apart while every announcement said
+        # "queued" and the pause landed a line later.
+        running = start and self.settings.get_bool("autostart_downloads", True)
+        if not running:
+            self.db.update_download_fields(download.id, status=DownloadStatus.PAUSED)
+            download.status = DownloadStatus.PAUSED
+
         self.events.emit(
             EventType.DOWNLOAD_ADDED,
             download_id=download.id,
             download=download.to_public_dict(),
         )
-
-        if start and self.settings.get_bool("autostart_downloads", True):
+        if running:
             self._pump_event.set()
-        else:
-            self.db.update_download_fields(download.id, status=DownloadStatus.PAUSED)
-            download.status = DownloadStatus.PAUSED
         return download
 
     def start_download(self, download_id: int, force: bool = False) -> bool:

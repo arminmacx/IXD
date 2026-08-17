@@ -1176,7 +1176,9 @@
   async function queueDirect(url) {
     try {
       const result = await send({ type: "addUrl", url });
-      toast(`Sent to IXD: ${result.filename || "download"}`);
+      toast(result.confirming
+        ? "IXD is asking where to save it"
+        : `Sent to IXD: ${result.filename || "download"}`);
     } catch (error) {
       toast(String(error.message || error), true);
     }
