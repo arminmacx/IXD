@@ -27,9 +27,6 @@ native-host/com.ixd.downloader*.json
 *.sqlite3-wal
 *.log
 
-# --- not ours to redistribute -----------------------------------------
-idm/
-
 # --- working files, kept locally and never published --------------------
 backups/
 # The build diary and the working instructions. They are a real engineering
