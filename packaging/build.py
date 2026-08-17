@@ -395,9 +395,15 @@ def build_windows_zip(binary_dir: Path) -> Path:
 #: the fixed extension ID. `idm/` is somebody else's extension and not ours to
 #: redistribute. `session-log.md` is history nobody building needs, and it is
 #: now larger than everything else combined.
+#: The launch copy is the same kind of thing: notes about how to talk about
+#: the project rather than part of it, and untracked besides — a source bundle
+#: built from a working tree would otherwise ship them when the repository
+#: does not.
 _SOURCE_EXCLUDED_FILES = frozenset({
     "packaging/extension-key.pem",
     "session-log.md",
+    "packaging/reddit-post.md",
+    "packaging/producthunt.md",
 })
 _SOURCE_EXCLUDED_DIRS = frozenset({
     ".git", ".venv", "dist", "build", "idm", "backups", "__pycache__",
@@ -529,6 +535,25 @@ Function un.onInit
 FunctionEnd
 
 Section "Install"
+  ; Close a copy that is already running, before a single file is written.
+  ;
+  ; Reported on the first in-app update: the application starts this installer
+  ; and quits — but "and quits" is a race, and NSIS got to the first locked
+  ; file first: *"its not close and quit the app completely and hit with error
+  ; that ixd is running and i should manually quit the app then hit retry"*.
+  ;
+  ; So the installer stops depending on the timing and does it itself. Politely
+  ; first, because the application is writing out its database; then plainly,
+  ; because by that point it has had five seconds and the person is watching a
+  ; progress bar. `ixd.exe` is also the name the browser's messaging host runs
+  ; under, so this closes that too — which is the other thing holding the
+  ; folder open (context.md §3.14u57).
+  DetailPrint "Closing {app_name} if it is running…"
+  ExecWait 'taskkill /IM "{launcher}"'
+  Sleep 2500
+  ExecWait 'taskkill /IM "{launcher}" /F'
+  Sleep 800
+
   SetOutPath "$INSTDIR"
   ; Everything the portable build contains, exactly as it was tested.
   ; `\*` and not `\*.*`: the second is the DOS spelling and is reported to skip

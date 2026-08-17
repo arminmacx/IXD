@@ -38,6 +38,11 @@ backups/
 instruction.md
 context.md
 session-log.md
+# Launch copy — drafts for Reddit and Product Hunt. They are working notes
+# about how to talk about the project, not part of it, and a repository is a
+# strange place to publish an unposted post.
+packaging/reddit-post.md
+packaging/producthunt.md
 # Field-report screenshots live at the top of the tree; the ones the README
 # uses are in docs/ and are kept.
 /*.png

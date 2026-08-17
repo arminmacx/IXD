@@ -664,6 +664,42 @@ class MainWindow(QMainWindow):
         dialog.exec()
         self.refresh()
 
+    def _present_browser_dialog(self, dialog) -> None:
+        """Put it where it can be seen, and say so when it cannot be raised.
+
+        Reported: a second download from the same site produced no window until
+        the main window was clicked, and then *two* appeared. Both were there
+        the whole time — the second was centred on exactly the same pixels as
+        the first, behind it, and Windows will not let a process that is not in
+        the foreground take focus away from the browser. So a window opened
+        from a background application has to place itself and announce itself
+        rather than assume a raise will work.
+
+        Each one is offset from the last, and the taskbar button is flashed,
+        which is the one attention-getting mechanism Windows does allow.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        dialog.adjustSize()
+        screen = (dialog.screen() or QApplication.primaryScreen())
+        if screen is not None:
+            area = screen.availableGeometry()
+            size = dialog.size()
+            step = 34 * max(0, len(self._browser_dialogs) - 1)
+            left = area.center().x() - size.width() // 2 + step
+            top = area.center().y() - size.height() // 2 + step
+            # Cascading downwards for ever would eventually walk off the
+            # bottom; wrap back to the middle instead.
+            if top + size.height() > area.bottom() or left + size.width() > area.right():
+                left, top = (area.center().x() - size.width() // 2,
+                             area.center().y() - size.height() // 2)
+            dialog.move(max(area.left(), left), max(area.top(), top))
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        QApplication.alert(dialog)
+
     def confirm_browser_download(self, payload: dict) -> None:
         """Ask about a download the browser handed over, IDM-style.
 
@@ -687,9 +723,7 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(
             lambda _result, d=dialog: self._browser_dialogs.discard(d))
         dialog.queued.connect(lambda _id: self.refresh())
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        self._present_browser_dialog(dialog)
 
     # -- a stream chosen in the page ------------------------------------
     #
@@ -709,9 +743,7 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(
             lambda _result, d=dialog, t=token: self._forget_media(t, d))
         dialog.queued.connect(lambda _id: self.refresh())
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        self._present_browser_dialog(dialog)
 
     def _forget_media(self, token: str, dialog) -> None:
         self._browser_dialogs.discard(dialog)

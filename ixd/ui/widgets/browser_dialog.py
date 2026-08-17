@@ -127,9 +127,18 @@ class BrowserDownloadDialog(QDialog):
 
         folder_row = QHBoxLayout()
         folder_row.setSpacing(8)
-        self.folder_edit = QLineEdit(str(self.service.settings.get("download_dir")))
+        # The folder this file would land in **including its category** — a
+        # `.exe` goes to Programs, a `.mp4` to Video, when that setting is on.
+        # Showing the plain download folder was not just untidy: this window
+        # *sends* what is in this box, and the engine only sorts a download
+        # whose folder it was left to choose. So every download the browser
+        # handed over landed in the root, which is not where the same file went
+        # before this window existed.
+        self._suggested_folder = self._folder_for(self.filename_edit.text())
+        self.folder_edit = QLineEdit(self._suggested_folder)
         self.folder_edit.setToolTip(
-            "Where this one file goes. The default is the folder in Settings.")
+            "Where this one file goes. It follows the category folders in "
+            "Settings until you change it.")
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
         folder_row.addWidget(self.folder_edit, 1)
@@ -212,6 +221,30 @@ class BrowserDownloadDialog(QDialog):
         url = str(self.payload.get("url") or "")
         return filename_from_url(url) if url else ""
 
+    def _folder_for(self, filename: str, mime: str = "") -> str:
+        """Where a file of this name belongs, category folders included."""
+        from ... import config
+
+        try:
+            return str(config.destination_for(
+                self.service.settings, filename or "download", mime))
+        except Exception:  # noqa: BLE001 - a window never fails over a path
+            return str(self.service.settings.get("download_dir"))
+
+    def _follow_the_name(self, filename: str, mime: str = "") -> None:
+        """Re-aim the folder when the name turns out to be something else.
+
+        Only while the box still holds what this window put there. Once
+        somebody has typed a folder or browsed to one, that is a decision, and
+        a better guess at the file's type is no reason to overrule it.
+        """
+        if not filename:
+            return
+        if self.folder_edit.text().strip() != self._suggested_folder:
+            return
+        self._suggested_folder = self._folder_for(filename, mime)
+        self.folder_edit.setText(self._suggested_folder)
+
     def _quality_text(self) -> str:
         quality = str(self.payload.get("quality") or "").strip()
         container = str(self.payload.get("container") or "").strip()
@@ -278,6 +311,8 @@ class BrowserDownloadDialog(QDialog):
         name = str(info.get("filename") or "")
         if name and not self.filename_edit.isModified():
             self.filename_edit.setText(name)
+        self._follow_the_name(name or self.filename_edit.text(),
+                              str(info.get("mime") or ""))
 
     def _on_probe_failed(self, message: str) -> None:
         self.info_label.setText(
@@ -292,6 +327,7 @@ class BrowserDownloadDialog(QDialog):
         name = str(download.get("filename") or "")
         if name:
             self.filename_edit.setText(name)
+            self._follow_the_name(name)
         self.filename_edit.setEnabled(True)
         # Not `total_size`: a transfer that has not started has none, and this
         # window opens before anything is fetched — which is why every YouTube

@@ -5114,6 +5114,28 @@ def test_the_windows_source_bundle_is_complete() -> None:
               not missing, str(missing))
 
 
+def _preprocessed_installer(text: str) -> str:
+    """What `makensis` makes of this script, or "" where it is not installed.
+
+    The script is written out and compiled here rather than read from
+    `dist/installer.nsi`: that file only exists after a Windows build, so a
+    check that depended on it failed on a Linux tree for the wrong reason —
+    "makensis produced no preprocessed output", when what was missing was the
+    input.
+    """
+    if not shutil.which("makensis"):
+        return ""
+    with tempfile.TemporaryDirectory(prefix="ixd-nsi-") as folder:
+        script = Path(folder) / "installer.nsi"
+        script.write_text(text, encoding="utf-8")
+        try:
+            done = subprocess.run(["makensis", "-PPO", str(script)],
+                                  capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return done.stdout
+
+
 def test_the_windows_installer_script_is_one_that_could_run() -> None:
     """The installer is written here and compiled somewhere else.
 
@@ -5186,6 +5208,32 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
           '"UninstallString"' in script and "WriteUninstaller" in script)
     check("the uninstaller closes the application first",
           "taskkill" in script and script.index("taskkill") < script.index('RMDir /r "$INSTDIR"'))
+
+    # And so does the *installer*, which is the half that was missing. An
+    # in-app update starts this while the application is still shutting down,
+    # and NSIS reached the first locked file first: "ixd is running … hit
+    # retry". Compiled rather than read, per §3.42 — the instructions below
+    # come out of `makensis -PPO`, so a comment mentioning taskkill cannot
+    # stand in for the instruction.
+    compiled = _preprocessed_installer(script)
+    if compiled:
+        install = compiled.split('Section "Install"', 1)[-1].split("SectionEnd", 1)[0]
+        kills = [line for line in install.splitlines() if "taskkill" in line]
+        writes = [i for i, line in enumerate(install.splitlines())
+                  if line.startswith("File ")]
+        killed_at = [i for i, line in enumerate(install.splitlines())
+                     if "taskkill" in line]
+        check("the installer closes a running copy too", len(kills) == 2,
+              str(kills))
+        check("politely before it insists",
+              kills[0].strip().endswith("'") and "/F" not in kills[0]
+              and "/F" in kills[1], str(kills))
+        check("and before it writes a single file",
+              killed_at and writes and max(killed_at) < min(writes),
+              f"kills at {killed_at}, writes at {writes}")
+    elif shutil.which("makensis"):
+        check("the installer script compiles", False,
+              "makensis produced no preprocessed output")
     check("and takes its shortcuts and registry keys with it",
           'Delete "$DESKTOP' in script and "DeleteRegKey" in script)
     check("MultiUser is initialised on both sides, or the uninstaller "
@@ -5449,7 +5497,9 @@ def inspect():
     said.append(f"URL_SHOWN {dialog.url_edit.text()}")
     said.append(f"URL_READONLY {dialog.url_edit.isReadOnly()}")
     said.append(f"NAME_SHOWN {dialog.filename_edit.text()}")
-    said.append(f"FOLDER_DEFAULT {dialog.folder_edit.text() == str(out)}")
+    # The category folder, not the root: a `.zip` belongs in Compressed when
+    # that setting is on, and this window is what sends the folder now.
+    said.append(f"FOLDER_DEFAULT {dialog.folder_edit.text() == str(out / 'Compressed')}")
     said.append("MENU " + "|".join(a.text() for a in dialog.later_menu.actions()))
 
     dialog.folder_edit.setText(str(elsewhere))
@@ -5510,7 +5560,7 @@ shutil.rmtree(root, ignore_errors=True)
     check("and refuses to let it be edited", "URL_READONLY True" in output, detail)
     check("the name the browser had is already in it",
           "NAME_SHOWN big.zip" in output, detail)
-    check("the folder starts at the one in Settings",
+    check("the folder starts at the category folder under the one in Settings",
           "FOLDER_DEFAULT True" in output, detail)
     check("“Download later” lists every queue",
           "Main Queue" in output.split("MENU", 1)[-1].splitlines()[0]
@@ -5959,6 +6009,117 @@ shutil.rmtree(root, ignore_errors=True)
     check("the order of the list is the order they start in",
           "ORDER True" in output, detail)
     check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
+
+
+def test_a_second_hand_over_gets_its_own_place_and_folder() -> None:
+    """Two reports from one session, both about this window.
+
+    *"when i start a download from a site and then on same site i click on
+    another file … first one download window show and when i start and click on
+    next one it didnt show until i click on main app window then i saw the 2
+    download window shown."* — both were open the whole time. The second was
+    centred on exactly the same pixels as the first, behind it, because a
+    background application cannot take focus from the browser on Windows. They
+    cascade now.
+
+    *"i download .exe file but the download window didnt put default path for
+    program folder which is for exe files"* — the window sends whatever is in
+    its folder box, and the engine only sorts a download whose folder it was
+    left to choose. So every hand-over landed in the root of the download
+    folder, which is not where the same file went before this window existed.
+    The box shows the category folder now, and follows the name when the server
+    turns out to call the file something else.
+    """
+    print("\n[a second hand-over gets its own place and folder]")
+    script = '''
+import sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-second-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+
+app = QApplication(sys.argv[:1]); apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+settings.set("categorize_into_subfolders", True)
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+window.hide()
+
+def hand_over(name):
+    window.confirm_browser_download({
+        "url": f"https://example.invalid/{name}", "filename": name})
+    app.processEvents()
+    return next(d for d in window._browser_dialogs
+                if d.filename_edit.text() == name)
+
+first = hand_over("setup.exe")
+second = hand_over("album.mp3")
+print("BOTH_OPEN", len(window._browser_dialogs))
+print("BOTH_VISIBLE", first.isVisible() and second.isVisible())
+print("NOT_STACKED", first.pos() != second.pos(), first.pos(), second.pos())
+
+# The category folder, per file type, which is the second report.
+print("EXE_FOLDER", first.folder_edit.text())
+print("MP3_FOLDER", second.folder_edit.text())
+print("EXE_IS_PROGRAMS", first.folder_edit.text() == str(out / "Programs"))
+print("MP3_IS_AUDIO", second.folder_edit.text() == str(out / "Audio"))
+
+# And it follows the name when the server names the file something else.
+first._follow_the_name("installer.zip")
+print("FOLLOWS", first.folder_edit.text() == str(out / "Compressed"))
+
+# …but never over a folder somebody chose.
+chosen = str(root / "somewhere else")
+second.folder_edit.setText(chosen)
+second._follow_the_name("clip.mp4")
+print("KEEPS_A_CHOICE", second.folder_edit.text() == chosen)
+
+# What actually reaches the engine.
+first.folder_edit.setText(str(out / "Programs"))
+first._queue_it(queue_id=None, start=False)
+row = [d for d in service.list_downloads() if d.filename.endswith(".exe")][0]
+print("STORED", row.dest_dir == str(out / "Programs"), row.dest_dir)
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-second-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("a second hand-over opens its own window", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-700:] or "") + (process.stderr[-400:] or "")
+    check("two hand-overs are two windows", "BOTH_OPEN 2" in output, detail)
+    check("and both are on screen", "BOTH_VISIBLE True" in output, detail)
+    check("not one exactly behind the other", "NOT_STACKED True" in output, detail)
+    check("an .exe is offered the Programs folder",
+          "EXE_IS_PROGRAMS True" in output, detail)
+    check("an .mp3 the Audio folder", "MP3_IS_AUDIO True" in output, detail)
+    check("and the folder follows a corrected filename",
+          "FOLLOWS True" in output, detail)
+    check("but never overrules a folder somebody chose",
+          "KEEPS_A_CHOICE True" in output, detail)
+    check("what the window shows is what the download gets",
+          "STORED True" in output, detail)
 
 
 def test_clicking_the_finished_notification_shows_the_file() -> None:
@@ -6772,6 +6933,7 @@ def main() -> int:
                  test_an_installed_build_can_update_itself,
                  test_the_toolbar_never_loses_its_buttons,
                  test_clicking_the_finished_notification_shows_the_file,
+                 test_a_second_hand_over_gets_its_own_place_and_folder,
                  test_starting_one_download_by_hand_beats_a_paused_queue,
                  test_a_stream_says_how_big_it_is_before_it_starts,
                  test_the_window_comes_forward_when_the_browser_asks,
