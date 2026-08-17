@@ -5961,6 +5961,156 @@ shutil.rmtree(root, ignore_errors=True)
     check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
 
 
+def test_an_installed_build_can_update_itself() -> None:
+    """Reported against 1.0.16, installed from `setup.exe`: *"i cannot update
+    the app and it says this build installed from a package … the download and
+    install button gone and only open the repo."*
+
+    Two causes, both here.
+
+    **The installer packed a build with no marker in it.** `build.py` wrote
+    `update-channel.json` only into the *self-updating archive*, and the
+    installer packed `dist/ixd` as it stood — so every installed copy answered
+    "installed from a package". This machine could not see it: the portable
+    build it produces has a marker, and Windows is the only platform with an
+    installer at all.
+
+    **And writability was required of every kind.** An all-users install lives
+    in Program Files precisely because the account running the application
+    cannot write there. The installer elevates; it does not need the running
+    process to have write access, and demanding it would have kept that half of
+    installed users stuck even with a marker.
+
+    The route itself is Windows-only and cannot be run here. What is checked is
+    every decision in front of it: which kind, which asset, and that the
+    portable rules did not move.
+    """
+    print("\n[an installed build can update itself]")
+    import json as _json
+    from ixd import updates
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-selfupd-"))
+    previous_frozen = getattr(sys, "frozen", None)
+    previous_exe = sys.executable
+    previous_platform = sys.platform
+    try:
+        installed = root / "Program Files" / "IXD"
+        installed.mkdir(parents=True)
+        (installed / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        sys.frozen = True
+        sys.executable = str(installed / "ixd")
+
+        # -- what the installer now packs ------------------------------
+        (installed / "update-channel.json").write_text(_json.dumps({
+            "self_update": True, "kind": "installer",
+            "asset": "windows-x64-setup.exe", "version": "1.0.16",
+        }), encoding="utf-8")
+        check("an installed build says it can update itself",
+              updates.self_update_kind() == "installer",
+              repr(updates.self_update_kind()))
+
+        # The case that would otherwise still be stuck: Program Files.
+        installed.chmod(0o500)
+        try:
+            check("even when it cannot write to its own folder",
+                  updates.self_update_kind() == "installer",
+                  repr(updates.self_update_kind()))
+        finally:
+            installed.chmod(0o700)
+
+        # -- and it asks for the installer, not an archive -------------
+        # Keywords: `Release` takes name and notes before assets, and passing
+        # them positionally built a release with no assets at all — which every
+        # check below then agreed about, for the wrong reason.
+        release = updates.Release(version="1.0.17", assets=[
+            {"name": "ixd-1.0.17-windows-x64-setup.exe", "size": 50,
+             "browser_download_url": "https://example.invalid/setup.exe"},
+            {"name": "ixd-1.0.17-windows-x64-selfupdate.zip", "size": 52,
+             "browser_download_url": "https://example.invalid/zip"},
+            {"name": "ixd-linux-x86_64-selfupdate.tar.gz", "size": 83,
+             "browser_download_url": "https://example.invalid/tgz"},
+        ])
+        chosen = updates.choose_asset(release)
+        check("and takes the installer the release publishes",
+              chosen is not None
+              and str(chosen.get("name")).endswith("windows-x64-setup.exe"),
+              str(chosen))
+
+        # -- a portable build is untouched by any of this --------------
+        portable = root / "portable" / "ixd"
+        portable.mkdir(parents=True)
+        (portable / "ixd").write_text("#!/bin/sh\n", encoding="utf-8")
+        sys.executable = str(portable / "ixd")
+        (portable / "update-channel.json").write_text(_json.dumps({
+            "self_update": True, "kind": "portable",
+            "asset": "linux-x86_64-selfupdate.tar.gz", "version": "1.0.16",
+        }), encoding="utf-8")
+        check("a portable build still calls itself portable",
+              updates.self_update_kind() == "portable",
+              repr(updates.self_update_kind()))
+        check("and still takes its archive",
+              str((updates.choose_asset(release) or {}).get("name", ""))
+              .endswith("selfupdate.tar.gz"),
+              str(updates.choose_asset(release)))
+
+        # …and a portable build in a folder it cannot write to still refuses,
+        # because there it really would fail half way through a swap.
+        portable.chmod(0o500)
+        try:
+            check("a portable build in a read-only folder still refuses",
+                  updates.self_update_kind() == "",
+                  repr(updates.self_update_kind()))
+        finally:
+            portable.chmod(0o700)
+
+        # -- an unmarked build is still a package ----------------------
+        (portable / "update-channel.json").unlink()
+        check("a build with no marker is left to its package manager",
+              updates.self_update_kind() == "", repr(updates.self_update_kind()))
+
+        check("running an installer is refused where it is not the route",
+              _refuses_installer(updates, root))
+    finally:
+        if previous_frozen is None:
+            del sys.frozen
+        else:
+            sys.frozen = previous_frozen
+        sys.executable = previous_exe
+        shutil.rmtree(root, ignore_errors=True)
+
+    # And what the build actually stages for the installer to pack.
+    marker = _installer_marker()
+    check("the build stages an installed-build marker for the installer",
+          marker.get("kind") == "installer" and marker.get("self_update") is True,
+          str(marker))
+    check("whose asset name carries no version number",
+          "1.0" not in str(marker.get("asset")), str(marker.get("asset")))
+
+
+def _refuses_installer(updates, root: Path) -> bool:
+    """`run_installer` says so rather than silently doing nothing off Windows."""
+    fake = root / "setup.exe"
+    fake.write_text("", encoding="utf-8")
+    try:
+        updates.run_installer(fake)
+    except OSError:
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _installer_marker() -> dict:
+    """Read what `build.py` would put beside an installed launcher."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_ixd_build", Path(__file__).resolve().parents[1] / "packaging" / "build.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return dict(module.INSTALLED_MARKER)
+
+
 def test_the_guide_is_shown_once_and_can_be_opened_again() -> None:
     """Once on a first run, then only when it is asked for.
 
@@ -6220,9 +6370,19 @@ def test_starting_one_download_by_hand_beats_a_paused_queue() -> None:
           not engine._has_free_slot(service.db.get_download(wanted.id)))
 
     # "Resume all" is the same instruction about everything.
+    #
+    # Asserted on the exemption itself rather than only on `_has_free_slot`,
+    # which also answers for the *machine* — how many transfers are running,
+    # and what the concurrency limit was left at earlier in this test. That
+    # made it fail once in four runs and pass the other three, and a check that
+    # is right most of the time is worse than one that measures less.
+    settings.set("max_concurrent_downloads", 4)
+    engine._tasks.clear()
     service.resume_all()
     check("“Resume all” releases what the paused queue was holding",
-          engine._has_free_slot(service.db.get_download(rest.id)))
+          rest.id in engine._started_by_hand
+          and engine._has_free_slot(service.db.get_download(rest.id)),
+          f"exempt={rest.id in engine._started_by_hand}")
 
     service.shutdown()
     shutil.rmtree(root, ignore_errors=True)
@@ -6364,6 +6524,7 @@ def main() -> int:
                  test_a_stream_chosen_in_the_panel_asks_too,
                  test_the_guide_names_the_folder_this_install_actually_uses,
                  test_the_guide_is_shown_once_and_can_be_opened_again,
+                 test_an_installed_build_can_update_itself,
                  test_starting_one_download_by_hand_beats_a_paused_queue,
                  test_a_stream_says_how_big_it_is_before_it_starts,
                  test_the_window_comes_forward_when_the_browser_asks,

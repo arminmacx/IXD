@@ -116,6 +116,9 @@ class UpdateDialog(QDialog):
         self.subheading.setText(
             f"You are running {__version__}."
             + ("" if not version else
+               "  This build was installed, so the new installer is downloaded "
+               "and run — it upgrades in place and keeps your shortcuts."
+               if kind == "installer" else
                "  This build can install it for you."
                if kind else
                "  This build was installed from a package, so the new version "
@@ -183,10 +186,15 @@ class UpdateDialog(QDialog):
             QMessageBox.information(self, "Update", "There is nothing newer.")
             return
 
+        by_installer = updates.self_update_kind() == "installer"
         confirmed = QMessageBox.question(
             self, "Install the update",
-            f"Version {release.version} will be downloaded and this "
-            "application will restart into it.\n\nDownloads in progress are "
+            (f"Version {release.version} will be downloaded and its installer "
+             "will open — click through it as you did the first time.\n\n"
+             if by_installer else
+             f"Version {release.version} will be downloaded and this "
+             "application will restart into it.\n\n")
+            + "Downloads in progress are "
             "paused and resume afterwards. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -225,6 +233,10 @@ class UpdateDialog(QDialog):
         # what is about to happen, for the second or two it takes.
         self.heading.setText(f"Version {detail} is ready")
         self.subheading.setText(
+            "Closing now — the installer is opening, and it needs this copy "
+            "closed before it can replace the files. Remember to reload the "
+            "extension in your browser afterwards."
+            if updates.self_update_kind() == "installer" else
             "Closing now — the updater replaces this version and starts it "
             "again by itself. Remember to reload the extension in your "
             "browser afterwards."

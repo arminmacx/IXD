@@ -640,6 +640,43 @@ def build_macos_pkg(app_bundle: Path) -> Path | None:
     return target
 
 
+#: What an *installed* copy records about itself. It is not the portable
+#: marker: there is no folder for it to swap, and the update it wants is the
+#: next `setup.exe` — which keeps the uninstaller, the Add/Remove Programs
+#: version and the shortcuts correct, and is the only route that can write into
+#: an all-users install at all.
+INSTALLED_MARKER = {
+    "self_update": True,
+    "kind": "installer",
+    # No version in it, for the reason SELF_UPDATE_PATTERNS records below.
+    "asset": "windows-x64-setup.exe",
+}
+
+
+def _installer_payload(binary_dir: Path) -> Path:
+    """A copy of the build that knows it was installed.
+
+    The installer used to pack `binary_dir` as it stood, which carries **no
+    marker at all** — so every copy installed from `setup.exe` answered "this
+    build was installed from a package" and offered a link to the release page
+    instead of an update. Reported against 1.0.16 by the one person who could
+    see it: this machine builds Linux, and the portable build it produces has
+    a marker of its own.
+
+    A copy rather than the folder itself, because the same `binary_dir` is
+    packed into the plain `.zip` — which is deliberately *not* self-updating.
+    """
+    staging = DIST / "installer-payload"
+    shutil.rmtree(staging, ignore_errors=True)
+    payload = staging / binary_dir.name
+    shutil.copytree(binary_dir, payload, symlinks=True)
+    (payload / "update-channel.json").write_text(
+        json.dumps({**INSTALLED_MARKER, "version": VERSION}, indent=2) + "\n",
+        encoding="utf-8")
+    log("staged the payload with an installed-build marker")
+    return payload
+
+
 def build_windows_installer(binary_dir: Path) -> Path | None:
     """A real installer, when the machine has something to build one with.
 
@@ -650,8 +687,9 @@ def build_windows_installer(binary_dir: Path) -> Path | None:
     """
     section("Windows installer")
     output = DIST / f"ixd-{VERSION}-windows-x64-setup.exe"
+    payload = _installer_payload(binary_dir)
     script_path = DIST / "installer.nsi"
-    script_path.write_text(windows_installer_script(binary_dir, output),
+    script_path.write_text(windows_installer_script(payload, output),
                            encoding="utf-8")
     log(f"wrote {script_path.name}")
     if not have("makensis"):

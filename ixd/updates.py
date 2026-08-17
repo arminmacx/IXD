@@ -173,24 +173,44 @@ def marker() -> dict[str, Any]:
 
 
 def self_update_kind() -> str:
-    """``"portable"`` when this build may replace itself, else ``""``.
+    """How this build takes an update: ``"portable"``, ``"installer"``, or ``""``.
 
     A build says so itself, at build time. Guessing from the file layout was
     the alternative and it is not safe: an unpacked `.deb` looks exactly like
     a portable folder, and replacing `/opt/ixd` out from under the package
     manager leaves a machine whose next upgrade fails.
+
+    * **portable** — the build replaces its own folder. It must be able to
+      write to that folder, so that is checked.
+    * **installer** — the build was installed by `setup.exe`, and the update is
+      the *next* `setup.exe`, run the way the first one was. Writability is
+      deliberately **not** checked: an all-users install lives in Program Files
+      precisely because nobody running the application can write there, and the
+      installer elevates. Requiring it here is what left every installed copy
+      with no way to update at all — reported against 1.0.16, which said "this
+      build was installed from a package" and offered only a link.
+    * **""** — a package manager owns these files; leave them alone.
     """
     described = marker()
     if described.get("self_update") is not True:
         return ""
+    kind = str(described.get("kind") or "portable")
+    if kind == "installer":
+        return kind
     root = install_root()
     if root is None or not os.access(root, os.W_OK):
         return ""
-    return str(described.get("kind") or "portable")
+    return kind
 
 
 def platform_patterns() -> list[tuple[str, ...]]:
     """How this platform's self-updating archive is named, in order of fit."""
+    if self_update_kind() == "installer":
+        # An installed copy takes the installer, not an archive: it is what
+        # keeps the uninstaller, the Add/Remove Programs version and the
+        # shortcuts correct, and it is the only route that works when the
+        # install directory needs administrator to write to.
+        return [("windows", "setup", ".exe")]
     if sys.platform.startswith("win"):
         return [("windows", "selfupdate", ".zip"), ("windows", ".zip")]
     if sys.platform == "darwin":
@@ -388,6 +408,33 @@ def relaunch_into(staged: Path, target: Path, launcher: str = "") -> None:
                "--wait-for", str(os.getpid())]
     subprocess.Popen(command, cwd=str(staged), start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def run_installer(installer: Path) -> None:
+    """Start the downloaded installer and leave the rest to it.
+
+    The counterpart of :func:`relaunch_into` for a build that was installed
+    rather than extracted. There is no folder to swap and no staged copy to
+    hand over to: NSIS replaces the files, rewrites the registry version and
+    keeps the uninstaller correct, which a folder swap does none of.
+
+    It is started **detached**, because the application is about to quit and a
+    child of a dying process on Windows is not something to rely on. The
+    installer's own directory page opens on the path it finds in the registry,
+    so it upgrades in place rather than asking again.
+    """
+    installer = Path(installer).resolve()
+    if not installer.is_file():
+        raise FileNotFoundError(f"{installer} is not there to run")
+    if sys.platform.startswith("win"):
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: it must outlive us.
+        subprocess.Popen([str(installer)], cwd=str(installer.parent),
+                         creationflags=0x00000008 | 0x00000200,
+                         close_fds=True)
+        return
+    # Nothing else publishes an installer this path can run; kept honest rather
+    # than silently doing nothing.
+    raise OSError("running an installer is a Windows route")
 
 
 def apply(target: Path, wait_for: int = 0, timeout: float = 180.0,

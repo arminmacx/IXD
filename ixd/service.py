@@ -746,7 +746,8 @@ class DownloadService:
         is about to be replaced and should quit: the staged copy is already
         waiting for this process to end.
         """
-        if not updates.self_update_kind():
+        kind = updates.self_update_kind()
+        if not kind:
             return False, "this build installs from a package, not from itself"
         asset = updates.choose_asset(release)
         if asset is None:
@@ -758,6 +759,29 @@ class DownloadService:
         staging = updates.staging_root(Path(config.DATA_DIR) / "update")
         try:
             archive = updates.download(self.client(), asset, staging, progress)
+        except Exception as error:      # noqa: BLE001 - reported to the caller
+            self.db.log_event(f"Update download failed: {error}", level="warning")
+            return False, str(error)
+
+        # An installed copy is upgraded by the installer, not by a folder swap:
+        # it is what keeps the uninstaller, the Add/Remove Programs version and
+        # the shortcuts right, and it is the only route that can write into an
+        # all-users install at all.
+        if kind == "installer":
+            self.db.log_event(
+                f"Installing version {release.version} with "
+                f"{asset.get('name')} — the installer takes over from here, "
+                "and the browser extension is written out again on the next "
+                "start.")
+            try:
+                updates.run_installer(archive)
+            except Exception as error:  # noqa: BLE001
+                self.db.log_event(f"Could not start the installer: {error}",
+                                  level="warning")
+                return False, str(error)
+            return True, str(release.version)
+
+        try:
             unpacked = updates.stage(archive, staging / "unpacked")
         except Exception as error:      # noqa: BLE001 - reported to the caller
             self.db.log_event(f"Update download failed: {error}", level="warning")
