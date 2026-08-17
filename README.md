@@ -16,9 +16,10 @@ and no runtime dependency beyond Qt.
 [![Python](https://img.shields.io/badge/python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.11-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-555)](#installation)
-[![Tests](https://img.shields.io/badge/tests-1334%20offline%20assertions-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1417%20offline%20assertions-3fb950)](#testing)
 [![Dependencies](https://img.shields.io/badge/external%20binaries-none-3fb950)](#no-external-binaries)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Trademark](https://img.shields.io/badge/name%20%26%20logo-protected-8957e5)](TRADEMARK.md)
 
 <img src="docs/screenshot-main.png" width="880" alt="IXD main window">
 
@@ -400,3 +401,15 @@ The only runtime dependency is **PySide6**.
 
 [MIT](LICENSE) © 2026 IXD — use it, change it, ship it, commercially or
 otherwise; keep the copyright notice.
+
+The **name and the logo** are not covered by that licence, and a copyright
+licence never covers either. Fork the code freely; give your fork its own name.
+[TRADEMARK.md](TRADEMARK.md) says exactly what is allowed without asking —
+mirroring the official builds, writing about it, referring to it by name — and
+what needs permission.
+
+**It is free, and it stays free.** No ads, no account, no paid tier. Protecting
+the name is what keeps that promise meaning something.
+
+The application bundles **Qt** through PySide6 under the **LGPL v3**, which
+carries its own obligations for anyone distributing a build.
