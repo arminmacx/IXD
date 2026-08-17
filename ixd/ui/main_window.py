@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         #: The same windows, addressable by the token the IPC handler minted,
         #: so the answer that arrives seconds later reaches the right one.
         self._media_dialogs: dict[str, object] = {}
+        self._guide = None
 
         self.setWindowTitle(f"Internet Xtreme Downloader {__version__}")
         self.setWindowIcon(application_icon())
@@ -179,6 +180,15 @@ class MainWindow(QMainWindow):
         self.action_schedule = QAction("🕑  Scheduler", self)
         self.action_schedule.triggered.connect(self.open_scheduler)
         toolbar.addAction(self.action_schedule)
+
+        # The guide is shown once, on the first run, and then it is gone — so
+        # there has to be a way back to it. The extension folder is printed on
+        # it, and that is the thing people come looking for weeks later.
+        self.action_guide = QAction("?  Guide", self)
+        self.action_guide.setToolTip(
+            "How to load the extension, use the panel, and start a download")
+        self.action_guide.triggered.connect(lambda _=False: self.open_guide())
+        toolbar.addAction(self.action_guide)
 
         self.action_settings = QAction("⚙  Settings", self)
         self.action_settings.triggered.connect(self.open_settings)
@@ -622,6 +632,35 @@ class MainWindow(QMainWindow):
         if dialog is not None:
             dialog.media_delegated()
         self.refresh()
+
+    def open_guide(self, first_run: bool = False) -> None:
+        """The illustrated guide — once on the first run, then on request.
+
+        `first_run` is what decides whether closing it writes the preference:
+        the tick that keeps it coming back belongs to the automatic showing,
+        not to somebody who opened it deliberately from the toolbar.
+        """
+        from .widgets.guide_dialog import GuideDialog
+
+        # In the Log, because "the guide never appeared" is otherwise a report
+        # with nothing behind it — and because it is the one window whose whole
+        # job is to be seen exactly once.
+        self.service.db.log_event(
+            "Showing the guide" + (" — first run" if first_run else ""))
+        dialog = GuideDialog(self.service, self._palette, self,
+                             first_run=first_run)
+        self._guide = dialog          # shown, not executed; held so it lives
+        dialog.finished.connect(lambda _result: setattr(self, "_guide", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def maybe_open_guide(self) -> bool:
+        """Open it if this is a first run. True when it was shown."""
+        if not self.service.settings.get_bool("show_guide", True):
+            return False
+        self.open_guide(first_run=True)
+        return True
 
     def open_log(self) -> None:
         from .widgets.log_dialog import LogDialog

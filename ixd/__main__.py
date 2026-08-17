@@ -412,6 +412,13 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
         # as a flicker rather than as a start.
         splash.finish(window if window.isVisible() else None)
 
+    # The guide, once, on a first run with a window to put it over. Never on a
+    # hidden start: the browser launched that, nobody is looking at the screen,
+    # and a window nobody asked for arriving on top of what they *are* doing is
+    # the worst possible introduction.
+    if window.isVisible():
+        _on_the_window(window, window.maybe_open_guide)
+
     def cleanup() -> None:
         if server is not None:
             server.stop()

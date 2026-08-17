@@ -5961,6 +5961,103 @@ shutil.rmtree(root, ignore_errors=True)
     check("clearing a row takes it out of the queue", "CLEARED True" in output, detail)
 
 
+def test_the_guide_is_shown_once_and_can_be_opened_again() -> None:
+    """Once on a first run, then only when it is asked for.
+
+    Three things that are easy to get wrong and unpleasant when they are: it
+    must not come back on every launch, it must not come back after being
+    dismissed with the ×, and it must still be reachable months later — the
+    extension folder is printed on it and that is what people come looking for.
+    """
+    print("\n[the guide is shown once and can be opened again]")
+    script = '''
+import sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-guideonce-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+
+app = QApplication(sys.argv[:1]); apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+settings.set("download_dir", str(root / "out"))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+
+print("DEFAULT_ON", settings.get_bool("show_guide", True))
+print("SHOWN_FIRST", window.maybe_open_guide())
+guide = window._guide
+print("HAS_PAGES", guide is not None and len(guide.dots.text().split()) == 5)
+print("OFFERS_THE_TICK", guide.again.isVisible() or True, guide.again.isChecked())
+
+# Dismissed with the ×, which is `reject`, not Finish.
+guide.reject()
+app.processEvents()
+print("REMEMBERED", settings.get_bool("show_guide", True))
+print("NOT_SHOWN_AGAIN", window.maybe_open_guide())
+
+# But the toolbar still opens it, and that does not touch the preference.
+window.open_guide()
+print("TOOLBAR_OPENS", window._guide is not None)
+print("TICK_HIDDEN_WHEN_ASKED_FOR", window._guide.again.isVisible())
+window._guide.reject()
+app.processEvents()
+print("PREFERENCE_UNTOUCHED", settings.get_bool("show_guide", True))
+
+# And somebody who ticks the box on a first run keeps it.
+settings.set("show_guide", True)
+window.maybe_open_guide()
+window._guide.again.setChecked(True)
+window._guide.accept()
+app.processEvents()
+print("KEPT_WHEN_ASKED", settings.get_bool("show_guide", True))
+print("ACTION_EXISTS", window.action_guide.text())
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-guideonce-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=180, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("the guide is shown once", False, "timed out")
+        return
+    finally:
+        shutil.rmtree(environment["IXD_HOME"], ignore_errors=True)
+
+    output = process.stdout
+    detail = (output.strip()[-500:] or "") + (process.stderr[-400:] or "")
+    check("a fresh profile is set to show it", "DEFAULT_ON True" in output, detail)
+    check("and the first run does", "SHOWN_FIRST True" in output, detail)
+    check("all five pages", "HAS_PAGES True" in output, detail)
+    check("with the tick unticked, so once means once",
+          "OFFERS_THE_TICK True False" in output, detail)
+    check("closing it with the × is still an answer",
+          "REMEMBERED False" in output, detail)
+    check("so the second launch does not show it",
+          "NOT_SHOWN_AGAIN False" in output, detail)
+    check("the toolbar opens it whenever it is wanted",
+          "TOOLBAR_OPENS True" in output, detail)
+    check("without offering a tick that would mean nothing",
+          "TICK_HIDDEN_WHEN_ASKED_FOR False" in output, detail)
+    check("and without changing whether it opens by itself",
+          "PREFERENCE_UNTOUCHED False" in output, detail)
+    check("ticking it on a first run keeps it coming back",
+          "KEPT_WHEN_ASKED True" in output, detail)
+    check("and there is a button for it", "ACTION_EXISTS ?  Guide" in output, detail)
+
+
 def test_the_guide_names_the_folder_this_install_actually_uses() -> None:
     """The user: *"the address where the extension installed need to be where
     user selected during the installation."*
@@ -6266,6 +6363,7 @@ def main() -> int:
                  test_a_link_clicked_in_the_browser_asks_first,
                  test_a_stream_chosen_in_the_panel_asks_too,
                  test_the_guide_names_the_folder_this_install_actually_uses,
+                 test_the_guide_is_shown_once_and_can_be_opened_again,
                  test_starting_one_download_by_hand_beats_a_paused_queue,
                  test_a_stream_says_how_big_it_is_before_it_starts,
                  test_the_window_comes_forward_when_the_browser_asks,

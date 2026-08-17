@@ -193,6 +193,8 @@ def draw_firefox(p: QPainter, palette: Palette, paths: dict) -> None:
         "Choose “This Firefox” on the left",
         "Click “Load Temporary Add-on…” and pick manifest.json",
     ]
+    # Debugging is the route until the extension is signed, and saying which
+    # step is temporary is better than a note that reads like an apology.
     y = inner.top() + 16
     for index, step in enumerate(steps):
         _numbered(p, 46, y, index + 1, accent)
@@ -203,8 +205,9 @@ def draw_firefox(p: QPainter, palette: Palette, paths: dict) -> None:
     # Kept inside the frame: the note ran past its bottom edge at the first
     # spacing, which reads as a drawing that does not fit its own box.
     note = QRect(46, y + 2, ART_W - 92, 34)
-    _text(p, note, "Firefox forgets a temporary add-on when it closes — that is "
-                   "Firefox's rule for unsigned extensions, not ours.",
+    _text(p, note, "This is the debugging route, and it lasts until Firefox "
+                   "closes — its rule for an add-on that is not signed yet. "
+                   "Load it again the same way, or use Chrome or Edge.",
           QColor(palette.text_dim), _font(12), wrap=True)
 
     _folder_strip(p, palette, paths, "firefox")
@@ -376,11 +379,15 @@ class GuideDialog(QDialog):
     """The whole guide: a drawing, a caption, and a way through."""
 
     def __init__(self, service: "DownloadService", palette: Palette = DARK,
-                 parent=None) -> None:
+                 parent=None, *, first_run: bool = False) -> None:
         super().__init__(parent)
         self.service = service
         self._palette = palette
         self._index = 0
+        #: Shown by start-up rather than asked for. Only then does closing it
+        #: write the preference — a person who opened it from the toolbar has
+        #: not said anything about whether they want it again.
+        self._first_run = first_run
 
         self.setWindowTitle("Getting started")
         self.setWindowFlag(Qt.WindowType.Window, True)
@@ -408,6 +415,7 @@ class GuideDialog(QDialog):
 
         row = QHBoxLayout()
         self.again = QCheckBox("Show this next time too")
+        self.again.setVisible(first_run)
         row.addWidget(self.again)
         row.addStretch(1)
         self.copy_button = QPushButton("Copy the folder")
@@ -422,7 +430,15 @@ class GuideDialog(QDialog):
             row.addWidget(button)
         layout.addLayout(row)
 
+        # Written when it closes, however it closes. Doing it on "Finish" alone
+        # meant the window dismissed with the × came back on every launch for
+        # ever, which is the behaviour people uninstall over.
+        if first_run:
+            self.finished.connect(self._remember)
         self._render()
+
+    def _remember(self, _result: int = 0) -> None:
+        self.service.settings.set("show_guide", self.again.isChecked())
 
     # ------------------------------------------------------------------
     def _render(self) -> None:
@@ -443,8 +459,7 @@ class GuideDialog(QDialog):
         if target < 0:
             return
         if target >= len(PAGES):
-            self.service.settings.set("show_guide", self.again.isChecked())
-            self.accept()
+            self.accept()      # `finished` carries the preference; see above
             return
         self._index = target
         self._render()

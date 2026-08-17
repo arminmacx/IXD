@@ -200,6 +200,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # folder it is going to, and start / start later / cancel. Off queues it
     # straight away, which is what every version before this one did.
     "confirm_browser_downloads": True,
+    # The illustrated guide, shown once on the first run and then only from the
+    # toolbar. It is switched off by the guide itself when it is closed, so a
+    # fresh profile sees it exactly once.
+    "show_guide": True,
     "intercept_min_size": 0,
     "intercept_extensions": [],         # empty = every extension the extension offers
     "ignored_hosts": ["localhost", "127.0.0.1"],
