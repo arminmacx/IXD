@@ -147,9 +147,9 @@ version appears.
 
 | Platform | Installer | Portable |
 |---|---|---|
-| Windows | `ixd-1.0.21-windows-x64-setup.exe` | `ixd-1.0.21-windows-x64.zip` → extract, run `ixd.exe` |
-| macOS (Apple silicon) | `ixd-1.0.21-macos-arm64.pkg`, or the `.dmg` | `ixd-macos-arm64.zip` |
-| Debian / Ubuntu | `ixd_1.0.21_amd64.deb` → `sudo dpkg -i ixd_1.0.21_amd64.deb` | `ixd-linux-x86_64.tar.gz` → extract, run `ixd/ixd` |
+| Windows | `ixd-1.0.22-windows-x64-setup.exe` | `ixd-1.0.22-windows-x64.zip` → extract, run `ixd.exe` |
+| macOS (Apple silicon) | `ixd-1.0.22-macos-arm64.pkg`, or the `.dmg` | `ixd-macos-arm64.zip` |
+| Debian / Ubuntu | `ixd_1.0.22_amd64.deb` → `sudo dpkg -i ixd_1.0.22_amd64.deb` | `ixd-linux-x86_64.tar.gz` → extract, run `ixd/ixd` |
 
 The **Windows installer asks who it is for**: *everyone* needs administrator
 and installs to `Program Files`; *just me* needs nothing and installs to
@@ -300,7 +300,7 @@ can also be driven directly:
 
 | Host | Produces |
 |---|---|
-| Linux | `dist/ixd/`, `ixd_1.0.21_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
+| Linux | `dist/ixd/`, `ixd_1.0.22_amd64.deb`, AppDir (`.AppImage` with `appimagetool`) |
 | macOS | `Internet Xtreme Downloader.app`, `.dmg` via `hdiutil` |
 | Windows | `dist/ixd/`, `.zip`, multi-resolution `.ico` |
 

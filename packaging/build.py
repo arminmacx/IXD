@@ -519,6 +519,29 @@ ShowUninstDetails show
 ; extension folder therefore sits inside the install where the browser can be
 ; pointed at it once and keep working across updates.
 Function OnInstallModeChanged
+  ; **A remembered installation wins.** MultiUser calls this whenever the mode
+  ; is set, including from MULTIUSER_INIT — which runs *after* it has read the
+  ; previous InstallDir out of the registry. Overwriting $INSTDIR here threw
+  ; that away on every run, so an upgrade never targeted the folder the user
+  ; actually installed into: it reset to this mode's default, and anybody who
+  ; had installed anywhere else was relocated by every update they took.
+  ;
+  ; SHCTX follows the mode, so this reads HKLM for an all-users install and
+  ; HKCU for a per-user one — the same place the Install section wrote it.
+  ClearErrors
+  ReadRegStr $0 SHCTX "Software\{app_slug}" "InstallDir"
+  ${{IfNot}} ${{Errors}}
+  ${{AndIf}} $0 != ""
+    StrCpy $INSTDIR "$0"
+    Return
+  ${{EndIf}}
+
+  ; No previous install in this mode: choose the default. All users goes to
+  ; Program Files, which needs administrator and which the person who *runs*
+  ; the application afterwards cannot write to — so the extension folder falls
+  ; back to their data directory, by design. Just me goes to %APPDATA%, which
+  ; is writable, needs no elevation, and keeps the extension folder inside the
+  ; install where the browser can be pointed at it once.
   ${{If}} $MultiUser.InstallMode == "AllUsers"
     StrCpy $INSTDIR "$PROGRAMFILES64\{app_slug}"
   ${{Else}}

@@ -2508,6 +2508,28 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
         finally:
             updates.install_root = original_root
 
+        # Two copies on one machine: one installed, one unpacked from the
+        # portable zip into Downloads. Each updates itself and the browser
+        # loads whichever it was pointed at, which is an application reporting
+        # one version beside an extension reporting another.
+        installed = root / "ProgramFiles" / "IXD"
+        installed.mkdir(parents=True, exist_ok=True)
+        portable = root / "Downloads" / "ixd"
+        portable.mkdir(parents=True, exist_ok=True)
+
+        check("nothing registered is not a clash",
+              updates.running_elsewhere("", portable) == "")
+        check("the registered copy running itself is not a clash",
+              updates.running_elsewhere(str(installed), installed) == "")
+        clash = updates.running_elsewhere(str(installed), portable)
+        check("a portable copy beside an installed one is named",
+              clash == str(installed.resolve()), clash)
+        check("and the registry read is separable from the comparison",
+              updates.registered_installation(reader=lambda: str(installed))
+              == str(installed))
+        check("with no registry at all it says nothing",
+              updates.registered_installation(reader=lambda: "") == "")
+
         # Installing by itself waits for the transfers to finish. An update
         # that replaces the application mid-download is an update that lost
         # somebody a file.
@@ -5783,8 +5805,8 @@ shutil.rmtree(root, ignore_errors=True)
     check("with its buttons held until there is something to start",
           "BUTTONS_WAIT False" in output, detail)
     check("saying so", "SAYS Reading the stream…" in output, detail)
-    check("showing what was asked for, as a request rather than a fact",
-          "SHOWS_QUALITY up to 1080p" in output, detail)
+    check("saying what it is doing rather than naming a quality it has not read",
+          "SHOWS_QUALITY Getting info from server" in output, detail)
     check("nothing is queued while it reads", "NOTHING_YET 0" in output, detail)
     check("the extension is told the application is asking",
           "REPLY_CONFIRMING True" in output, detail)

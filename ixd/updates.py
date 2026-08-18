@@ -172,6 +172,72 @@ def install_root() -> Path | None:
     return Path(sys.executable).resolve().parent
 
 
+#: Where the Windows installer records what it did. `build.py` writes
+#: ``WriteRegStr SHCTX "Software\\IXD" "InstallDir" "$INSTDIR"``, under HKLM
+#: for an all-users install and HKCU for a per-user one.
+INSTALL_KEY = r"Software\IXD"
+
+
+def registered_installation(reader: Any = None) -> str:
+    """Where an installer put this application, according to the registry.
+
+    Empty when nothing is registered — which is every platform but Windows,
+    and a Windows machine that has only ever run a portable copy.
+
+    `reader` exists so the comparison below can be tested on a machine with no
+    registry at all. Rule 8: this is Windows-only code, and Windows-only code
+    that cannot be exercised here is how two releases shipped a dead taskbar.
+    """
+    if reader is not None:
+        return str(reader() or "")
+    if not sys.platform.startswith("win"):
+        return ""
+    try:
+        import winreg      # noqa: PLC0415 - Windows only
+    except ImportError:
+        return ""
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, INSTALL_KEY) as key:
+                value, _ = winreg.QueryValueEx(key, "InstallDir")
+                if value:
+                    return str(value)
+        except OSError:
+            continue
+    return ""
+
+
+def running_elsewhere(registered: str, running: Path | None = None) -> str:
+    """The installed copy this process is *not*, or "" when there is no clash.
+
+    A person can end up with two of these: one put in `Program Files` by
+    `setup.exe`, and one unpacked from the portable zip — which extracts to a
+    folder called `ixd`, so it lands in `Downloads/ixd` and looks like an
+    update to the thing they installed. It is not. Each copy updates *itself*,
+    the browser is pointed at whichever one registered its extension folder
+    first, and the two then disagree about the version for ever.
+
+    Reported exactly that way: an application reporting 1.0.21 beside an
+    extension reporting 1.0.19, with the answer sitting in a folder nobody was
+    looking at.
+
+    Pure, and separate from the registry read above, so the comparison that
+    actually decides this is tested rather than trusted.
+    """
+    if not registered:
+        return ""
+    here = running or install_root()
+    if here is None:
+        return ""
+    try:
+        installed = Path(registered).resolve()
+        if installed == Path(here).resolve():
+            return ""
+    except OSError:
+        return ""
+    return str(installed)
+
+
 def marker() -> dict[str, Any]:
     """The build's own description of how it may be updated."""
     root = install_root()

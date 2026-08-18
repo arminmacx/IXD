@@ -253,21 +253,14 @@ class BrowserDownloadDialog(QDialog):
         is sent even for a video that has no such rendition. Shown plainly it
         reads as a statement of fact, and a 144p video said "1080p".
 
-        So until the engine has resolved the stream this says what was asked
-        for and marks it as an intention; `media_ready` replaces it with the
-        answer.
+        So until the engine has resolved the stream this says nothing about
+        quality at all — it says what it is doing. Naming the requested
+        quality here, even hedged as "up to 1080p", still puts a number in
+        front of somebody before anything has been read, and the number is
+        wrong as often as not. `media_ready` fills in the answer.
         """
         container = str(self.payload.get("container") or "").strip()
-        if resolved:
-            quality = resolved
-        else:
-            asked = str(self.payload.get("quality") or "").strip()
-            if asked:
-                quality = f"up to {asked} — reading the stream"
-            elif self.payload.get("format_id"):
-                quality = "the quality chosen in the page"
-            else:
-                quality = "best available"
+        quality = resolved or "Getting info from server…"
         parts = [quality]
         if container:
             parts.append(container.lstrip("."))

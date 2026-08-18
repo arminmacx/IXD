@@ -772,6 +772,14 @@ class DownloadService:
         # Next to the application for a portable build, so an update never
         # appears somewhere the user did not put the program.
         staging = updates.staging_root(Path(config.DATA_DIR) / "update", kind)
+        # Every decision this update makes, before it makes any of them. An
+        # update that goes somewhere unexpected is otherwise unanswerable
+        # after the fact — the application it replaced is gone, and so is
+        # whatever it was going to say.
+        self.db.log_event(
+            f"Update: taking a “{kind}” update. Running from "
+            f"{updates.install_root()}; staging in {staging}; "
+            f"asset {asset.get('name')}.")
         try:
             archive = updates.download(self.client(), asset, staging, progress)
         except Exception as error:      # noqa: BLE001 - reported to the caller
@@ -788,6 +796,11 @@ class DownloadService:
                 f"{asset.get('name')} — the installer takes over from here, "
                 "and the browser extension is written out again on the next "
                 "start.")
+            self.db.log_event(
+                f"Update: running {archive}. It installs into the folder "
+                "recorded in the registry by the install it is upgrading; if "
+                "that lands anywhere but where this copy is running from, say "
+                "so with this line and the next start-up's location.")
             try:
                 updates.run_installer(archive)
             except Exception as error:  # noqa: BLE001

@@ -171,6 +171,34 @@ def _register_browser_integration(service) -> None:
             # this: the fallback and the preferred path look identical from
             # outside, and a copy left over from an older version looks like a
             # copy this launch just wrote.
+            # Two copies of this application on one machine is the single
+            # most confusing state it can be in, and nothing used to say so.
+            # One in Program Files from `setup.exe`, one unpacked from the
+            # portable zip — which extracts to a folder called `ixd`, so it
+            # lands in `Downloads` and looks like an update to the installed
+            # one. It is not: each copy updates itself, and the browser keeps
+            # loading whichever registered its extension folder first. That is
+            # an application reporting 1.0.21 beside an extension reporting
+            # 1.0.19, with nothing anywhere admitting there were two.
+            from . import updates as _updates
+            try:
+                elsewhere = _updates.running_elsewhere(
+                    _updates.registered_installation())
+            except Exception:           # noqa: BLE001 - never block start-up
+                elsewhere = ""
+            if elsewhere:
+                service.db.log_event(
+                    f"There are two copies of this application on this "
+                    f"machine. This one is running from "
+                    f"{_updates.install_root()}, and an installed copy is "
+                    f"registered at {elsewhere}. They update separately, and "
+                    f"the browser loads the extension from whichever was "
+                    f"pointed at first — so a version mismatch between the "
+                    f"app and the extension means the browser is loading the "
+                    f"other one. Run the installer to update "
+                    f"{elsewhere}, or point the browser at the extension "
+                    f"folder named below.", level="warning")
+
             root = integration.extension_root()
             if root == integration.installation_dir():
                 service.db.log_event(
