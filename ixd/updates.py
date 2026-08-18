@@ -375,7 +375,24 @@ def check(client: Any, feed: str = DEFAULT_FEED, timeout: float = 20.0) -> Relea
 # ----------------------------------------------------------------------
 def download(client: Any, asset: dict[str, Any], into: Path,
              progress: Any = None) -> Path:
-    """Fetch a published file, and refuse one that is not the size it claimed."""
+    """Fetch a published file, and refuse one that is not the size it claimed.
+
+    **A part-downloaded update is picked up where it stopped, and a complete
+    one is not fetched again.** This is a download manager; asking somebody to
+    pull seventy megabytes a second time because their connection dropped is
+    not a good look, and the failure it recovers from is a real one — an update
+    that died mid-transfer used to leave the whole file behind and start over.
+
+    Three states, decided by what is already on disk:
+
+    * **the size the release published** — already here, nothing is fetched.
+    * **less than that** — asked for with a `Range` header and appended to. A
+      server that ignores the range answers `200` with the whole file, and that
+      is handled rather than assumed: the answer is written from the start
+      instead of glued onto the tail, which would corrupt it silently.
+    * **more than that, or no published size** — started again from nothing.
+      A file longer than the release says is not a prefix of anything.
+    """
     url = str(asset.get("browser_download_url") or "")
     if not _trusted_transport(url):
         raise ValueError("an update may only be fetched over https")
@@ -383,10 +400,28 @@ def download(client: Any, asset: dict[str, Any], into: Path,
     target = into / str(asset.get("name") or "update.bin")
     expected = int(asset.get("size") or 0)
 
-    written = 0
-    with client.request("GET", url,
-                        {"Accept": "application/octet-stream"}) as response:
-        with open(target, "wb") as handle:
+    have = target.stat().st_size if target.is_file() else 0
+    if expected and have == expected:
+        if progress is not None:
+            progress(have, expected)
+        return target
+    if not expected or have > expected:
+        have = 0
+
+    headers = {"Accept": "application/octet-stream"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+
+    with client.request("GET", url, headers) as response:
+        # 206 means the range was honoured and what follows continues the file.
+        # Anything else — a 200 from a server with no range support, a CDN that
+        # redirected past it — is the whole file again, and appending it to
+        # what is already there would produce a plausible, corrupt archive.
+        resuming = have > 0 and getattr(response, "status", 200) == 206
+        written = have if resuming else 0
+        with open(target, "r+b" if resuming else "wb") as handle:
+            if resuming:
+                handle.seek(have)
             while True:
                 block = response.read(256 * 1024)
                 if not block:
@@ -395,6 +430,7 @@ def download(client: Any, asset: dict[str, Any], into: Path,
                 written += len(block)
                 if progress is not None:
                     progress(written, expected)
+            handle.truncate()
 
     if expected and written != expected:
         target.unlink(missing_ok=True)
@@ -606,11 +642,32 @@ def run_installer(installer: Path, arguments: list[str] | None = None) -> None:
     if not installer.is_file():
         raise FileNotFoundError(f"{installer} is not there to run")
     if sys.platform.startswith("win"):
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: it must outlive us.
-        subprocess.Popen([str(installer), *(arguments or [])],
-                         cwd=str(installer.parent),
-                         creationflags=0x00000008 | 0x00000200,
-                         close_fds=True)
+        # **ShellExecute, not CreateProcess.** `subprocess.Popen` is
+        # CreateProcess, and CreateProcess cannot elevate: handed an
+        # executable whose manifest asks for administrator it fails outright
+        # with `[WinError 740] The requested operation requires elevation`,
+        # which is what an all-users install reported at the end of every
+        # download. Nothing was wrong with the download or the installer —
+        # there was no way to start it.
+        #
+        # ShellExecute is the call that raises the UAC prompt. The verb is
+        # left NULL so the installer's own manifest decides: an all-users
+        # install asks for permission, a per-user one does not, and neither is
+        # asserted here. It also detaches by nature, which is what the old
+        # creation flags were for — this process is about to quit.
+        import ctypes                      # noqa: PLC0415 - Windows only
+        parameters = subprocess.list2cmdline(arguments or [])
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None, None, str(installer), parameters or None,
+            str(installer.parent), 1)      # SW_SHOWNORMAL
+        # ShellExecute returns a value **greater than 32** on success. Anything
+        # else is an error code, and 5 is "the user said no to UAC" — worth
+        # reporting as itself rather than as a silent nothing.
+        code = int(result)
+        if code <= 32:
+            raise OSError(
+                f"the installer could not be started (ShellExecute {code})"
+                + (" — permission was declined" if code == 5 else ""))
         return
     # Nothing else publishes an installer this path can run; kept honest rather
     # than silently doing nothing.

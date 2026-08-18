@@ -74,7 +74,7 @@ Unicode true
 !include "LogicLib.nsh"
 !include "WinMessages.nsh"
 
-!define APP_VERSION "1.0.25"
+!define APP_VERSION "1.0.26"
 
 Name "Internet Xtreme Downloader"
 OutFile "..\..\XAI-notes\ixd-installer-preview.exe"

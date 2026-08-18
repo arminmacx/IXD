@@ -2508,6 +2508,96 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
         finally:
             updates.install_root = original_root
 
+        # A part-downloaded update is resumed, and a complete one is not
+        # fetched again. Asking somebody to pull seventy megabytes a second
+        # time because their connection dropped is not what a download manager
+        # should do, and an update dying mid-transfer is the reported case.
+        class FakeResponse:
+            def __init__(self, body, status=200):
+                self.body, self.status, self._at = body, status, 0
+            def read(self, n=-1):
+                block = self.body[self._at:self._at + (n if n > 0 else len(self.body))]
+                self._at += len(block)
+                return block
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        whole = bytes(range(256)) * 40          # 10,240 bytes
+        published = {"browser_download_url": "https://example.invalid/u.bin",
+                     "name": "u.bin", "size": len(whole)}
+
+        class FakeClient:
+            def __init__(self, ranged=True):
+                self.ranged, self.asked = ranged, []
+            def request(self, method, url, headers=None):
+                self.asked.append(dict(headers or {}))
+                rng = (headers or {}).get("Range")
+                if rng and self.ranged:
+                    start = int(rng.split("=")[1].split("-")[0])
+                    return FakeResponse(whole[start:], status=206)
+                return FakeResponse(whole, status=200)
+
+        area = root / "updl"
+        area.mkdir(parents=True, exist_ok=True)
+
+        # Nothing on disk: the whole file, and no Range asked for.
+        client = FakeClient()
+        got = updates.download(client, published, area)
+        check("a fresh update download asks for no range",
+              "Range" not in client.asked[0])
+        check("and lands complete", got.read_bytes() == whole)
+
+        # Already complete: not fetched again at all.
+        client = FakeClient()
+        updates.download(client, published, area)
+        check("a complete download is not fetched a second time",
+              client.asked == [], str(client.asked))
+
+        # Half there: resumed from the byte it stopped on.
+        (area / "u.bin").write_bytes(whole[:4096])
+        client = FakeClient()
+        got = updates.download(client, published, area)
+        check("a part-downloaded update asks to continue",
+              client.asked[0].get("Range") == "bytes=4096-",
+              str(client.asked))
+        check("and the finished file is byte-exact", got.read_bytes() == whole)
+
+        # Half there, but the server ignores the range and sends everything.
+        # Appending that to the tail would make a plausible, corrupt archive.
+        (area / "u.bin").write_bytes(whole[:4096])
+        client = FakeClient(ranged=False)
+        got = updates.download(client, published, area)
+        check("a server that ignores the range does not corrupt the file",
+              got.read_bytes() == whole, f"{len(got.read_bytes())} bytes")
+
+        # Longer than published: not a prefix of anything, so started over.
+        (area / "u.bin").write_bytes(whole + b"junk")
+        client = FakeClient()
+        got = updates.download(client, published, area)
+        check("a file longer than the release says is started again",
+              got.read_bytes() == whole and "Range" not in client.asked[0],
+              str(client.asked))
+
+        # An installer whose manifest asks for administrator cannot be started
+        # by CreateProcess at all — Popen fails with WinError 740 — so it goes
+        # through ShellExecute, which is the call that raises the UAC prompt.
+        # Asserted by reading the source, because there is no CreateProcess
+        # here to fail against: the point is that Popen is *not* the call.
+        import inspect
+        launcher = inspect.getsource(updates.run_installer)
+        windows_half = launcher.split('if sys.platform.startswith("win")')[1]
+        # Comments stripped: the one explaining *why* Popen is not used names
+        # it, and a check that reads prose is a check that fails on its own
+        # explanation.
+        code_only = "\n".join(
+            line.split("#")[0] for line in windows_half.splitlines())
+        check("the installer is started through ShellExecute",
+              "ShellExecuteW" in code_only, "")
+        check("and not through CreateProcess, which cannot elevate",
+              "subprocess.Popen" not in code_only, "")
+        check("a refusal is reported rather than swallowed",
+              "<= 32" in code_only and "raise OSError" in code_only, "")
+
         # What the downloaded setup.exe is told. A silent run shows no
         # install-mode page, so without the switch the installer picks a mode
         # itself — and picking the wrong one installs a second copy somewhere

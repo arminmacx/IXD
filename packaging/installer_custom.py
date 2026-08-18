@@ -126,6 +126,11 @@ ShowInstDetails show
 ; than being dragged with the button held.
 !define SC_DRAGMOVE 0xF012
 
+; Kept as a note rather than a constant, because the lesson outlives the code
+; that needed it: raw Win32 colour messages take a **COLORREF**, 0x00BBGGRR,
+; and not the RGB `SetCtlColors` accepts. C_ACCENT (0x5B8CFF) handed to
+; PBM_SETBARCOLOR paints 0xFF8C5B — an orange bar in a blue application.
+
 Var Dialog
 Var FontH1
 Var FontBody
@@ -543,29 +548,56 @@ Function PageInstallShow
   Call HideStockButtons
   FindWindow $0 "#32770" "" $HWNDPARENT
   SetCtlColors $0 ${C_TEXT} ${C_BG}
-  ; Inset to the content area, so the parent's panel colour shows down the
-  ; left and the window does not change shape between pages. Controls of ours
-  ; cannot be added here — nsDialogs has no dialog on this page — so this is
-  ; the colour block without the step list.
-  !insertmacro Place $0 ${PANEL_W} 0 470 ${WIN_H}
 
+  ; **The full window.** Insetting this to the content area was the first
+  ; attempt, on the theory that the parent's panel colour would show down the
+  ; left. What actually showed was the previous page's controls, in strips down
+  ; both edges — a dialog that no longer covers them does not repaint what it
+  ; uncovers. Controls of ours cannot be added to this page at all (nsDialogs
+  ; has no dialog here), so it does not get the panel; it gets a clean page and
+  ; it leaves on its own.
+  !insertmacro Place $0 0 0 ${WIN_W} ${WIN_H}
+
+  ; The details list and the button that reveals it: both gone. A wall of file
+  ; names is the grey wizard's idea of progress, not this one's.
+  GetDlgItem $1 $0 1000
+  ShowWindow $1 ${SW_HIDE}
   GetDlgItem $1 $0 1004
   ShowWindow $1 ${SW_HIDE}
+
+  ; The line that says what is being copied.
   GetDlgItem $1 $0 1006
-  SetCtlColors $1 ${C_TEXT} ${C_BG}
+  SetCtlColors $1 ${C_DIM} ${C_BG}
   !insertmacro Font $1 $FontBody
-  !insertmacro Place $1 34 168 402 20
+  !insertmacro Place $1 284 176 402 20
 
+  ; The bar keeps **Windows' own drawing**, and that is a decision rather than
+  ; a leftover.
+  ;
+  ; Two goes at recolouring it produced two bad screenshots. Stripping the
+  ; theme and setting PBM_SETBARCOLOR/PBM_SETBKCOLOR turns a themed bar into a
+  ; classic one, whose appearance then depends on colours passed as COLORREF
+  ; (0x00BBGGRR, not the RGB every other colour here is written in) and on when
+  ; it next repaints — and it came out black on the machine it runs on, twice,
+  ; against a script that reads correctly. There is no way to check that from
+  ; here.
+  ;
+  ; So it is left themed: a native bar on a dark page, which renders correctly
+  ; on every Windows there is. The sunken frame still goes, because that is an
+  ; ex-style and behaves the same everywhere. The custom pages are ours and
+  ; look it; this one is Windows' page and it is allowed to.
   GetDlgItem $2 $0 1016
-  System::Call 'uxtheme::SetWindowTheme(p $2, w " ", w " ")'
-  SendMessage $2 0x0409 0 ${C_ACCENT}      ; PBM_SETBARCOLOR
-  SendMessage $2 0x2001 0 ${C_SURFACE}     ; PBM_SETBKCOLOR
-  !insertmacro Place $2 34 150 402 8
-
-  GetDlgItem $3 $0 1000
-  SetCtlColors $3 ${C_FAINT} ${C_BG}
-  !insertmacro Font $3 $FontSmall
-  !insertmacro Place $3 34 226 402 140
+  System::Call 'user32::GetWindowLongW(p $2, i ${GWL_EXSTYLE}) i .r3'
+  IntOp $4 ${WS_EX_CLIENTEDGE} | ${WS_EX_WINDOWEDGE}
+  IntOp $4 $4 ~
+  IntOp $3 $3 & $4
+  System::Call 'user32::SetWindowLongW(p $2, i ${GWL_EXSTYLE}, i r3)'
+  IntOp $5 ${SWP_FRAMECHANGED} | ${SWP_NOMOVE}
+  IntOp $5 $5 | ${SWP_NOSIZE}
+  IntOp $5 $5 | ${SWP_NOZORDER}
+  System::Call 'user32::SetWindowPos(p $2, p 0, i 0, i 0, i 0, i 0, i r5)'
+  ; A little taller than a hairline, since it is drawn natively now.
+  !insertmacro Place $2 284 148 402 14
 FunctionEnd
 
 ; ---------------------------------------------------------------------------
@@ -670,6 +702,15 @@ Section "Install"
   ; for the same elevation reason as above.
   ${If} ${Silent}
     Exec '"$WINDIR\explorer.exe" "$INSTDIR\@LAUNCHER@"'
+  ${EndIf}
+
+  ; On to the last page by itself. There is no button on the install page —
+  ; ours cannot be put there and NSIS's are hidden — so without this the only
+  ; way forward was to find the invisible Next with Tab, which is exactly what
+  ; happened. Posted rather than sent: this runs inside the install, and the
+  ; page must not be torn down until that has returned to its message loop.
+  ${IfNot} ${Silent}
+    System::Call 'user32::PostMessageW(p $HWNDPARENT, i ${WM_COMMAND}, p 1, p 0)'
   ${EndIf}
 SectionEnd
 
