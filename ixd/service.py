@@ -580,6 +580,21 @@ class DownloadService:
             self.db.clear_events()
         else:
             self.db.prune_events(self.settings.get_int("log_lines_kept", 2000))
+        # What a finished update left behind. Age-gated, so an installer still
+        # running is never swept out from under itself; reported either way,
+        # because a sweep that only speaks when it finds something looks
+        # exactly like one that never ran.
+        try:
+            swept = updates.sweep_leftover_staging(
+                Path(config.DATA_DIR) / "update")
+            if swept:
+                self.db.log_event(
+                    "Removed update staging left by a finished update: "
+                    + ", ".join(swept))
+        except Exception as error:      # noqa: BLE001 - never fatal at launch
+            self.db.log_event(f"Could not sweep update staging: {error}",
+                              level="warning")
+
         self.engine.start()
         self.scheduler.start()
         self.events.subscribe(self._on_download_completed, EventType.DOWNLOAD_COMPLETED)
@@ -756,7 +771,7 @@ class DownloadService:
 
         # Next to the application for a portable build, so an update never
         # appears somewhere the user did not put the program.
-        staging = updates.staging_root(Path(config.DATA_DIR) / "update")
+        staging = updates.staging_root(Path(config.DATA_DIR) / "update", kind)
         try:
             archive = updates.download(self.client(), asset, staging, progress)
         except Exception as error:      # noqa: BLE001 - reported to the caller
@@ -1810,6 +1825,13 @@ class DownloadService:
             sabr_context={
                 **chosen.sabr,
                 "refresh": dict(chosen.refresh),
+                # What this download actually *is*, decided here where the
+                # format was picked. The browser sends a quality with every
+                # hand-over, but that is a request — `preferredQuality`, which
+                # is "1080p" until somebody changes it — and the file-info
+                # window was showing it as though it were a fact. A 144p video
+                # announced itself as 1080p.
+                "quality": self._quality_label(chosen),
                 # Where this session came from. A streaming endpoint is signed
                 # and expires within hours, so a download paused overnight
                 # resumes against a link the origin no longer honours — and
@@ -2230,6 +2252,24 @@ class DownloadService:
         """
         return sum(self._expected_size(row)
                    for row in self.mux_companions(download_id))
+
+    def resolved_quality(self, download_id: int) -> str:
+        """What was actually chosen for this download, or "" if unknown.
+
+        The counterpart to `expected_total`, and here for the same reason: the
+        file-info window opens before anything is fetched and had nothing to
+        show but the quality the browser asked for. A paired quality keeps the
+        label on its video half, so the companions are searched rather than
+        only the row that was asked about.
+        """
+        for row in self.mux_companions(download_id) or []:
+            label = str((row.sabr_context or {}).get("quality") or "").strip()
+            if label and label != "Audio only":
+                return label
+        download = self.db.get_download(download_id)
+        if download is None:
+            return ""
+        return str((download.sabr_context or {}).get("quality") or "").strip()
 
     def get_download(self, download_id: int) -> Download | None:
         download = self.db.get_download(download_id)

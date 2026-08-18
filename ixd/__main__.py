@@ -192,9 +192,25 @@ def _register_browser_integration(service) -> None:
             for label, path in (("Chrome", folder), ("Firefox", firefox)):
                 manifest = path / "manifest.json"
                 if manifest.is_file():
+                    # The version *in the folder*, which is the question a
+                    # field report actually asks: "the app says 1.0.20 and the
+                    # browser says 1.0.19". An unpacked extension is read when
+                    # the browser starts, so the two disagree until it is
+                    # reloaded — and without this line there is no way to tell
+                    # that apart from a folder that was never rewritten.
+                    try:
+                        import json as _json
+                        written = _json.loads(
+                            manifest.read_text(encoding="utf-8")
+                        ).get("version", "?")
+                    except (OSError, ValueError):
+                        written = "?"
                     service.db.log_event(
-                        f"{label} extension ready at {path} "
-                        f"(manifest.json, {manifest.stat().st_size} bytes)")
+                        f"{label} extension ready at {path} — version "
+                        f"{written} (manifest.json, "
+                        f"{manifest.stat().st_size} bytes). A browser reads an "
+                        "unpacked extension when it starts, so reload it from "
+                        "the extensions page if it still reports an older one.")
                 else:
                     service.db.log_event(
                         f"{label} extension at {path} has no manifest.json — "

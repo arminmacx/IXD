@@ -2466,6 +2466,48 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
             updates.install_root = original_root
             updates.self_update_kind = original_kind
 
+        # An installer build never stages beside the application. It cannot
+        # swap its own folder — the next setup.exe does that — so the only
+        # thing that would ever land there is the downloaded installer, and it
+        # landed in `C:\Program Files\IXD-update`: a folder the user never
+        # made, holding a hundred megabytes nothing cleaned up.
+        original_root = updates.install_root
+        try:
+            program_files = root / "ProgramFiles" / "IXD"
+            program_files.mkdir(parents=True, exist_ok=True)
+            updates.install_root = lambda: program_files
+            fallback = root / "data-update"
+
+            chosen = updates.staging_root(fallback, "installer")
+            check("an installer build stages in the data directory",
+                  chosen == fallback, str(chosen))
+            check("and never makes a folder beside the application",
+                  not (program_files.parent / "IXD-update").exists())
+
+            chosen = updates.staging_root(fallback, "portable")
+            check("a portable build still stages beside itself",
+                  chosen == program_files.parent / "IXD-update", str(chosen))
+
+            # And what the versions that got this wrong left behind goes.
+            beside = program_files.parent / "IXD-update"
+            stale = beside / "ixd-setup.exe"
+            stale.write_bytes(b"x" * 64)
+            old = time.time() - (updates.STAGING_KEEP_SECONDS + 120)
+            os.utime(stale, (old, old))
+            recent = fallback / "still-going.exe"
+            recent.parent.mkdir(parents=True, exist_ok=True)
+            recent.write_bytes(b"y")
+
+            swept = updates.sweep_leftover_staging(fallback)
+            check("a finished update's installer is swept up",
+                  not stale.exists(), str(stale))
+            check("and the empty folder beside the application goes with it",
+                  not beside.exists(), str(swept))
+            check("an update that may still be running is left alone",
+                  recent.exists())
+        finally:
+            updates.install_root = original_root
+
         # Installing by itself waits for the transfers to finish. An update
         # that replaces the application mid-download is an update that lost
         # somebody a file.
@@ -5630,9 +5672,13 @@ resolved = {"when": 0.0}
 def slow_add_media(url, format_id="", **kwargs):
     time.sleep(1.0)
     rows = []
+    # 144p, against a hand-over that asked for 1080p — the reported case. The
+    # engine records what it actually chose; the browser only ever sent a wish.
     for kind, name in (("video", "A Video.mp4"), ("audio", "A Video.m4a")):
         row = Download(url=f"{url}#{kind}", filename=name, dest_dir=str(out),
                        total_size=1048576 * (50 if kind == "video" else 5),
+                       sabr_context={"quality": "144p" if kind == "video"
+                                     else "Audio only"},
                        status=DownloadStatus.QUEUED)
         row.id = service.db.insert_download(row)
         rows.append(row)
@@ -5691,6 +5737,7 @@ def inspect():
     said.append(f"BUTTONS_LIVE {dialog.start_button.isEnabled()}")
     said.append(f"NAMED {dialog.filename_edit.text()}")
     said.append(f"SAYS_PAIR {'combined into one file' in dialog.info_label.text()}")
+    said.append(f"SHOWS_QUALITY_RESOLVED {dialog.quality_label.text()}")
     rows = service.list_downloads()
     said.append(f"ROWS {len(rows)} PAUSED "
                 f"{all(r.status is DownloadStatus.PAUSED for r in rows)}")
@@ -5736,13 +5783,15 @@ shutil.rmtree(root, ignore_errors=True)
     check("with its buttons held until there is something to start",
           "BUTTONS_WAIT False" in output, detail)
     check("saying so", "SAYS Reading the stream…" in output, detail)
-    check("and showing the quality that was clicked",
-          "SHOWS_QUALITY 1080p" in output, detail)
+    check("showing what was asked for, as a request rather than a fact",
+          "SHOWS_QUALITY up to 1080p" in output, detail)
     check("nothing is queued while it reads", "NOTHING_YET 0" in output, detail)
     check("the extension is told the application is asking",
           "REPLY_CONFIRMING True" in output, detail)
     check("the buttons come alive when the stream is resolved",
           "BUTTONS_LIVE True" in output, detail)
+    check("and replaced by what the engine actually chose",
+          "SHOWS_QUALITY_RESOLVED 144p" in output, detail)
     check("the engine's name for it is filled in",
           "NAMED A Video.mp4" in output, detail)
     check("a pair says it will become one file", "SAYS_PAIR True" in output, detail)

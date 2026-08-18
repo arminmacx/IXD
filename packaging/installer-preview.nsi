@@ -72,7 +72,7 @@ Unicode true
 !include "LogicLib.nsh"
 !include "WinMessages.nsh"
 
-!define APP_VERSION "1.0.20"
+!define APP_VERSION "1.0.21"
 
 Name "Internet Xtreme Downloader"
 OutFile "..\..\XAI-notes\ixd-installer-preview.exe"
@@ -125,6 +125,7 @@ XPStyle on
 !define SWP_NOZORDER     0x0004
 !define SWP_NOMOVE       0x0002
 !define SWP_NOSIZE       0x0001
+!define IXD_HWND_BOTTOM  1
 !ifndef SM_CXSCREEN
   !define SM_CXSCREEN 0
 !endif
@@ -151,6 +152,11 @@ Var CardUser
 Var CardAll
 Var CardUserDot
 Var CardAllDot
+Var CardUserTitle
+Var CardUserSub
+Var CardAllTitle
+Var CardAllSub
+Var FolderCard
 Var FolderText
 Var Step
 Var Tmp
@@ -389,11 +395,11 @@ Function PageWhere
 
   !insertmacro Fill $CardUserDot 306 141 16 16 16 ${C_ACCENT}
 
-  !insertmacro Label $0 "Just me" 332 130 340 20 $FontButton ${C_TEXT} ${C_CARD}
-  ${NSD_OnClick} $0 OnPickUser
-  !insertmacro Label $0 "No administrator needed  ·  %APPDATA%\IXD" \
+  !insertmacro Label $CardUserTitle "Just me" 332 130 340 20 $FontButton ${C_TEXT} ${C_CARD}
+  ${NSD_OnClick} $CardUserTitle OnPickUser
+  !insertmacro Label $CardUserSub "No administrator needed  ·  %APPDATA%\IXD" \
       332 151 340 18 $FontSmall ${C_DIM} ${C_CARD}
-  ${NSD_OnClick} $0 OnPickUser
+  ${NSD_OnClick} $CardUserSub OnPickUser
 
   ; Card two.
   !insertmacro Fill $CardAll 284 190 402 62 11 ${C_SURFACE}
@@ -401,20 +407,29 @@ Function PageWhere
 
   !insertmacro Fill $CardAllDot 306 213 16 16 16 ${C_FAINT}
 
-  !insertmacro Label $0 "Everyone on this PC" 332 202 340 20 $FontButton ${C_TEXT} ${C_SURFACE}
-  ${NSD_OnClick} $0 OnPickAll
-  !insertmacro Label $0 "Needs administrator  ·  Program Files" \
+  !insertmacro Label $CardAllTitle "Everyone on this PC" 332 202 340 20 $FontButton ${C_TEXT} ${C_SURFACE}
+  ${NSD_OnClick} $CardAllTitle OnPickAll
+  !insertmacro Label $CardAllSub "Needs administrator  ·  Program Files" \
       332 223 340 18 $FontSmall ${C_DIM} ${C_SURFACE}
-  ${NSD_OnClick} $0 OnPickAll
+  ${NSD_OnClick} $CardAllSub OnPickAll
 
   !insertmacro Label $0 "FOLDER" 284 274 200 16 $FontSmall ${C_DIM} ${C_BG}
 
-  ; The card *is* the border. The box itself is stripped of its frame and laid
-  ; inside it, which also centres the text vertically — an EDIT draws its line
-  ; at the top of whatever height it is given, so a 38px-tall box would have
-  ; the path sitting against its ceiling.
-  !insertmacro Fill $0 284 296 296 38 9 ${C_SURFACE}
-
+  ; The box first, its card afterwards, and the card pushed to the bottom of
+  ; the z-order **explicitly**.
+  ;
+  ; Three rounds went into that sentence. A label carries WS_EX_TRANSPARENT
+  ; (`nsDialogs.nsh:263`) and a transparent sibling paints *after* the windows
+  ; beneath it, so a filled label laid over the box hid it. Stripping the
+  ; ex-style did not help either: in this dialog the *earlier*-created control
+  ; is the one on top, so a card created first covers a box created second
+  ; whatever its ex-style says. Both observations fit, and both were guesses
+  ; about ordering — so the ordering is no longer guessed. `SetWindowPos` with
+  ; HWND_BOTTOM says where the card goes and nothing has to be inferred.
+  ;
+  ; The card exists so the box can be text-height: a single-line EDIT does
+  ; **not** centre its text vertically. It draws at the top of whatever height
+  ; it is given, which is why the path sat against the ceiling of a 38px box.
   ${NSD_CreateText} 0 0 10u 10u "$APPDATA\IXD"
   Pop $FolderText
   SetCtlColors $FolderText ${C_TEXT} ${C_SURFACE}
@@ -435,8 +450,16 @@ Function PageWhere
   IntOp $2 $2 | ${SWP_NOZORDER}
   System::Call 'user32::SetWindowPos(p $FolderText, p 0, i 0, i 0, i 0, i 0, i r2)'
 
+  ; Text height, centred inside the card by arithmetic rather than by hoping
+  ; the control does it: 296 + (38 - 18) / 2 = 306.
   SendMessage $FolderText ${EM_SETMARGINS} ${EC_BOTHMARGINS} 0x00040004
-  !insertmacro Place $FolderText 298 306 268 20
+  !insertmacro Place $FolderText 296 306 272 18
+
+  !insertmacro Fill $FolderCard 284 296 296 38 9 ${C_SURFACE}
+  ${NSD_RemoveExStyle} $FolderCard ${WS_EX_TRANSPARENT}
+  IntOp $0 ${SWP_NOMOVE} | ${SWP_NOSIZE}
+  System::Call 'user32::SetWindowPos(p $FolderCard, p ${IXD_HWND_BOTTOM}, \
+      i 0, i 0, i 0, i 0, i r0)'
 
   !insertmacro Pill $0 "Browse" 594 296 92 38 ${C_TEXT} ${C_SURFACE} OnBrowse
 
@@ -446,25 +469,47 @@ Function PageWhere
   nsDialogs::Show
 FunctionEnd
 
+; Both handlers repaint *everything* that belongs to a card. The labels sitting
+; on a card carry their own background, and only the card itself was being
+; swapped — so the chosen card changed colour and the words on it kept the old
+; one, which reads as the box changing colour when the mode changes.
 Function OnPickUser
   Pop $0
   StrCpy $Mode "user"
   SetCtlColors $CardUser ${C_TEXT} ${C_CARD}
+  SetCtlColors $CardUserTitle ${C_TEXT} ${C_CARD}
+  SetCtlColors $CardUserSub ${C_DIM} ${C_CARD}
   SetCtlColors $CardAll ${C_TEXT} ${C_SURFACE}
+  SetCtlColors $CardAllTitle ${C_TEXT} ${C_SURFACE}
+  SetCtlColors $CardAllSub ${C_DIM} ${C_SURFACE}
   SetCtlColors $CardUserDot ${C_ACCENT} ${C_ACCENT}
   SetCtlColors $CardAllDot ${C_FAINT} ${C_FAINT}
   ${NSD_SetText} $FolderText "$APPDATA\IXD"
-  Call Repaint
+  Call RestateFolder
 FunctionEnd
 
 Function OnPickAll
   Pop $0
   StrCpy $Mode "all"
   SetCtlColors $CardAll ${C_TEXT} ${C_CARD}
+  SetCtlColors $CardAllTitle ${C_TEXT} ${C_CARD}
+  SetCtlColors $CardAllSub ${C_DIM} ${C_CARD}
   SetCtlColors $CardUser ${C_TEXT} ${C_SURFACE}
+  SetCtlColors $CardUserTitle ${C_TEXT} ${C_SURFACE}
+  SetCtlColors $CardUserSub ${C_DIM} ${C_SURFACE}
   SetCtlColors $CardAllDot ${C_ACCENT} ${C_ACCENT}
   SetCtlColors $CardUserDot ${C_FAINT} ${C_FAINT}
   ${NSD_SetText} $FolderText "$PROGRAMFILES64\IXD"
+  Call RestateFolder
+FunctionEnd
+
+; The folder box belongs to neither card and must not follow either of them.
+; Said again on every change, and the caret dropped, because a box holding the
+; selection after a click reads as a third colour nobody chose.
+Function RestateFolder
+  SetCtlColors $FolderCard ${C_SURFACE} ${C_SURFACE}
+  SetCtlColors $FolderText ${C_TEXT} ${C_SURFACE}
+  SendMessage $FolderText ${EM_SETSEL} 0 0
   Call Repaint
 FunctionEnd
 

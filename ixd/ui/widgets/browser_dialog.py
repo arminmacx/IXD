@@ -245,12 +245,30 @@ class BrowserDownloadDialog(QDialog):
         self._suggested_folder = self._folder_for(filename, mime)
         self.folder_edit.setText(self._suggested_folder)
 
-    def _quality_text(self) -> str:
-        quality = str(self.payload.get("quality") or "").strip()
+    def _quality_text(self, resolved: str = "") -> str:
+        """What this download is, or — before it is known — what was asked for.
+
+        The browser sends a quality with every hand-over, but it is a *request*:
+        `preferredQuality`, which is "1080p" until somebody changes it, and it
+        is sent even for a video that has no such rendition. Shown plainly it
+        reads as a statement of fact, and a 144p video said "1080p".
+
+        So until the engine has resolved the stream this says what was asked
+        for and marks it as an intention; `media_ready` replaces it with the
+        answer.
+        """
         container = str(self.payload.get("container") or "").strip()
-        if self.payload.get("format_id") and not quality:
-            quality = "the quality chosen in the page"
-        parts = [quality or "best available"]
+        if resolved:
+            quality = resolved
+        else:
+            asked = str(self.payload.get("quality") or "").strip()
+            if asked:
+                quality = f"up to {asked} — reading the stream"
+            elif self.payload.get("format_id"):
+                quality = "the quality chosen in the page"
+            else:
+                quality = "best available"
+        parts = [quality]
         if container:
             parts.append(container.lstrip("."))
         return " · ".join(parts)
@@ -345,6 +363,13 @@ class BrowserDownloadDialog(QDialog):
             parts.append("video and audio, combined into one file when both "
                          "have arrived")
         self.info_label.setText(" · ".join(parts))
+        # The quality row has been showing what the browser asked for. Now
+        # there is an answer, so it says what was actually chosen.
+        if hasattr(self, "quality_label"):
+            resolved = (self.service.resolved_quality(self.download_id)
+                        if self.download_id else "")
+            if resolved:
+                self.quality_label.setText(self._quality_text(resolved))
         self.start_button.setEnabled(True)
         self.later_button.setEnabled(True)
         self.start_button.setFocus()

@@ -128,10 +128,10 @@ class Release:
 # ----------------------------------------------------------------------
 # what this build is
 # ----------------------------------------------------------------------
-def staging_root(fallback: Path) -> Path:
+def staging_root(fallback: Path, kind: str = "") -> Path:
     """Where an update is unpacked before it replaces anything.
 
-    Beside the application, when the application is portable. Somebody who
+    Beside the application, when the application is **portable**. Somebody who
     unpacks a portable build into a folder of their own does not expect its
     update to appear under `%APPDATA%\\IXD` — reported exactly that way — and
     a portable copy that leaves things elsewhere is not really portable.
@@ -139,7 +139,18 @@ def staging_root(fallback: Path) -> Path:
     The data directory remains the fallback, for an install whose own folder
     is not writable. That build cannot replace itself either, so nothing is
     unpacked there in practice.
+
+    **An installer build never stages beside the application.** It does not
+    swap its own folder — the next `setup.exe` does the work (§3.55) — so the
+    only thing that would ever land there is the downloaded installer, and it
+    landed in `C:\\Program Files\\IXD-update`: a folder the user never made,
+    beside the one they did, holding a hundred megabytes nothing cleans up.
+    Reported exactly that way. `kind` was not passed before, so writability
+    alone decided, and an elevated or loosely-permissioned Program Files
+    answered yes.
     """
+    if kind == "installer":
+        return fallback
     root = install_root()
     if root is not None:
         beside = root.parent / f"{root.name}-update"
@@ -393,16 +404,55 @@ def _sweep_old_staging(parent: Path, keep: str = "") -> None:
         return
     cutoff = time.time() - STAGING_KEEP_SECONDS
     for entry in entries:
-        if not entry.is_dir() or entry.name == keep:
+        if entry.name == keep:
             continue
-        if not entry.name.startswith("unpacked"):
+        # The unpacked folders *and* the archives they came from. Sweeping only
+        # the former left the downloaded installer — the single biggest file
+        # this application ever writes — sitting there for good.
+        if entry.is_dir() and not entry.name.startswith("unpacked"):
             continue
         try:
             if entry.stat().st_mtime > cutoff:
                 continue              # recent: something may be running in it
         except OSError:
             continue
-        shutil.rmtree(entry, ignore_errors=True)
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+
+
+def sweep_leftover_staging(fallback: Path) -> list[str]:
+    """Clear staging folders left behind by finished updates.
+
+    Two of them, because two versions made two messes: the data directory's,
+    and the `<name>-update` folder beside the application that every build up
+    to 1.0.20 created even when it was an installer build that could never use
+    it. Returns what it removed, so the log can say so.
+
+    Age-gated throughout, and for the same reason as everywhere else here: an
+    updater may still be running out of one of these, and taking its files away
+    underneath it is the failure this whole scheme exists to prevent.
+    """
+    removed: list[str] = []
+    roots = [fallback]
+    root = install_root()
+    if root is not None:
+        roots.append(root.parent / f"{root.name}-update")
+    for staging in roots:
+        if not staging.is_dir():
+            continue
+        _sweep_old_staging(staging)
+        try:
+            if not any(staging.iterdir()):
+                staging.rmdir()
+                removed.append(str(staging))
+        except OSError:
+            pass
+    return removed
 
 
 def _refuse_paths(names: Any) -> None:
