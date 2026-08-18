@@ -3063,6 +3063,13 @@ def test_a_queue_left_by_a_previous_session_does_not_start_itself() -> None:
     print("\n[36] a queue left by a previous session does not start itself")
     harness = Harness()
     try:
+        # End the previous session *first*. `Harness` starts an engine, and its
+        # supervisor pumps every second — writing queued rows underneath a live
+        # engine is a race, and CI lost it where this machine kept winning it
+        # ("1 of 3 started"). The scenario is a session that has finished, so
+        # the test has to stage it that way.
+        harness.engine.shutdown(wait=True, timeout=5)
+
         # Whatever the previous session left behind: three that never got a
         # slot, one the user had paused, one already finished.
         stale = [
@@ -3084,7 +3091,6 @@ def test_a_queue_left_by_a_previous_session_does_not_start_itself() -> None:
         # A fresh launch over that database.
         engine = DownloadEngine(harness.db, harness.settings, EventBus())
         engine.start()
-        harness.engine.shutdown(wait=True, timeout=5)
         harness.engine = engine
         time.sleep(2.0)
 
