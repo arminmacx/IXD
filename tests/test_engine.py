@@ -3050,6 +3050,70 @@ def test_the_pages_cookies_do_not_travel_to_a_media_cdn() -> None:
        "Cookie" in DownloadTask._request_headers(task2, same_site.url))
 
 
+def test_a_queue_left_by_a_previous_session_does_not_start_itself() -> None:
+    """Launching is not consent to run what was queued weeks ago.
+
+    The supervisor's pump reads the whole downloads table every second and
+    starts anything queued, and nothing cleared that status between runs. On a
+    machine where the application launches at login, signing in began every
+    download that had ever been left behind a concurrency limit.
+    """
+    from ixd.core.models import Download
+
+    print("\n[36] a queue left by a previous session does not start itself")
+    harness = Harness()
+    try:
+        # Whatever the previous session left behind: three that never got a
+        # slot, one the user had paused, one already finished.
+        stale = [
+            harness.db.insert_download(Download(
+                url=f"http://127.0.0.1:9/never-served-{n}.bin",
+                filename=f"stale-{n}.bin", status=DownloadStatus.QUEUED,
+            ))
+            for n in range(3)
+        ]
+        paused = harness.db.insert_download(Download(
+            url="http://127.0.0.1:9/parked.bin", filename="parked.bin",
+            status=DownloadStatus.PAUSED,
+        ))
+        done = harness.db.insert_download(Download(
+            url="http://127.0.0.1:9/finished.bin", filename="finished.bin",
+            status=DownloadStatus.COMPLETED,
+        ))
+
+        # A fresh launch over that database.
+        engine = DownloadEngine(harness.db, harness.settings, EventBus())
+        engine.start()
+        harness.engine.shutdown(wait=True, timeout=5)
+        harness.engine = engine
+        time.sleep(2.0)
+
+        started = [
+            i for i in stale
+            if harness.db.get_download(i).status is not DownloadStatus.PAUSED
+        ]
+        check("nothing queued starts itself on launch", not started,
+              f"{len(started)} of 3 started: {started}")
+        check("a queued download is parked, not lost",
+              all(harness.db.get_download(i).status is DownloadStatus.PAUSED
+                  for i in stale))
+        check("a paused download is left alone",
+              harness.db.get_download(paused).status is DownloadStatus.PAUSED)
+        check("a finished download is left alone",
+              harness.db.get_download(done).status is DownloadStatus.COMPLETED)
+
+        # And the part that must not regress: adding one now still runs it.
+        payload = make_payload(64 << 10)
+        with TestOrigin(payload) as origin:
+            fresh = engine.add_download(origin.url())
+            result = harness.wait_for(
+                fresh.id, {DownloadStatus.COMPLETED, DownloadStatus.ERROR}, timeout=30)
+            check("a download added in this session still starts",
+                  result.status is DownloadStatus.COMPLETED, str(result.error))
+    finally:
+        harness.close()
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — engine test suite")
@@ -3087,6 +3151,7 @@ def main() -> int:
         test_pausing_a_stalled_transfer_is_immediate,
         test_the_pages_cookies_do_not_travel_to_a_media_cdn,
         test_the_origins_own_name_beats_the_address,
+        test_a_queue_left_by_a_previous_session_does_not_start_itself,
     ):
         try:
             test()

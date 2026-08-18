@@ -671,6 +671,33 @@ class Database:
             )
             return cursor.rowcount or 0
 
+    def park_queued(self) -> int:
+        """A download queued in a previous session does not start itself.
+
+        `recover_interrupted` already refuses to resume a transfer that was
+        running when the process died: a restart resumes nothing on its own.
+        Queued rows were the hole in that. Nothing ever cleared them, and the
+        supervisor's pump reads the whole table every second and starts
+        anything it finds queued — so a download that never got a free slot
+        months ago was still sitting there, and the next launch started it.
+
+        On Windows, where the application launches at login, that is the whole
+        of a field report: sign in, and downloads nobody asked for that day
+        begin at once. They were added, once, and then left behind a
+        concurrency limit.
+
+        Parked, not lost — the same word the interrupted ones get. They are in
+        the list, at their byte count, waiting to be started.
+        """
+        with self._write_lock:
+            cursor = self.conn.execute(
+                "UPDATE downloads SET status=? WHERE status IN (?, ?)",
+                (DownloadStatus.PAUSED.value,
+                 DownloadStatus.QUEUED.value,
+                 DownloadStatus.SCHEDULED.value),
+            )
+            return cursor.rowcount or 0
+
     def vacuum(self) -> None:
         with self._write_lock:
             self.conn.execute("VACUUM")

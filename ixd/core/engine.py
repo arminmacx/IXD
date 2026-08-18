@@ -3402,6 +3402,15 @@ class DownloadEngine:
         recovered = self.db.recover_interrupted()
         if recovered:
             self.db.log_event(f"Recovered {recovered} interrupted download(s) after restart")
+        # And the ones that never got as far as running. Reported even when it
+        # is zero: a launch that parked nothing and a launch where this never
+        # ran look identical in a log otherwise, and that is how the defect
+        # survived — the pump started them a second later and the log only
+        # ever said "Started".
+        parked = self.db.park_queued()
+        self.db.log_event(
+            f"Parked {parked} download(s) left queued by a previous session"
+            if parked else "Nothing was left queued by a previous session")
         self._shutdown.clear()
         self._supervisor = threading.Thread(
             target=self._supervise, name="ixd-supervisor", daemon=True
