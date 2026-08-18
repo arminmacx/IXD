@@ -62,9 +62,11 @@
 ; wrong on Windows, check what nsDialogs created it with before changing a
 ; colour — the answer has been in `nsDialogs.nsh` all four times.
 ;
-; Known and deliberate: the window cannot be dragged. Making a borderless
-; window movable means answering `WM_NCHITTEST`, and NSIS gives no way to
-; subclass a window without a plugin — which rule 2 of this project forbids.
+; The window moves: grab the panel or the strip above the content. That note
+; used to say it could not be done, on the grounds that a borderless window
+; needs `WM_NCHITTEST` answered and NSIS cannot subclass a window without a
+; plugin. Both facts are true and the conclusion was wrong — Windows will move
+; a window on request, and asking is one `SendMessage`. See `SC_DRAGMOVE`.
 
 Unicode true
 
@@ -72,7 +74,7 @@ Unicode true
 !include "LogicLib.nsh"
 !include "WinMessages.nsh"
 
-!define APP_VERSION "1.0.24"
+!define APP_VERSION "1.0.25"
 
 Name "Internet Xtreme Downloader"
 OutFile "..\..\XAI-notes\ixd-installer-preview.exe"
@@ -141,6 +143,23 @@ XPStyle on
 ; Edit-control margins, for the folder box. `EM_SETMARGINS` is already in
 ; WinMessages.nsh (line 211); only the flag pair needs naming.
 !define EC_BOTHMARGINS 0x0003
+
+; SC_MOVE (0xF010) with HTCAPTION (2). Sent to a window, it puts Windows into
+; its own move loop — the way dragging a title bar does, except that it can be
+; started from anywhere.
+;
+; This is what makes a borderless window movable **without a plugin**. The
+; header of this file used to say it could not be done: answering WM_NCHITTEST
+; needs a window procedure, and NSIS has no way to subclass a window. True, and
+; beside the point — Windows will move a window on request, and asking is a
+; `SendMessage`. Reported as "the window is not moveable when i try to move it
+; from center of the screen", which is a fair thing to expect of a window.
+;
+; One honest difference from a title bar: a label reports its click on button
+; *up* (STN_CLICKED), so the move loop begins after the button is released.
+; The window then follows the mouse until the next click puts it down, rather
+; than being dragged with the button held.
+!define SC_DRAGMOVE 0xF012
 
 Var Dialog
 Var FontH1
@@ -295,9 +314,28 @@ Function OnClose
   SendMessage $HWNDPARENT ${WM_CLOSE} 0 0
 FunctionEnd
 
+; Grab anywhere on the panel or the strip above the content and the window
+; moves. Both are the parts with nothing else to click on, which is exactly
+; where somebody reaches for a window that has no title bar.
+Function DragWindow
+  Pop $0
+  SendMessage $HWNDPARENT ${WM_SYSCOMMAND} ${SC_DRAGMOVE} 0
+FunctionEnd
+
 ; The left-hand panel: the mark, the name, and where we are.
 Function BrandPanel
   !insertmacro Fill $0 0 0 ${PANEL_W} ${WIN_H} 0 ${C_PANEL}
+  ${NSD_OnClick} $0 DragWindow
+
+  ; A grab strip across the top of the content side, where a title bar would
+  ; be. Transparent to look at — it carries the background colour — and it is
+  ; created before everything else on this page so nothing it would cover has
+  ; been made yet.
+  ${NSD_CreateLabel} 0 0 10u 10u ""
+  Pop $0
+  SetCtlColors $0 ${C_BG} ${C_BG}
+  !insertmacro Place $0 ${PANEL_W} 0 470 34
+  ${NSD_OnClick} $0 DragWindow
 
   ${NSD_CreateBitmap} 0 0 10u 10u ""
   Pop $0

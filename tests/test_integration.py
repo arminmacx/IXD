@@ -5814,6 +5814,11 @@ def inspect():
     fired = []
     dialog.started.connect(lambda i: fired.append(i))
     said.append(f"START_IS_WIRED {window._open_window_for_started is not None}")
+    # No Qt parent: an owned window gets no taskbar button of its own on
+    # Windows and is hidden whenever its owner goes away, so clicking back to
+    # the browser took this window off the taskbar and it never came back.
+    said.append(f"UNPARENTED {dialog.parent() is None}")
+    said.append(f"IS_TOP_LEVEL {dialog.isWindow()}")
     dialog._download_later(queues[1].id)
     said.append(f"LATER_STARTS_NO_WINDOW {not fired}")
     said.append(f"NO_WINDOW_OPENED {len(DownloadWindow._open) == 0}")
@@ -5868,6 +5873,8 @@ shutil.rmtree(root, ignore_errors=True)
     check("a pair says it will become one file", "SAYS_PAIR True" in output, detail)
     check("Start is wired to open the download's own window",
           "START_IS_WIRED True" in output, detail)
+    check("the file-info window is its own, not owned by the main window",
+          "UNPARENTED True" in output and "IS_TOP_LEVEL True" in output, detail)
     check("and \u201cdownload later\u201d opens none",
           "LATER_STARTS_NO_WINDOW True" in output
           and "NO_WINDOW_OPENED True" in output, detail)

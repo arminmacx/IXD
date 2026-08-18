@@ -714,6 +714,16 @@ class MainWindow(QMainWindow):
         """
         from PySide6.QtWidgets import QApplication
 
+        # **No Qt parent**, which is why the constructors above pass None.
+        # A parented dialog is an *owned* window: Windows gives it no taskbar
+        # button of its own and hides it whenever its owner goes away — so
+        # clicking back to the browser took this window off the taskbar, and
+        # returning to the application brought back the main window without it.
+        # Reported exactly that way. `DownloadWindow.show_for` learned this
+        # first and passes `parent=None`; this window did not.
+        #
+        # The Python reference in `self._browser_dialogs` is what keeps it
+        # alive now that Qt is not holding one.
         dialog.adjustSize()
         screen = (dialog.screen() or QApplication.primaryScreen())
         if screen is not None:
@@ -752,7 +762,7 @@ class MainWindow(QMainWindow):
             "Asking where to put "
             f"{payload.get('filename') or payload.get('url') or 'a download'}")
 
-        dialog = BrowserDownloadDialog(self.service, self, payload)
+        dialog = BrowserDownloadDialog(self.service, None, payload)
         self._browser_dialogs.add(dialog)
         dialog.finished.connect(
             lambda _result, d=dialog: self._browser_dialogs.discard(d))
@@ -786,7 +796,7 @@ class MainWindow(QMainWindow):
         self.service.db.log_event(
             f"Asking about “{payload.get('title') or payload.get('url')}” — "
             "reading the stream")
-        dialog = BrowserDownloadDialog(self.service, self, payload, media=True)
+        dialog = BrowserDownloadDialog(self.service, None, payload, media=True)
         self._browser_dialogs.add(dialog)
         self._media_dialogs[token] = dialog
         dialog.finished.connect(

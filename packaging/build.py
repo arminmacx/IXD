@@ -764,6 +764,49 @@ def build_windows_installer(binary_dir: Path) -> Path | None:
     return output
 
 
+def build_windows_custom_installer(payload: Path) -> Path | None:
+    """The custom-window installer, published **beside** the MUI2 one.
+
+    The user asked for it to be built and shipped as an extra so they can test
+    it before it replaces anything: *"before push it for later release instead
+    of old installer let me test it then when i told you you can replace the
+    old one with the custom one."*
+
+    Its name deliberately avoids the word *setup*. `Release.asset()` returns
+    the first published file whose name contains every piece it is given, and
+    an updating build asks for `("windows", "setup", ".exe")` — a second
+    installer matching that could be handed to a machine as its update
+    depending only on the order GitHub lists assets in.
+    """
+    from installer_custom import script as custom_script
+
+    section("Windows installer (custom window)")
+    output = DIST / f"ixd-{VERSION}-windows-x64-custom-installer.exe"
+    script_path = DIST / "installer-custom.nsi"
+    script_path.write_text(custom_script(
+        app_name=BUNDLE_NAME,
+        app_slug="IXD",
+        version=VERSION,
+        publisher="IXD",
+        output=str(output),
+        payload=str(payload),
+        launcher="ixd.exe",
+        icon=str(ROOT / "packaging" / "icons" / "ixd.ico"),
+        art=str(ROOT / "packaging" / "installer-art"),
+        uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
+                       r"\Uninstall\IXD"),
+    ), encoding="utf-8")
+    log(f"wrote {script_path.name}")
+    if not have("makensis"):
+        log("makensis is not installed here, so it is not compiled")
+        return None
+    if run(["makensis", "-V2", str(script_path)]) != 0:
+        log("makensis refused the custom script; nothing was produced")
+        return None
+    log(f"wrote {output.name} ({output.stat().st_size / 1048576:.1f} MB)")
+    return output
+
+
 # ----------------------------------------------------------------------
 # the build that can replace itself
 # ----------------------------------------------------------------------
@@ -846,6 +889,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build Internet Xtreme Downloader")
     parser.add_argument("--package", action="store_true",
                         help="also produce a distributable package for this OS")
+    parser.add_argument("--custom-installer", action="store_true",
+                        help="only build the custom-window Windows installer "
+                             "(not built by a normal run, and not published)")
     parser.add_argument("--extension", action="store_true",
                         help="only build the browser extension archives")
     parser.add_argument("--icons", action="store_true", help="only regenerate icons")
@@ -863,6 +909,12 @@ def main() -> int:
         build_icons()
         return 0
 
+    if arguments.custom_installer:
+        # Deliberately not part of any normal run and matching no upload glob:
+        # it is built when it is asked for, tested by hand, and published only
+        # when the user says so.
+        build_windows_custom_installer(DIST / "ixd")
+        return 0
     if arguments.extension:
         package_extension()
         return 0
