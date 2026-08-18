@@ -6573,7 +6573,13 @@ window._guide.again.setChecked(True)
 window._guide.accept()
 app.processEvents()
 print("KEPT_WHEN_ASKED", settings.get_bool("show_guide", True))
-print("ACTION_EXISTS", window.action_guide.text())
+# Not the label: §436's toolbar sheds words before it sheds buttons, so this
+# action reads "?  Guide" in a roomy window and "?" in a cramped one. Both are
+# the button existing, which is what this check is named for — asserting the
+# long form made CI red from the moment the ladder shipped, on a headless
+# screen narrow enough to reach the compact rung.
+print("ACTION_EXISTS", window.action_guide in window.toolbar.actions(),
+      window.action_guide.text().strip() in ("?", "?  Guide"))
 service.db.close()
 shutil.rmtree(root, ignore_errors=True)
 '''
@@ -6611,7 +6617,7 @@ shutil.rmtree(root, ignore_errors=True)
           "PREFERENCE_UNTOUCHED False" in output, detail)
     check("ticking it on a first run keeps it coming back",
           "KEPT_WHEN_ASKED True" in output, detail)
-    check("and there is a button for it", "ACTION_EXISTS ?  Guide" in output, detail)
+    check("and there is a button for it", "ACTION_EXISTS True True" in output, detail)
 
 
 def test_the_guide_names_the_folder_this_install_actually_uses() -> None:
