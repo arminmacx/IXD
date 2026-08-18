@@ -17,12 +17,62 @@
 ;
 ; The window is built by hand rather than by MUI2, which is the whole point:
 ; MUI2 draws the grey wizard everybody recognises.
+;
+; ---------------------------------------------------------------------------
+; What the first run on Windows found, and what it cost
+; ---------------------------------------------------------------------------
+;
+; The first build of this compiled cleanly and was unusable. The screenshot is
+; worth more than the description: every control this file *drew* was perfect —
+; the cards, the radio dots, the headings, the step list, the close cross — and
+; every control it asked **Windows** for was wrong. That split is the whole
+; lesson, and it is why the rule below exists.
+;
+;   **A label is the only control here that takes our colours.** `SetCtlColors`
+;   works by answering `WM_CTLCOLOR*`, and a push button ignores the brush it
+;   is handed and paints its own face. The Browse button asked for the dark
+;   surface colour and Windows drew it stock white, in the middle of a dark
+;   window. So every button on these pages is a `${NSD_CreateLabel}` with
+;   `SS_CENTER|SS_CENTERIMAGE` and a rounded region — nsDialogs gives every
+;   label `SS_NOTIFY`, so it reports its own clicks and needs nothing else.
+;
+; Three more, each of which showed up as "it just does not work":
+;
+;   * **NSIS's own Next and Cancel never appeared.** They belong to
+;     `$HWNDPARENT`, and the page dialog is sized over the whole window, so
+;     they sat underneath it. Raising them by z-order was the previous attempt
+;     and it did not hold. They are hidden outright now and the flow is driven
+;     by posting `WM_COMMAND` to the parent, which is the same thing clicking
+;     them would have done. The one button a user could find by hunting was
+;     Cancel — so the report was "the next button quits".
+;
+;   * **The folder box's sunken 3D frame is an ex-style, not a theme.**
+;     `nsDialogs.nsh` gives every text box `WS_EX_WINDOWEDGE|WS_EX_CLIENTEDGE`
+;     (line 307), which `SetWindowTheme` cannot touch — that is a non-client
+;     frame, drawn before the theme is consulted. It has to come off with
+;     `SetWindowLong` and a `SWP_FRAMECHANGED`, and the box then sits inside a
+;     rounded card that supplies the border we actually wanted.
+;
+;   * **A 15pt heading does not fit in a 20px label.** The name in the panel
+;     was clipped through the middle of its descenders and the two lines ran
+;     into each other. Segoe UI at 15pt needs about 26px of line box.
+;
+; The rule those four share: **anything Windows draws for itself has to be
+; taken apart before it will match this design.** When a control here looks
+; wrong on Windows, check what nsDialogs created it with before changing a
+; colour — the answer has been in `nsDialogs.nsh` all four times.
+;
+; Known and deliberate: the window cannot be dragged. Making a borderless
+; window movable means answering `WM_NCHITTEST`, and NSIS gives no way to
+; subclass a window without a plugin — which rule 2 of this project forbids.
 
 Unicode true
 
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
 !include "WinMessages.nsh"
+
+!define APP_VERSION "1.0.19"
 
 Name "Internet Xtreme Downloader"
 OutFile "..\..\XAI-notes\ixd-installer-preview.exe"
@@ -31,7 +81,6 @@ Caption "Internet Xtreme Downloader"
 BrandingText " "
 Icon "icons\ixd.ico"
 XPStyle on
-ShowInstDetails show
 
 ; ---------------------------------------------------------------------------
 ; The window
@@ -56,24 +105,41 @@ ShowInstDetails show
 
 ; Win32 constants used through System.dll. Named, because a bare 0x00CF0000 in
 ; the middle of a script is a number nobody can check.
-; `WinMessages.nsh` already defines some of these, so each is guarded: a
-; redefinition is a hard error, and which ones that header carries has changed
-; between NSIS versions.
+; `WinMessages.nsh` and `nsDialogs.nsh` already define some of these, so each
+; is guarded: a redefinition is a hard error, and which ones those headers
+; carry has changed between NSIS versions.
 !ifndef GWL_STYLE
   !define GWL_STYLE -16
+!endif
+!ifndef GWL_EXSTYLE
+  !define GWL_EXSTYLE -20
+!endif
+!ifndef WS_EX_WINDOWEDGE
+  !define WS_EX_WINDOWEDGE 0x00000100
+!endif
+!ifndef WS_EX_CLIENTEDGE
+  !define WS_EX_CLIENTEDGE 0x00000200
 !endif
 !define WS_CHROME      0x00CF0000   ; caption|sysmenu|thickframe|min|max
 !define SWP_FRAMECHANGED 0x0020
 !define SWP_NOZORDER     0x0004
 !define SWP_NOMOVE       0x0002
 !define SWP_NOSIZE       0x0001
-!define IXD_HWND_TOP     0
 !ifndef SM_CXSCREEN
   !define SM_CXSCREEN 0
 !endif
 !ifndef SM_CYSCREEN
   !define SM_CYSCREEN 1
 !endif
+
+; SS_CENTER|SS_CENTERIMAGE, precomputed. `${NSD_AddStyle}` passes its argument
+; to `System::Int64Op`, which takes one number and not an expression — writing
+; `${SS_CENTER}|${SS_CENTERIMAGE}` there compiles and sets the wrong style.
+!define SS_BUTTONTEXT 0x00000201
+
+; Edit-control margins, for the folder box. `EM_SETMARGINS` is already in
+; WinMessages.nsh (line 211); only the flag pair needs naming.
+!define EC_BOTHMARGINS 0x0003
 
 Var Dialog
 Var FontH1
@@ -86,11 +152,13 @@ Var CardAll
 Var CardUserDot
 Var CardAllDot
 Var FolderText
-Var BtnNext
-Var BtnCancel
-Var BtnBack
 Var Step
 Var Tmp
+Var Fill              ; the progress bar's filled part
+Var FillWidth
+Var DetailText
+Var StartNow
+Var StartBox
 
 ; ---------------------------------------------------------------------------
 ; Helpers
@@ -125,6 +193,28 @@ Var Tmp
   !insertmacro Place ${var} ${x} ${y} ${w} ${h}
 !macroend
 
+; A filled rectangle — a card, a dot, a progress track. A label with no text.
+!macro Fill var x y w h radius colour
+  ${NSD_CreateLabel} 0 0 10u 10u ""
+  Pop ${var}
+  SetCtlColors ${var} ${colour} ${colour}
+  !insertmacro Place ${var} ${x} ${y} ${w} ${h}
+  !insertmacro RoundCorners ${var} ${w} ${h} ${radius}
+!macroend
+
+; A button. See the header: a real push button cannot be coloured, so this is
+; a label that centres its text both ways and reports its own clicks.
+!macro Pill var text x y w h fg bg onclick
+  ${NSD_CreateLabel} 0 0 10u 10u "${text}"
+  Pop ${var}
+  ${NSD_AddStyle} ${var} ${SS_BUTTONTEXT}
+  SetCtlColors ${var} ${fg} ${bg}
+  !insertmacro Font ${var} $FontButton
+  !insertmacro Place ${var} ${x} ${y} ${w} ${h}
+  !insertmacro RoundCorners ${var} ${w} ${h} 9
+  ${NSD_OnClick} ${var} ${onclick}
+!macroend
+
 Function .onGUIInit
   ; Strip the title bar and the resize frame, then size and centre what is
   ; left. NSIS gives no way to ask for a window like this, so it is asked of
@@ -149,7 +239,7 @@ Function .onGUIInit
 
   SetCtlColors $HWNDPARENT ${C_TEXT} ${C_BG}
 
-  ; The page area is the whole window; the buttons are raised over it below.
+  ; The page area is the whole window.
   GetDlgItem $0 $HWNDPARENT 1018
   !insertmacro Place $0 0 0 ${WIN_W} ${WIN_H}
 
@@ -164,52 +254,56 @@ Function .onGUIInit
   CreateFont $FontSmall  "Segoe UI" 9  400
   CreateFont $FontButton "Segoe UI" 10 600
 
-  ; The three buttons NSIS owns. They keep driving the page flow — synthesising
-  ; clicks would mean reimplementing it — and are moved, coloured and rounded
-  ; into the ones in the design.
-  GetDlgItem $BtnNext $HWNDPARENT 1
-  GetDlgItem $BtnCancel $HWNDPARENT 2
-  GetDlgItem $BtnBack $HWNDPARENT 3
-  ShowWindow $BtnBack ${SW_HIDE}
-
-  System::Call 'uxtheme::SetWindowTheme(p $BtnNext, w " ", w " ")'
-  System::Call 'uxtheme::SetWindowTheme(p $BtnCancel, w " ", w " ")'
-  SetCtlColors $BtnNext ${C_WHITE} ${C_ACCENT}
-  SetCtlColors $BtnCancel ${C_TEXT} ${C_SURFACE}
-  !insertmacro Font $BtnNext $FontButton
-  !insertmacro Font $BtnCancel $FontButton
-  !insertmacro Place $BtnNext 560 394 132 38
-  !insertmacro Place $BtnCancel 438 394 112 38
-  !insertmacro RoundCorners $BtnNext 132 38 9
-  !insertmacro RoundCorners $BtnCancel 112 38 9
+  Call HideStockButtons
 
   StrCpy $Mode "user"
   StrCpy $Step 0
+  StrCpy $StartNow 1
 FunctionEnd
 
-; Raise the buttons over the page dialog, which is created after them and
-; would otherwise cover them.
-Function RaiseButtons
-  IntOp $0 ${SWP_NOMOVE} | ${SWP_NOSIZE}
-  System::Call 'user32::SetWindowPos(p $BtnNext, p ${IXD_HWND_TOP}, i 0, i 0, i 0, i 0, i r0)'
-  System::Call 'user32::SetWindowPos(p $BtnCancel, p ${IXD_HWND_TOP}, i 0, i 0, i 0, i 0, i r0)'
+; NSIS's three buttons are never shown. Restyling them was the previous
+; attempt: they cannot take our colours, and they sit under a page dialog that
+; covers the window. The pills post `WM_COMMAND` to the parent instead, which
+; is exactly what clicking these would have sent.
+Function HideStockButtons
+  GetDlgItem $0 $HWNDPARENT 1
+  ShowWindow $0 ${SW_HIDE}
+  GetDlgItem $0 $HWNDPARENT 2
+  ShowWindow $0 ${SW_HIDE}
+  GetDlgItem $0 $HWNDPARENT 3
+  ShowWindow $0 ${SW_HIDE}
+FunctionEnd
+
+Function GoNext
+  Pop $0
+  SendMessage $HWNDPARENT ${WM_COMMAND} 1 0
+FunctionEnd
+
+Function GoCancel
+  Pop $0
+  SendMessage $HWNDPARENT ${WM_COMMAND} 2 0
+FunctionEnd
+
+Function OnClose
+  Pop $0
+  SendMessage $HWNDPARENT ${WM_CLOSE} 0 0
 FunctionEnd
 
 ; The left-hand panel: the mark, the name, and where we are.
 Function BrandPanel
-  ${NSD_CreateLabel} 0 0 10u 10u ""
-  Pop $0
-  SetCtlColors $0 ${C_TEXT} ${C_PANEL}
-  !insertmacro Place $0 0 0 ${PANEL_W} ${WIN_H}
+  !insertmacro Fill $0 0 0 ${PANEL_W} ${WIN_H} 0 ${C_PANEL}
 
   ${NSD_CreateBitmap} 0 0 10u 10u ""
   Pop $0
   ${NSD_SetImage} $0 "$PLUGINSDIR\mark.bmp" $1
   !insertmacro Place $0 28 34 40 40
 
-  !insertmacro Label $1 "Internet Xtreme" 28 86 200 20 $FontH1 ${C_TEXT} ${C_PANEL}
-  !insertmacro Label $1 "Downloader" 28 106 200 20 $FontH1 ${C_TEXT} ${C_PANEL}
-  !insertmacro Label $1 "Version 1.0.19" 28 132 200 16 $FontSmall ${C_FAINT} ${C_PANEL}
+  ; 26px boxes, 26px apart. At 15pt Segoe UI a 20px box cut the letters through
+  ; their descenders and the two lines collided — the first thing anyone
+  ; noticed in the screenshot.
+  !insertmacro Label $1 "Internet Xtreme" 28 84 200 26 $FontH1 ${C_TEXT} ${C_PANEL}
+  !insertmacro Label $1 "Downloader" 28 110 200 26 $FontH1 ${C_TEXT} ${C_PANEL}
+  !insertmacro Label $1 "Version ${APP_VERSION}" 28 144 200 18 $FontSmall ${C_FAINT} ${C_PANEL}
 
   StrCpy $2 0
   StrCpy $3 200
@@ -267,14 +361,11 @@ Function BrandPanel
   ; No `$` in front of it: NSIS reads `$x` as a variable and drops the glyph.
   ${NSD_CreateLabel} 0 0 10u 10u "✕"
   Pop $0
+  ${NSD_AddStyle} $0 ${SS_BUTTONTEXT}
   SetCtlColors $0 ${C_DIM} ${C_BG}
   !insertmacro Font $0 $FontBody
-  !insertmacro Place $0 668 18 24 24
+  !insertmacro Place $0 664 16 28 28
   ${NSD_OnClick} $0 OnClose
-FunctionEnd
-
-Function OnClose
-  SendMessage $HWNDPARENT ${WM_CLOSE} 0 0
 FunctionEnd
 
 ; ---------------------------------------------------------------------------
@@ -285,6 +376,7 @@ Function PageWhere
   nsDialogs::Create 1018
   Pop $Dialog
   SetCtlColors $Dialog ${C_TEXT} ${C_BG}
+  Call HideStockButtons
   Call BrandPanel
 
   !insertmacro Label $0 "Where should it go?" 284 44 380 30 $FontH1 ${C_TEXT} ${C_BG}
@@ -292,18 +384,10 @@ Function PageWhere
       284 78 380 20 $FontBody ${C_DIM} ${C_BG}
 
   ; Card one.
-  ${NSD_CreateLabel} 0 0 10u 10u ""
-  Pop $CardUser
-  SetCtlColors $CardUser ${C_TEXT} ${C_CARD}
-  !insertmacro Place $CardUser 284 118 402 62
-  !insertmacro RoundCorners $CardUser 402 62 11
+  !insertmacro Fill $CardUser 284 118 402 62 11 ${C_CARD}
   ${NSD_OnClick} $CardUser OnPickUser
 
-  ${NSD_CreateLabel} 0 0 10u 10u ""
-  Pop $CardUserDot
-  SetCtlColors $CardUserDot ${C_ACCENT} ${C_ACCENT}
-  !insertmacro Place $CardUserDot 306 141 16 16
-  !insertmacro RoundCorners $CardUserDot 16 16 16
+  !insertmacro Fill $CardUserDot 306 141 16 16 16 ${C_ACCENT}
 
   !insertmacro Label $0 "Just me" 332 130 340 20 $FontButton ${C_TEXT} ${C_CARD}
   ${NSD_OnClick} $0 OnPickUser
@@ -312,18 +396,10 @@ Function PageWhere
   ${NSD_OnClick} $0 OnPickUser
 
   ; Card two.
-  ${NSD_CreateLabel} 0 0 10u 10u ""
-  Pop $CardAll
-  SetCtlColors $CardAll ${C_TEXT} ${C_SURFACE}
-  !insertmacro Place $CardAll 284 190 402 62
-  !insertmacro RoundCorners $CardAll 402 62 11
+  !insertmacro Fill $CardAll 284 190 402 62 11 ${C_SURFACE}
   ${NSD_OnClick} $CardAll OnPickAll
 
-  ${NSD_CreateLabel} 0 0 10u 10u ""
-  Pop $CardAllDot
-  SetCtlColors $CardAllDot ${C_FAINT} ${C_FAINT}
-  !insertmacro Place $CardAllDot 306 213 16 16
-  !insertmacro RoundCorners $CardAllDot 16 16 16
+  !insertmacro Fill $CardAllDot 306 213 16 16 16 ${C_FAINT}
 
   !insertmacro Label $0 "Everyone on this PC" 332 202 340 20 $FontButton ${C_TEXT} ${C_SURFACE}
   ${NSD_OnClick} $0 OnPickAll
@@ -333,25 +409,40 @@ Function PageWhere
 
   !insertmacro Label $0 "FOLDER" 284 274 200 16 $FontSmall ${C_DIM} ${C_BG}
 
+  ; The card *is* the border. The box itself is stripped of its frame and laid
+  ; inside it, which also centres the text vertically — an EDIT draws its line
+  ; at the top of whatever height it is given, so a 38px-tall box would have
+  ; the path sitting against its ceiling.
+  !insertmacro Fill $0 284 296 296 38 9 ${C_SURFACE}
+
   ${NSD_CreateText} 0 0 10u 10u "$APPDATA\IXD"
   Pop $FolderText
   SetCtlColors $FolderText ${C_TEXT} ${C_SURFACE}
   System::Call 'uxtheme::SetWindowTheme(p $FolderText, w " ", w " ")'
   !insertmacro Font $FolderText $FontBody
-  !insertmacro Place $FolderText 284 296 296 38
-  !insertmacro RoundCorners $FolderText 296 38 9
 
-  ${NSD_CreateButton} 0 0 10u 10u "Browse"
-  Pop $0
-  System::Call 'uxtheme::SetWindowTheme(p $0, w " ", w " ")'
-  SetCtlColors $0 ${C_TEXT} ${C_SURFACE}
-  !insertmacro Font $0 $FontBody
-  !insertmacro Place $0 594 296 92 38
-  !insertmacro RoundCorners $0 92 38 9
-  ${NSD_OnClick} $0 OnBrowse
+  ; Off with the sunken frame. `nsDialogs.nsh` line 307 gives every text box
+  ; WS_EX_WINDOWEDGE|WS_EX_CLIENTEDGE; that is non-client, so no amount of
+  ; theming or colouring reaches it, and it has to be recalculated with
+  ; SWP_FRAMECHANGED before Windows stops drawing it.
+  System::Call 'user32::GetWindowLongW(p $FolderText, i ${GWL_EXSTYLE}) i .r0'
+  IntOp $1 ${WS_EX_CLIENTEDGE} | ${WS_EX_WINDOWEDGE}
+  IntOp $1 $1 ~
+  IntOp $0 $0 & $1
+  System::Call 'user32::SetWindowLongW(p $FolderText, i ${GWL_EXSTYLE}, i r0)'
+  IntOp $2 ${SWP_FRAMECHANGED} | ${SWP_NOMOVE}
+  IntOp $2 $2 | ${SWP_NOSIZE}
+  IntOp $2 $2 | ${SWP_NOZORDER}
+  System::Call 'user32::SetWindowPos(p $FolderText, p 0, i 0, i 0, i 0, i 0, i r2)'
 
-  SendMessage $BtnNext ${WM_SETTEXT} 0 "STR:Install"
-  Call RaiseButtons
+  SendMessage $FolderText ${EM_SETMARGINS} ${EC_BOTHMARGINS} 0x00040004
+  !insertmacro Place $FolderText 298 306 268 20
+
+  !insertmacro Pill $0 "Browse" 594 296 92 38 ${C_TEXT} ${C_SURFACE} OnBrowse
+
+  !insertmacro Pill $0 "Cancel" 438 394 112 38 ${C_TEXT} ${C_SURFACE} GoCancel
+  !insertmacro Pill $0 "Install" 560 394 132 38 ${C_WHITE} ${C_ACCENT} GoNext
+
   nsDialogs::Show
 FunctionEnd
 
@@ -391,46 +482,66 @@ Function OnBrowse
   ${EndIf}
 FunctionEnd
 
-Function PageWhereLeave
-  StrCpy $Step 1
-FunctionEnd
-
 ; ---------------------------------------------------------------------------
-; Page two — the install itself, restyled rather than replaced
+; Page two — the install itself
 ; ---------------------------------------------------------------------------
-Function PageInstallShow
+;
+; A custom page rather than `instfiles`. NSIS's own install page brings its
+; own dialog, and controls cannot be added to it through nsDialogs — the two
+; headings the previous version drew here were created against the *previous*
+; page's dialog, which NSIS had already destroyed, so they never appeared and
+; this page had no left-hand panel at all. Nothing is installed either way, so
+; the bar and the running commentary are drawn here, on the same panel as
+; every other page, and the page moves itself on when it reaches the end.
+Function PageInstall
   StrCpy $Step 1
-  ; NSIS owns this page: the progress bar and the details list are its own
-  ; controls, so they are moved and coloured instead of rebuilt.
-  FindWindow $0 "#32770" "" $HWNDPARENT
-  SetCtlColors $0 ${C_TEXT} ${C_BG}
+  nsDialogs::Create 1018
+  Pop $Dialog
+  SetCtlColors $Dialog ${C_TEXT} ${C_BG}
+  Call HideStockButtons
+  Call BrandPanel
 
-  GetDlgItem $1 $0 1004        ; the "show details" button
-  ShowWindow $1 ${SW_HIDE}
-  GetDlgItem $1 $0 1006        ; the step label above the bar
-  SetCtlColors $1 ${C_TEXT} ${C_BG}
-  !insertmacro Font $1 $FontBody
-  !insertmacro Place $1 284 168 402 20
-
-  GetDlgItem $1 $0 1004
-  GetDlgItem $2 $0 1016        ; the progress bar
-  System::Call 'uxtheme::SetWindowTheme(p $2, w " ", w " ")'
-  SendMessage $2 0x0409 0 ${C_ACCENT}      ; PBM_SETBARCOLOR
-  SendMessage $2 0x2001 0 ${C_SURFACE}     ; PBM_SETBKCOLOR
-  !insertmacro Place $2 284 150 402 8
-
-  GetDlgItem $3 $0 1000        ; the details list
-  SetCtlColors $3 ${C_FAINT} ${C_BG}
-  !insertmacro Font $3 $FontSmall
-  !insertmacro Place $3 284 226 402 140
-
-  ; The panel and the headings are ours, drawn on the parent behind it.
-  !insertmacro Label $4 "Installing" 284 44 380 30 $FontH1 ${C_TEXT} ${C_BG}
-  !insertmacro Label $4 "About twenty seconds — it is a whole runtime." \
+  !insertmacro Label $0 "Installing" 284 44 380 30 $FontH1 ${C_TEXT} ${C_BG}
+  !insertmacro Label $0 "About twenty seconds — it is a whole runtime." \
       284 78 380 20 $FontBody ${C_DIM} ${C_BG}
 
-  EnableWindow $BtnNext 0
-  Call RaiseButtons
+  ; Flat, like the application's own. A real msctls_progress32 arrives with
+  ; WS_EX_CLIENTEDGE and a system-drawn chunk, which is the grey wizard again.
+  !insertmacro Fill $0 284 150 402 8 4 ${C_SURFACE}
+  !insertmacro Fill $Fill 284 150 402 8 4 ${C_ACCENT}
+  StrCpy $FillWidth 0
+  !insertmacro Place $Fill 284 150 1 8
+
+  !insertmacro Label $DetailText "Extracting ixd.exe" \
+      284 176 402 20 $FontSmall ${C_DIM} ${C_BG}
+
+  ${NSD_CreateTimer} OnInstallTick 60
+  nsDialogs::Show
+FunctionEnd
+
+Function OnInstallTick
+  IntOp $FillWidth $FillWidth + 5
+  ${If} $FillWidth >= 402
+    ${NSD_KillTimer} OnInstallTick
+    ${NSD_SetText} $DetailText "Nothing was installed — this is a preview."
+    !insertmacro Place $Fill 284 150 402 8
+    ; Posted, not sent: this runs inside the dialog's own timer handler, and
+    ; tearing the page down from underneath it is how an installer disappears
+    ; with no window and no error.
+    System::Call 'user32::PostMessageW(p $HWNDPARENT, i ${WM_COMMAND}, p 1, p 0)'
+    Return
+  ${EndIf}
+  !insertmacro Place $Fill 284 150 $FillWidth 8
+
+  ${If} $FillWidth > 320
+    ${NSD_SetText} $DetailText "Writing the uninstaller"
+  ${ElseIf} $FillWidth > 240
+    ${NSD_SetText} $DetailText "Extracting PySide6\Qt6Gui.dll"
+  ${ElseIf} $FillWidth > 160
+    ${NSD_SetText} $DetailText "Extracting PySide6\Qt6Core.dll"
+  ${ElseIf} $FillWidth > 80
+    ${NSD_SetText} $DetailText "Extracting _internal\base_library.zip"
+  ${EndIf}
 FunctionEnd
 
 ; ---------------------------------------------------------------------------
@@ -441,6 +552,7 @@ Function PageDone
   nsDialogs::Create 1018
   Pop $Dialog
   SetCtlColors $Dialog ${C_TEXT} ${C_BG}
+  Call HideStockButtons
   Call BrandPanel
 
   ${NSD_CreateBitmap} 0 0 10u 10u ""
@@ -452,37 +564,43 @@ Function PageDone
   !insertmacro Label $0 "One step left, and it is in the browser." \
       334 78 340 20 $FontBody ${C_DIM} ${C_BG}
 
-  ${NSD_CreateLabel} 0 0 10u 10u ""
-  Pop $0
-  SetCtlColors $0 ${C_TEXT} ${C_SURFACE}
-  !insertmacro Place $0 284 130 402 96
-  !insertmacro RoundCorners $0 402 96 11
+  !insertmacro Fill $0 284 130 402 96 11 ${C_SURFACE}
 
   !insertmacro Label $0 "Load the extension" 302 144 370 20 $FontButton ${C_TEXT} ${C_SURFACE}
   !insertmacro Label $0 "Open chrome://extensions, turn on Developer mode and load$\r$\nthe folder beside the application. The app shows the exact path." \
       302 168 370 40 $FontSmall ${C_DIM} ${C_SURFACE}
 
-  ${NSD_CreateCheckBox} 0 0 10u 10u "  Start Internet Xtreme Downloader now"
-  Pop $0
-  System::Call 'uxtheme::SetWindowTheme(p $0, w " ", w " ")'
-  SetCtlColors $0 ${C_TEXT} ${C_BG}
-  !insertmacro Font $0 $FontBody
-  !insertmacro Place $0 284 246 380 22
-  ${NSD_Check} $0
+  ; A drawn tick box. A real check box is a BUTTON, and a BUTTON paints its own
+  ; face — the same reason the Browse button came out white.
+  !insertmacro Fill $StartBox 284 246 18 18 5 ${C_ACCENT}
+  ${NSD_OnClick} $StartBox OnToggleStart
+  !insertmacro Label $0 "Start Internet Xtreme Downloader now" \
+      312 245 360 20 $FontBody ${C_TEXT} ${C_BG}
+  ${NSD_OnClick} $0 OnToggleStart
 
   !insertmacro Label $0 "This is a preview: it has installed nothing." \
       284 296 402 20 $FontSmall ${C_FAINT} ${C_BG}
 
-  SendMessage $BtnNext ${WM_SETTEXT} 0 "STR:Finish"
-  ShowWindow $BtnCancel ${SW_HIDE}
-  EnableWindow $BtnNext 1
-  Call RaiseButtons
+  !insertmacro Pill $0 "Finish" 560 394 132 38 ${C_WHITE} ${C_ACCENT} GoNext
+
   nsDialogs::Show
 FunctionEnd
 
+Function OnToggleStart
+  Pop $0
+  ${If} $StartNow == 1
+    StrCpy $StartNow 0
+    SetCtlColors $StartBox ${C_FAINT} ${C_SURFACE}
+  ${Else}
+    StrCpy $StartNow 1
+    SetCtlColors $StartBox ${C_ACCENT} ${C_ACCENT}
+  ${EndIf}
+  Call Repaint
+FunctionEnd
+
 ; ---------------------------------------------------------------------------
-Page custom PageWhere PageWhereLeave
-Page instfiles "" PageInstallShow
+Page custom PageWhere
+Page custom PageInstall
 Page custom PageDone
 
 Function .onInit
@@ -491,18 +609,12 @@ Function .onInit
   File /oname=$PLUGINSDIR\tick.bmp "installer-art\tick.bmp"
 FunctionEnd
 
+; "no sections will be executed" is the correct state for this file and not
+; something to fix: there is no `instfiles` page because nothing is installed.
+; Silenced so a real warning in a later edit is not lost in an expected one.
+!pragma warning disable 8000
+
 Section "Preview"
-  ; Nothing is written. The steps are named so the details list has something
-  ; true to show while the bar moves.
-  DetailPrint "Extracting ixd.exe"
-  Sleep 400
-  DetailPrint "Extracting _internal\base_library.zip"
-  Sleep 400
-  DetailPrint "Extracting PySide6\Qt6Core.dll"
-  Sleep 400
-  DetailPrint "Extracting PySide6\Qt6Gui.dll"
-  Sleep 400
-  DetailPrint "Writing the uninstaller"
-  Sleep 400
-  DetailPrint "Nothing was installed — this is a preview."
+  ; Nothing is written, and nothing runs here: the progress on page two is
+  ; drawn by that page. NSIS requires a section to produce an installer at all.
 SectionEnd
