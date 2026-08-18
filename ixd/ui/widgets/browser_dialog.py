@@ -67,6 +67,13 @@ class BrowserDownloadDialog(QDialog):
     """Confirm, redirect or defer a download the browser handed over."""
 
     queued = Signal(int)
+    #: Emitted only for **Start download**, never for "download later". The
+    #: progress window opens on DOWNLOAD_ADDED, and a hand-over's row is added
+    #: *paused* so this window can ask about it first — so the event that would
+    #: have opened it has already been and gone by the time anybody presses
+    #: Start, and the transfer ran with no window of its own. Reported as the
+    #: standalone download window never appearing for a browser download.
+    started = Signal(int)
 
     def __init__(self, service: "DownloadService", parent, payload: dict[str, Any],
                  *, media: bool = False) -> None:
@@ -474,6 +481,8 @@ class BrowserDownloadDialog(QDialog):
                 f"{queue_schedule_hint(self.service, queue_id)}",
                 self.download_id)
         self.queued.emit(int(self.download_id))
+        if start:
+            self.started.emit(int(self.download_id))
         self.accept()
 
     def _queue_it(self, *, queue_id: int | None, start: bool) -> None:
@@ -508,4 +517,6 @@ class BrowserDownloadDialog(QDialog):
                 f"{queue_schedule_hint(self.service, queue_id)}",
                 download.id)
         self.queued.emit(int(download.id))
+        if start:
+            self.started.emit(int(download.id))
         self.accept()

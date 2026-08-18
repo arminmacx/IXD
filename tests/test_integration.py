@@ -2508,6 +2508,30 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
         finally:
             updates.install_root = original_root
 
+        # "Show in folder" on a name with a space in it. Every filename this
+        # application produces has spaces, and the Windows form was wrong for
+        # exactly those: passed as a list, Python quotes the whole argument and
+        # Explorer cannot see a switch inside a quoted token, so it ignored it
+        # and opened its default folder. Reported as the notification opening
+        # Documents.
+        from ixd.ui.main_window import reveal_command
+        spaced = r"C:\Users\a\Downloads\Video\A Video [144p].mp4"
+        windows = reveal_command(spaced, "win32")
+        check("the reveal switch stays outside the quotes",
+              isinstance(windows, str)
+              and windows.startswith('explorer /select,"')
+              and windows.endswith('"'), str(windows))
+        check("and the path itself is quoted, spaces and all",
+              '"C:\\Users\\a\\Downloads\\Video\\A Video [144p].mp4"' in windows,
+              str(windows))
+        mac = reveal_command("/x/A Video.mp4", "darwin")
+        check("macOS reveals the file, not the folder",
+              mac == ["open", "-R", "/x/A Video.mp4"], str(mac))
+        linux = reveal_command("/x/A Video.mp4", "linux")
+        check("Linux asks the file-manager interface for the item",
+              linux[0] == "dbus-send"
+              and "array:string:file:///x/A Video.mp4" in linux, str(linux))
+
         # Two copies on one machine: one installed, one unpacked from the
         # portable zip into Downloads. Each updates itself and the browser
         # loads whichever it was pointed at, which is an application reporting
@@ -5767,7 +5791,18 @@ def inspect():
     elsewhere = root / "elsewhere"
     dialog.folder_edit.setText(str(elsewhere))
     queues = service.list_queues()
+
+    # The progress window opens on DOWNLOAD_ADDED, and a hand-over's row is
+    # added *paused* so this window can ask first — so that event has already
+    # gone by the time anybody presses Start, and the transfer ran with no
+    # window. "Start" has to say so itself; "download later" must not.
+    from ixd.ui.widgets.download_window import DownloadWindow
+    fired = []
+    dialog.started.connect(lambda i: fired.append(i))
+    said.append(f"START_IS_WIRED {window._open_window_for_started is not None}")
     dialog._download_later(queues[1].id)
+    said.append(f"LATER_STARTS_NO_WINDOW {not fired}")
+    said.append(f"NO_WINDOW_OPENED {len(DownloadWindow._open) == 0}")
     rows = service.list_downloads()
     said.append(f"BOTH_MOVED {all(r.queue_id == queues[1].id for r in rows)}")
     said.append(f"BOTH_IN_FOLDER {all(r.dest_dir == str(elsewhere) for r in rows)}")
@@ -5817,6 +5852,11 @@ shutil.rmtree(root, ignore_errors=True)
     check("the engine's name for it is filled in",
           "NAMED A Video.mp4" in output, detail)
     check("a pair says it will become one file", "SAYS_PAIR True" in output, detail)
+    check("Start is wired to open the download's own window",
+          "START_IS_WIRED True" in output, detail)
+    check("and \u201cdownload later\u201d opens none",
+          "LATER_STARTS_NO_WINDOW True" in output
+          and "NO_WINDOW_OPENED True" in output, detail)
     check("both halves exist and neither has started",
           "ROWS 2 PAUSED True" in output, detail)
     check("“Download later” moves both halves to the queue",

@@ -60,6 +60,39 @@ SIDEBAR_SECTIONS = (
 )
 
 
+def reveal_command(path: str, platform: str) -> list[str] | str:
+    """How to say *this file* to the platform's file manager.
+
+    Returned rather than run, and taking the platform as an argument, because
+    two of the three branches can never execute on the machine this is written
+    on and the Windows one was wrong for two releases.
+
+    **The Windows form is a string on purpose.** Passed as a list, Python's
+    `list2cmdline` sees a space in the path and quotes the whole argument:
+
+        explorer "/select,C:\\…\\A Video [144p].mp4"
+
+    Explorer cannot see a switch inside a quoted token, so it ignores it and
+    opens its default folder — Documents. The path needs the quotes; the switch
+    must stay outside them. A filename with no space in it worked, which is why
+    this survived: it fails on exactly the names a download manager produces.
+    """
+    if platform.startswith("win"):
+        # `explorer` answers 1 on success, which `check=True` would read as a
+        # failure and a traceback the user never asked for.
+        return f'explorer /select,"{os.path.normpath(path)}"'
+    if platform == "darwin":
+        return ["open", "-R", path]
+    # Freedesktop's file manager interface, which every modern Linux file
+    # manager implements and none of them agree on the command line for.
+    return ["dbus-send", "--session", "--print-reply",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+            f"array:string:file://{path}", "string:"]
+
+
 class MainWindow(QMainWindow):
     """Sidebar + download table + detail panel."""
 
@@ -723,7 +756,22 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(
             lambda _result, d=dialog: self._browser_dialogs.discard(d))
         dialog.queued.connect(lambda _id: self.refresh())
+        dialog.started.connect(self._open_window_for_started)
         self._present_browser_dialog(dialog)
+
+    def _open_window_for_started(self, download_id: int) -> None:
+        """Give a hand-over the same progress window a typed-in URL gets.
+
+        `DOWNLOAD_ADDED` is what normally opens it, and it is deliberately
+        skipped for a paused row — but a browser hand-over is added paused *on
+        purpose*, so the file-info window can ask about it before anything is
+        fetched. The result was that a download started from that window had no
+        window of its own, which is exactly the difference the user saw between
+        adding a link by hand and clicking one in a page.
+        """
+        if download_id and self.service.settings.get_bool(
+                "show_download_window", True):
+            self.open_download_window(int(download_id))
 
     # -- a stream chosen in the page ------------------------------------
     #
@@ -743,6 +791,7 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(
             lambda _result, d=dialog, t=token: self._forget_media(t, d))
         dialog.queued.connect(lambda _id: self.refresh())
+        dialog.started.connect(self._open_window_for_started)
         self._present_browser_dialog(dialog)
 
     def _forget_media(self, token: str, dialog) -> None:
@@ -1038,22 +1087,7 @@ class MainWindow(QMainWindow):
         path = download.filepath or ""
         folder = download.dest_dir or (os.path.dirname(path) if path else "")
         if path and os.path.isfile(path):
-            if sys.platform.startswith("win"):
-                # `explorer` answers 1 on success, which `check=True` would
-                # read as a failure and a traceback the user never asked for.
-                command = ["explorer", f"/select,{os.path.normpath(path)}"]
-            elif sys.platform == "darwin":
-                command = ["open", "-R", path]
-            else:
-                # Freedesktop's file manager interface, which every modern
-                # Linux file manager implements and none of them agree on the
-                # command line for.
-                command = ["dbus-send", "--session", "--print-reply",
-                           "--dest=org.freedesktop.FileManager1",
-                           "--type=method_call",
-                           "/org/freedesktop/FileManager1",
-                           "org.freedesktop.FileManager1.ShowItems",
-                           f"array:string:file://{path}", "string:"]
+            command = reveal_command(path, sys.platform)
             try:
                 subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
