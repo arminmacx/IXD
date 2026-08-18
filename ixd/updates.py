@@ -541,7 +541,55 @@ def relaunch_into(staged: Path, target: Path, launcher: str = "") -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def run_installer(installer: Path) -> None:
+def installer_arguments(mode: str, silent: bool = True) -> list[str]:
+    """What to pass the downloaded `setup.exe`.
+
+    `/S` is NSIS's own silent switch, and `MULTIUSER_INSTALLMODE_COMMANDLINE`
+    is what gives the script `/AllUsers` and `/CurrentUser`. Both matter: a
+    silent run shows no install-mode page, so without the switch the installer
+    picks a mode itself, and picking the wrong one installs a second copy
+    somewhere the first one is not.
+
+    The mode comes from the registry the previous install wrote, so an update
+    stays what it already was. Unknown mode means no switch — better to let
+    the installer decide from its own remembered value than to assert one.
+
+    Pure, and tested here: everything it returns runs on a machine this one
+    cannot execute a single line of.
+    """
+    arguments: list[str] = []
+    if silent:
+        arguments.append("/S")
+    mode = (mode or "").strip().lower()
+    if mode == "allusers":
+        arguments.append("/AllUsers")
+    elif mode == "currentuser":
+        arguments.append("/CurrentUser")
+    return arguments
+
+
+def registered_install_mode(reader: Any = None) -> str:
+    """"AllUsers" or "CurrentUser", as the last install recorded it."""
+    if reader is not None:
+        return str(reader() or "")
+    if not sys.platform.startswith("win"):
+        return ""
+    try:
+        import winreg      # noqa: PLC0415 - Windows only
+    except ImportError:
+        return ""
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, INSTALL_KEY) as key:
+                value, _ = winreg.QueryValueEx(key, "InstallMode")
+                if value:
+                    return str(value)
+        except OSError:
+            continue
+    return ""
+
+
+def run_installer(installer: Path, arguments: list[str] | None = None) -> None:
     """Start the downloaded installer and leave the rest to it.
 
     The counterpart of :func:`relaunch_into` for a build that was installed
@@ -559,7 +607,8 @@ def run_installer(installer: Path) -> None:
         raise FileNotFoundError(f"{installer} is not there to run")
     if sys.platform.startswith("win"):
         # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: it must outlive us.
-        subprocess.Popen([str(installer)], cwd=str(installer.parent),
+        subprocess.Popen([str(installer), *(arguments or [])],
+                         cwd=str(installer.parent),
                          creationflags=0x00000008 | 0x00000200,
                          close_fds=True)
         return

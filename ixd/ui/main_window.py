@@ -521,6 +521,7 @@ class MainWindow(QMainWindow):
         # Qt has emitted this all along and nothing listened, so the balloon
         # that says a download finished did nothing when it was clicked.
         self.tray.messageClicked.connect(self._on_notification_clicked)
+        self.tray.update_requested.connect(self.open_update_dialog)
         self.tray.show()
 
     # ------------------------------------------------------------------
@@ -868,6 +869,10 @@ class MainWindow(QMainWindow):
         self.update_notice.setToolTip(
             "A newer version has been published. Click to see what changed.")
         self.update_notice.setVisible(True)
+        # The mark on the icon itself. The check runs on its own a minute after
+        # start-up, and this application is usually closed to the tray — so a
+        # strip inside a window nobody has open was the only sign there was.
+        self.tray.set_update_available(version)
         self.tray.notify("Update available", f"Version {version} is ready.")
 
     def open_update_dialog(self) -> None:

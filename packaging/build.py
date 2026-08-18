@@ -606,6 +606,20 @@ Section "Install"
   WriteRegDWORD SHCTX "{uninstall_key}" "NoModify" 1
   WriteRegDWORD SHCTX "{uninstall_key}" "NoRepair" 1
   WriteUninstaller "$INSTDIR\uninstall.exe"
+
+  ; An in-app update runs this silently, and a silent run has no finish page to
+  ; offer "run it now" on — so it reopens the application itself. That is the
+  ; whole difference between taking an update and being made to answer an
+  ; install wizard to take a patch.
+  ;
+  ; **Through Explorer on purpose.** This installer may be elevated, and a
+  ; child of an elevated process is elevated too: `Exec "$INSTDIR\{launcher}"`
+  ; would leave a download manager running as administrator for the rest of the
+  ; session. `explorer.exe` runs as the logged-in user, so what it starts does
+  ; too. No plugin, which is the constraint that rules out the usual answer.
+  ${{If}} ${{Silent}}
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\{launcher}"'
+  ${{EndIf}}
 SectionEnd
 
 Section "Uninstall"

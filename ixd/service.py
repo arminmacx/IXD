@@ -796,13 +796,25 @@ class DownloadService:
                 f"{asset.get('name')} — the installer takes over from here, "
                 "and the browser extension is written out again on the next "
                 "start.")
+            # Silently, and in the mode this copy was installed in. The
+            # wizard was never the point of §3.55 — keeping the uninstaller,
+            # the Add/Remove Programs version and the shortcuts correct was,
+            # and a silent run does all of that. Asked for: the update used to
+            # replace the application and reopen it, and answering an install
+            # wizard to take a patch is not what a download manager should ask
+            # of anybody.
+            mode = updates.registered_install_mode()
+            arguments = updates.installer_arguments(mode)
             self.db.log_event(
-                f"Update: running {archive}. It installs into the folder "
-                "recorded in the registry by the install it is upgrading; if "
-                "that lands anywhere but where this copy is running from, say "
-                "so with this line and the next start-up's location.")
+                f"Update: running {archive} {' '.join(arguments)}. It installs "
+                f"into the folder recorded in the registry by the install it "
+                f"is upgrading (mode “{mode or 'unrecorded'}”), then reopens "
+                f"the application. If it lands anywhere but where this copy is "
+                f"running from, this line and the next start-up's location say "
+                f"so. An elevated install still asks Windows for permission — "
+                f"declining it leaves this version in place.")
             try:
-                updates.run_installer(archive)
+                updates.run_installer(archive, arguments)
             except Exception as error:  # noqa: BLE001
                 self.db.log_event(f"Could not start the installer: {error}",
                                   level="warning")

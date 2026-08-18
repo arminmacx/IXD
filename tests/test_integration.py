@@ -2508,6 +2508,20 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
         finally:
             updates.install_root = original_root
 
+        # What the downloaded setup.exe is told. A silent run shows no
+        # install-mode page, so without the switch the installer picks a mode
+        # itself — and picking the wrong one installs a second copy somewhere
+        # the first one is not, which is the failure this whole area is about.
+        check("a silent update keeps the mode it was installed in",
+              updates.installer_arguments("AllUsers") == ["/S", "/AllUsers"])
+        check("and a per-user install stays per-user",
+              updates.installer_arguments("CurrentUser") == ["/S", "/CurrentUser"])
+        check("an unrecorded mode asserts nothing and lets the installer decide",
+              updates.installer_arguments("") == ["/S"])
+        check("the mode is read from where the installer wrote it",
+              updates.registered_install_mode(reader=lambda: "AllUsers")
+              == "AllUsers")
+
         # "Show in folder" on a name with a space in it. Every filename this
         # application produces has spaces, and the Windows form was wrong for
         # exactly those: passed as a list, Python quotes the whole argument and
