@@ -289,15 +289,40 @@ class Browser:
         return last
 
     def close(self) -> None:
+        """Ask the browser to quit before resorting to a signal.
+
+        A snap browser cannot be killed by an unconfined process: AppArmor
+        refuses the signal, and `terminate()` raises PermissionError rather
+        than doing nothing quietly. Every run then left its whole process tree
+        and a profile directory in `$HOME` behind, and the suite reported a
+        failure that said nothing about the extension.
+
+        `Browser.close` over the DevTools protocol is not a signal — it is the
+        browser shutting itself down on request — so confinement has no opinion
+        about it. The signals stay as the fallback for a browser that has
+        stopped answering, and neither path is allowed to take the profile
+        directory down with it.
+        """
+        try:
+            self.call("Browser.close")
+        except Exception:  # noqa: BLE001 - it may already be gone
+            pass
         try:
             self.socket.close()
-        finally:
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.process.wait(timeout=10)
+        except Exception:  # noqa: BLE001
             try:
                 self.process.terminate()
                 self.process.wait(timeout=10)
             except Exception:  # noqa: BLE001
-                self.process.kill()
-            shutil.rmtree(self.profile, ignore_errors=True)
+                try:
+                    self.process.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+        shutil.rmtree(self.profile, ignore_errors=True)
 
     def __enter__(self) -> "Browser":
         return self
