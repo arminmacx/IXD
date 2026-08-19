@@ -68,6 +68,9 @@ ShowInstDetails show
 !define WIN_W 720
 !define WIN_H 460
 !define PANEL_W 250
+; One corner radius for every light box on every page. They were 11, 11 and 9,
+; typed at three different times; asked for softer and consistent.
+!define RADIUS  14
 !define TICKS @TICKS@
 
 ; Straight out of ixd/ui/theme.py, so the installer and the application are the
@@ -103,6 +106,9 @@ ShowInstDetails show
 !define IXD_HWND_BOTTOM  1
 !define IXD_HWND_TOP     0
 !define SWP_QUIET        0x0013   ; NOSIZE | NOMOVE | NOACTIVATE
+!define SWP_NOACTIVATE   0x0010
+; INVALIDATE | ERASE | ALLCHILDREN | UPDATENOW
+!define RDW_WHOLE        0x0185
 !define WS_CHILDVISIBLE  0x50000000
 !define SS_BITMAPCTL     0x0000000E
 !ifndef IMAGE_BITMAP
@@ -329,6 +335,23 @@ Function .onGUIInit
   Call HideStockButtons
   StrCpy $Step 0
   StrCpy $StartNow 1
+
+  ; **This is what carries page two into page three.** The install page's Next
+  ; is hidden like the other two, so when the copy finished there was no way
+  ; forward but Tab to the invisible button and Enter — reported exactly that
+  ; way, twice.
+  ;
+  ; Posting WM_COMMAND/IDOK from the end of the install section was the first
+  ; answer and it cannot work: the section runs on NSIS's install thread, and
+  ; NSIS re-enables IDOK only *after* that thread ends, so the message always
+  ; arrives at a disabled button and is dropped. No amount of ordering inside
+  ; the section fixes that.
+  ;
+  ; `SetAutoClose true` is the hook that fires on the right side of that line,
+  ; and it is not a guess: it is how MUI2 gets from its progress page to its
+  ; finish page — `Contrib/Modern UI 2/Pages/Finish.nsh`, in the page's own
+  ; GUIInit, which is this function.
+  SetAutoClose true
 FunctionEnd
 
 ; NSIS's three buttons are never shown. They cannot take our colours, and they
@@ -464,7 +487,7 @@ Function PageWhere
   !insertmacro Label $0 "Two answers, and they are not the same choice." \
       284 78 380 20 $FontBody ${C_DIM} ${C_BG}
 
-  !insertmacro Fill $CardUser 284 118 402 62 11 ${C_CARD}
+  !insertmacro Fill $CardUser 284 118 402 62 ${RADIUS} ${C_CARD}
   ${NSD_OnClick} $CardUser OnPickUser
   !insertmacro Fill $CardUserDot 306 141 16 16 16 ${C_ACCENT}
   !insertmacro Label $CardUserTitle "Just me" 332 130 340 20 $FontButton ${C_TEXT} ${C_CARD}
@@ -473,7 +496,7 @@ Function PageWhere
       332 151 340 18 $FontSmall ${C_DIM} ${C_CARD}
   ${NSD_OnClick} $CardUserSub OnPickUser
 
-  !insertmacro Fill $CardAll 284 190 402 62 11 ${C_SURFACE}
+  !insertmacro Fill $CardAll 284 190 402 62 ${RADIUS} ${C_SURFACE}
   ${NSD_OnClick} $CardAll OnPickAll
   !insertmacro Fill $CardAllDot 306 213 16 16 16 ${C_FAINT}
   !insertmacro Label $CardAllTitle "Everyone on this PC" 332 202 340 20 $FontButton ${C_TEXT} ${C_SURFACE}
@@ -512,7 +535,7 @@ Function PageWhere
   SendMessage $FolderText ${EM_SETMARGINS} ${EC_BOTHMARGINS} 0x00040004
   !insertmacro Place $FolderText 296 306 272 18
 
-  !insertmacro Fill $FolderCard 284 296 296 38 9 ${C_SURFACE}
+  !insertmacro Fill $FolderCard 284 296 296 38 ${RADIUS} ${C_SURFACE}
   ${NSD_RemoveExStyle} $FolderCard ${WS_EX_TRANSPARENT}
   IntOp $0 ${SWP_NOMOVE} | ${SWP_NOSIZE}
   System::Call 'user32::SetWindowPos(p $FolderCard, p ${IXD_HWND_BOTTOM}, \
@@ -630,6 +653,17 @@ Function PageInstallShow
   SetCtlColors $PageHwnd ${C_TEXT} ${C_BG}
   !insertmacro Place $PageHwnd 0 0 ${WIN_W} ${WIN_H}
 
+  ; **Built out of sight, then shown.** Pages one and three are assembled while
+  ; nsDialogs is still holding their dialog back, and every rounded corner on
+  ; them comes out right. This page is already on screen when its show callback
+  ; runs, so each control painted itself as a full rectangle before
+  ; `SetWindowRgn` clipped it — and the corner pixels it had already put down
+  ; stayed there, because taking a region away from a child does not repaint
+  ; the parent underneath it. Measured on the user's screenshot: the card's
+  ; corner was square to the pixel while the region call was demonstrably
+  ; emitted.
+  ShowWindow $PageHwnd ${SW_HIDE}
+
   ; NSIS's three: the file list, the "show details" button, and the bar.
   GetDlgItem $1 $PageHwnd 1000
   ShowWindow $1 ${SW_HIDE}
@@ -684,14 +718,15 @@ Function PageInstallShow
       284 78 380 20 $FontBody ${C_DIM} ${C_BG}
 
   !insertmacro RawFill $0 284 130 402 110 ${C_SURFACE}
-  !insertmacro RoundCorners $0 402 110 11
+  !insertmacro RoundCorners $0 402 110 ${RADIUS}
   !insertmacro RawLabel $0 "Copying files" 302 150 366 20 $FontButton ${C_TEXT} ${C_SURFACE}
 
   ; The bar: groove, then fill, then the fill lifted above it by name. Both are
   ; square — a rounded fill needs a fresh region on every step, and a radius on
   ; a four-pixel-wide window is a shape nobody can predict from here.
-  !insertmacro RawFill $0 302 190 366 6 ${C_BG}
-  !insertmacro RawFill $BarFill 302 190 0 6 ${C_ACCENT}
+  !insertmacro RawFill $0 302 188 366 8 ${C_BG}
+  !insertmacro RoundCorners $0 366 8 8
+  !insertmacro RawFill $BarFill 302 188 0 8 ${C_ACCENT}
   !insertmacro ToTop $BarFill
 
   ; NSIS's own "Extract: …" line, kept, moved onto the card and recoloured.
@@ -702,6 +737,12 @@ Function PageInstallShow
   !insertmacro Font $1 $FontSmall
   !insertmacro Place $1 302 208 366 18
   !insertmacro ToTop $1
+
+  ; Now show it, and repaint the lot — background first, then every child on
+  ; top of it. `RDW_ALLCHILDREN` is the part that matters: without it the
+  ; erase stops at the dialog and the controls keep whatever they had.
+  ShowWindow $PageHwnd ${SW_SHOW}
+  System::Call 'user32::RedrawWindow(p $PageHwnd, p 0, p 0, i ${RDW_WHOLE})'
 FunctionEnd
 
 ; The bar advances by one share of the payload's bytes. `${TICKS}` is written
@@ -714,15 +755,32 @@ Function Tick
   ; The registers are the install section's; it is mid-instruction when this
   ; runs.
   Push $0
+  Push $1
   IntOp $Ticks $Ticks + 1
   IntOp $0 $Ticks * 366
   IntOp $0 $0 / ${TICKS}
   ${If} $0 > 366
     StrCpy $0 366
   ${EndIf}
-  ; Its own position, not the origin: MoveWindow places a child against its
-  ; parent, so passing 0,0 would put the bar in the corner of the window.
-  System::Call 'user32::MoveWindow(p $BarFill, i 302, i 190, i $0, i 6, i 1)'
+  ; Sized **and** raised on every step, in one call. The fill is created after
+  ; the groove and lifted above it once in `PageInstallShow`, and it still did
+  ; not appear — the screenshot has the groove's colour across the whole bar
+  ; and the accent nowhere. Whether that was the z-order or the resize, this
+  ; asserts both, and it costs one call a second.
+  ;
+  ; Its own position, not the origin: a child is placed against its parent, so
+  ; passing 0,0 would put the bar in the corner of the window.
+  System::Call 'user32::SetWindowPos(p $BarFill, p ${IXD_HWND_TOP}, \
+      i 302, i 188, i $0, i 8, i ${SWP_NOACTIVATE})'
+  ; Rounded to match the groove it sits in, at whatever width it has reached.
+  ; The region has to be made afresh each step — `RoundCorners` takes its size
+  ; at compile time and this one is only known here. `SetWindowRgn` takes
+  ; ownership of the region, so there is nothing to free.
+  System::Call 'gdi32::CreateRoundRectRgn(i 0, i 0, i $0, i 8, i 8, i 8) p .s'
+  Pop $1
+  System::Call 'user32::SetWindowRgn(p $BarFill, p $1, i 1)'
+  System::Call 'user32::InvalidateRect(p $BarFill, p 0, i 1)'
+  Pop $1
   Pop $0
 FunctionEnd
 
@@ -746,14 +804,14 @@ Function PageDone
   !insertmacro Label $0 "One step left, and it is in the browser." \
       334 78 340 20 $FontBody ${C_DIM} ${C_BG}
 
-  !insertmacro Fill $0 284 130 402 96 11 ${C_SURFACE}
+  !insertmacro Fill $0 284 130 402 96 ${RADIUS} ${C_SURFACE}
   !insertmacro Label $0 "Load the extension" 302 144 370 20 $FontButton ${C_TEXT} ${C_SURFACE}
   !insertmacro Label $0 "Open chrome://extensions, turn on Developer mode and load$\r$\nthe folder beside the application. The app shows the exact path." \
       302 168 370 40 $FontSmall ${C_DIM} ${C_SURFACE}
 
   ; A drawn tick box: a real check box is a BUTTON, and a BUTTON paints its own
   ; face — the same reason the Browse button came out white.
-  !insertmacro Fill $StartBox 284 246 18 18 5 ${C_ACCENT}
+  !insertmacro Fill $StartBox 284 246 18 18 6 ${C_ACCENT}
   ${NSD_OnClick} $StartBox OnToggleStart
   !insertmacro Label $0 "Start @APP_NAME@ now" 312 245 360 20 $FontBody ${C_TEXT} ${C_BG}
   ${NSD_OnClick} $0 OnToggleStart
@@ -832,14 +890,6 @@ Section "Install"
     Exec '"$WINDIR\explorer.exe" "$INSTDIR\@LAUNCHER@"'
   ${EndIf}
 
-  ; On to the last page by itself. There is no button on the install page —
-  ; ours cannot be put there and NSIS's are hidden — so without this the only
-  ; way forward was to find the invisible Next with Tab, which is exactly what
-  ; happened. Posted rather than sent: this runs inside the install, and the
-  ; page must not be torn down until that has returned to its message loop.
-  ${IfNot} ${Silent}
-    System::Call 'user32::PostMessageW(p $HWNDPARENT, i ${WM_COMMAND}, p 1, p 0)'
-  ${EndIf}
 SectionEnd
 
 Section "Uninstall"
