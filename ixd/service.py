@@ -616,7 +616,8 @@ class DownloadService:
 
     def _background_update_check(self) -> None:
         try:
-            self.check_for_updates()
+            # The only caller that may act on what it finds.
+            self.check_for_updates(automatic=True)
         except Exception:               # noqa: BLE001 - never fatal
             pass
 
@@ -671,7 +672,8 @@ class DownloadService:
     #   * **A check never installs anything.** It reports; what happens next is
     #     the user's decision, and for a packaged build there is nothing this
     #     process is allowed to do anyway.
-    def check_for_updates(self, force: bool = False) -> updates.Release | None:
+    def check_for_updates(self, force: bool = False,
+                          automatic: bool = False) -> updates.Release | None:
         """Ask whether a newer version exists. Returns it, or ``None``."""
         if not force and not self.settings.get_bool("updates_check_automatically", True):
             return None
@@ -712,7 +714,24 @@ class DownloadService:
             self_update=bool(kind),
         )
 
+        # **A check somebody asked for reports; it never acts.**
+        #
+        # Reported: *"i … check the update in app and it said 1.0.29 avaliable
+        # then i didnt click download at all then close the app but after few
+        # min i saw it automatically download and installed it."* The update
+        # window calls this same function, so opening it to *look* at a version
+        # armed an unattended install of that version — and closing the window
+        # without pressing anything is a decision, not an absence of one.
+        #
+        # Only the timer may arm it now. The setting still means what it says;
+        # what changed is that asking a question is no longer an instruction.
+        if not automatic:
+            return release
         if kind and self.settings.get_bool("updates_install_automatically", False):
+            self.db.log_event(
+                f"“Install it by itself” is on, so version {release.version} "
+                "will be installed once nothing is downloading. Switch it off "
+                "under Settings → Updates.")
             self._install_when_idle(release)
         return release
 

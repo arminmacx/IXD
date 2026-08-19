@@ -7189,6 +7189,7 @@ def main() -> int:
                  check_batch_files_have_windows_line_endings,
                  check_the_extension_folder_does_not_move_with_privileges,
                  check_the_payload_carries_the_extension,
+                 check_a_check_you_asked_for_does_not_install_anything,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7513,6 +7514,96 @@ def check_the_payload_carries_the_extension():
               not leftovers, str(leftovers))
         check(f"and {folder} holds the background script",
               (payload / folder / "background.js").is_file())
+
+
+def check_a_check_you_asked_for_does_not_install_anything():
+    """Looking at an update is not asking for it.
+
+    Reported: *"i … check the update in app and it said 1.0.29 avaliable then i
+    didnt click download at all then close the app but after few min i saw it
+    automatically download and installed it."*
+
+    The update window calls the same `check_for_updates()` the daily timer
+    does, and that function armed the unattended install. So opening the window
+    to *look* scheduled an install of the version being looked at, and closing
+    it without pressing anything — which is a decision — changed nothing.
+
+    Only the timer may act on what a check finds now.
+
+    Also pinned here: `SettingsDialog._check_updates_now` had thirteen lines of
+    the page builder pasted into it, referring to locals that only exist there.
+    Pressing **Check now** raised `NameError: name 'kind' is not defined` every
+    time since 1.0.8, because nothing ever opened that dialog and pressed it.
+    """
+    print("\n[a check you asked for reports; it does not install]")
+    import ast
+    from ixd import service as service_module
+
+    root = Path(__file__).resolve().parents[1]
+
+    # The gate, read out of the source: `_install_when_idle` must be reachable
+    # only past a test on `automatic`.
+    source = (root / "ixd" / "service.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    checker = next((n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "check_for_updates"), None)
+    check("check_for_updates is still there", checker is not None)
+    if checker is None:
+        return
+    check("and it takes an `automatic` flag",
+          any(a.arg == "automatic" for a in checker.args.args),
+          str([a.arg for a in checker.args.args]))
+
+    guarded = False
+    for node in ast.walk(checker):
+        if isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp) \
+                and isinstance(node.test.op, ast.Not) \
+                and isinstance(node.test.operand, ast.Name) \
+                and node.test.operand.id == "automatic":
+            guarded = any(isinstance(n, ast.Return) for n in node.body)
+    check("a check that was asked for returns before installing anything",
+          guarded)
+
+    calls = [n for n in ast.walk(checker)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "_install_when_idle"]
+    check("and there is exactly one place it could install from",
+          len(calls) == 1, str(len(calls)))
+
+    # The background timer is the caller that may act.
+    background = next((n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef)
+                       and n.name == "_background_update_check"), None)
+    passes = background is not None and any(
+        isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "check_for_updates"
+        and any(k.arg == "automatic" and getattr(k.value, "value", None) is True
+                for k in n.keywords)
+        for n in ast.walk(background))
+    check("the daily timer is the one that passes it", passes)
+
+    # And the update window must not.
+    dialog = (root / "ixd" / "ui" / "widgets" / "update_dialog.py").read_text(
+        encoding="utf-8")
+    check("the update window never asks for an automatic install",
+          "automatic=True" not in dialog)
+
+    # `_check_updates_now` referring to names it does not have.
+    settings_source = (root / "ixd" / "ui" / "widgets"
+                       / "settings_dialog.py").read_text(encoding="utf-8")
+    settings_tree = ast.parse(settings_source)
+    method = next((n for n in ast.walk(settings_tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_check_updates_now"), None)
+    check("Settings still has a Check now", method is not None)
+    if method is not None:
+        assigned = {t.id for n in ast.walk(method)
+                    for t in getattr(n, "targets", []) if isinstance(t, ast.Name)}
+        used = {n.id for n in ast.walk(method)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        stray = sorted(used - assigned - {"self", "UpdateDialog", "_time", "float"})
+        check("and it uses no name it does not have", not stray, str(stray))
 
 
 if __name__ == "__main__":

@@ -703,20 +703,14 @@ class SettingsDialog(QDialog):
         self.settings.set("updates_install_automatically",
                           self.updates_install.isChecked())
         UpdateDialog(self.service, {}, self).exec()
-        self.updates_install = QCheckBox(
-            "Install it by itself and restart (this build can)"
-            if kind else
-            "Install it by itself — not possible for a build installed from a "
-            "package")
-        self.updates_install.setChecked(
-            self.settings.get_bool("updates_install_automatically", False))
-        self.updates_install.setEnabled(bool(kind))
-        self.updates_install.setToolTip(
-            "The new version is downloaded in the background. When nothing is "
-            "downloading, the application closes, the updater replaces it and "
-            "starts it again.")
-        form.addWidget(self.updates_install)
 
+        # Nothing is rebuilt here. Thirteen lines of the page builder were
+        # pasted in at this point — a second `self.updates_install = QCheckBox(
+        # … if kind else …)` and a `form.addWidget` — referring to two locals
+        # that only exist in `_build_updates`. Pressing **Check now** therefore
+        # raised `NameError: name 'kind' is not defined` the moment the update
+        # window closed, every time, since 1.0.8. Nothing caught it and no test
+        # opened this dialog and pressed the button.
         last = self.settings.get("updates_last_check") or 0
         if last:
             self.updates_when.setText(
