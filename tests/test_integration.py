@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -7185,6 +7186,7 @@ def main() -> int:
                  test_windows_only_imports_exist_on_windows,
                  test_the_splash_says_what_is_happening,
                  check_dialogs_do_not_block_a_hand_over,
+                 check_batch_files_have_windows_line_endings,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7331,6 +7333,57 @@ shutil.rmtree(root, ignore_errors=True)
           "HANDOVER_PARENTLESS True" in out, out[-400:])
     check("and is not modal itself",
           "HANDOVER_NOT_MODAL True" in out, out[-400:])
+
+
+
+def check_batch_files_have_windows_line_endings():
+    """A `.bat` with LF endings loses `call :label`, sporadically.
+
+    `cmd.exe` resolves a `call :label` by seeking on byte offsets in the file.
+    With LF-only endings the seek lands mid-line and the lookup fails — for
+    *some* calls and not others, which is what makes it look like anything but
+    line endings. Measured on the user's Windows machine: a build that
+    otherwise succeeded printed
+
+        The system cannot find the batch label specified - say
+
+    and lost exactly one status line out of five.
+
+    Checked in the repository **and in the source bundle**, because the bundle
+    is built here — on Linux — and is what a Windows machine actually unpacks.
+    """
+    print("\n[batch files carry CRLF, in the tree and in the bundle]")
+    root = Path(__file__).resolve().parents[1]
+
+    for path in sorted(root.glob("packaging/**/*.bat")):
+        raw = path.read_bytes()
+        lone = raw.replace(b"\r\n", b"").count(b"\n")
+        check(f"{path.relative_to(root)} has no bare newline", lone == 0,
+              f"{lone} LF-only line(s)")
+
+    # The generated native-messaging launcher: written with an explicit \r\n,
+    # which `write_text` would turn into \r\r\n on Windows.
+    source = (root / "ixd" / "integration.py").read_text(encoding="utf-8")
+    marker = 'cd /d "{SOURCE_ROOT}"'
+    at = source.find(marker)
+    check("the generated .bat is still written with CRLF", at > 0)
+    tail = source[at:at + 800]
+    check("and is written with newline='' so they survive",
+          'newline=""' in tail, tail[:200])
+
+    bundle = sorted((root / "dist").glob("ixd-*-windows-source.zip"))
+    if not bundle:
+        print("  (no source bundle built; skipping the packaged copy)")
+        return
+    with zipfile.ZipFile(bundle[-1]) as archive:
+        names = [n for n in archive.namelist() if n.endswith(".bat")]
+        check("the source bundle carries the batch file at all", bool(names),
+              str(bundle[-1].name))
+        for name in names:
+            raw = archive.read(name)
+            lone = raw.replace(b"\r\n", b"").count(b"\n")
+            check(f"{name.split('/', 1)[-1]} keeps CRLF through packaging",
+                  lone == 0, f"{lone} LF-only line(s)")
 
 
 if __name__ == "__main__":

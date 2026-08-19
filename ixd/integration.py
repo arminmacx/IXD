@@ -585,7 +585,13 @@ def write_launcher() -> tuple[Path, bool]:
                 + f'cd /d "{SOURCE_ROOT}"\r\n'
                 + f'"{sys.executable}" -m ixd --native-host %*\r\n'
             )
-        launcher.write_text(body, encoding="utf-8")
+        # `newline=""` so the `\r\n` above survives exactly as written.
+        # `write_text` translates `\n` to `os.linesep`, which on Windows turns
+        # every one of these into `\r\r\n` — and a batch file's line endings
+        # are not cosmetic: `cmd` seeks by byte offset to resolve `call :label`
+        # (context.md §3.70).
+        with open(launcher, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
         return launcher, binary is not None
 
     if binary is not None:

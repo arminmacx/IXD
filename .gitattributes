@@ -1,0 +1,8 @@
+# `cmd.exe` resolves `call :label` by seeking on byte offsets. With
+# LF-only line endings the seek lands mid-line and the lookup fails —
+# sporadically, so most calls work and one does not. Measured on the
+# user's machine: `The system cannot find the batch label specified - say`
+# from a build that otherwise succeeded (context.md §3.70).
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.nsi text eol=crlf
