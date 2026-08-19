@@ -178,12 +178,76 @@ def extension_root() -> Path:
       That is what the data directory is for, and it is a fallback rather than
       a default — the user's words: *"on windows installer you can put either
       in same folder as its installed or in %APPDATA%\\IXD folder."*
+
+    **An all-users install never keeps them beside the application, even on a
+    launch that could write there.** `_is_writable` asks *this process*, and
+    the answer changes with how the process was started: the installer's own
+    "run it now" hands the application an administrator token, so that one
+    launch writes ``Program Files\\IXD\\extension``, while every ordinary
+    launch afterwards writes ``%APPDATA%\\IXD\\extension`` and never touches the
+    first one again. Two folders, and the browser was pointed at one of them.
+
+    Reported, and confirmed from the user's Log: `Program Files` held 1.0.27
+    while the data directory held 1.0.28, and Chrome — loading the first —
+    reported 1.0.27 through an in-app update and a reinstall of the extension.
+    *"update from app itself didnt put the extension … but when i manually
+    update by downloading the latest version again it put extension."* The
+    manual run is elevated; that is the whole of the difference.
+
+    So the install mode decides, not the privileges of the moment. It is
+    recorded in the registry by the installer (`updates.registered_install_mode`)
+    and does not change between launches.
     """
     if getattr(sys, "frozen", False):
+        if _installed_for_all_users():
+            return config.DATA_DIR
         beside = installation_dir()
         if _is_writable(beside):
             return beside
     return config.DATA_DIR
+
+
+def _installed_for_all_users() -> bool:
+    """Did the installer record an all-users install? Never guessed."""
+    try:
+        from . import updates      # noqa: PLC0415 - avoids an import cycle
+
+        return updates.registered_install_mode().lower() == "allusers"
+    except Exception:               # noqa: BLE001 - never fatal at start-up
+        return False
+
+
+def stranded_extension_copies(root: Path) -> list[tuple[Path, str]]:
+    """Extension folders a browser may be loading that this launch cannot refresh.
+
+    A folder left beside an all-users installation is the case that produced
+    this function: it was written once, by a launch that happened to be
+    elevated, and every launch since has updated a different folder. Nothing
+    said so — the application reported the folder it *had* written and was
+    silent about the one the browser was actually reading.
+
+    It is reported rather than deleted. Removing it needs the privileges that
+    could have refreshed it, and an emptied folder is worse than a stale one:
+    a browser calls that a **corrupted extension** and stays that way until
+    somebody removes it by hand (§3.44).
+    """
+    import json as _json           # noqa: PLC0415
+
+    found: list[tuple[Path, str]] = []
+    if not getattr(sys, "frozen", False):
+        return found
+    for candidate in (installation_dir(), config.DATA_DIR):
+        if candidate == root:
+            continue
+        for name in (EXTENSION_DIR_NAME, FIREFOX_EXTENSION_DIR_NAME):
+            manifest = candidate / name / "manifest.json"
+            try:
+                version = str(_json.loads(
+                    manifest.read_text(encoding="utf-8")).get("version", "?"))
+            except (OSError, ValueError):
+                continue
+            found.append((manifest.parent, version))
+    return found
 
 
 def extension_locations() -> dict[str, Path]:

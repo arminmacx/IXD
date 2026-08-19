@@ -206,7 +206,22 @@ def _register_browser_integration(service) -> None:
             else:
                 service.db.log_event(
                     f"The installation at {integration.installation_dir()} is "
-                    f"not writable, so the extension folders are in {root}")
+                    f"an all-users one, or is not writable, so the extension "
+                    f"folders are in {root}")
+
+            # A folder somewhere else that still holds an extension is one a
+            # browser may be loading and this launch will never refresh. It is
+            # named rather than deleted: removing it needs the privileges that
+            # could have updated it, and an emptied folder is what a browser
+            # calls a corrupted extension (§3.44).
+            for stale, version in integration.stranded_extension_copies(root):
+                service.db.log_event(
+                    f"An older extension is still sitting at {stale} — "
+                    f"version {version}. Nothing updates it any more: it was "
+                    f"written by a launch that could write there, and this one "
+                    f"cannot. If the browser was pointed at that folder it is "
+                    f"still loading {version}; point it at {root} instead.",
+                    level="warning")
             for gone in integration.retire_legacy_extension_copies(root):
                 service.db.log_event(
                     f"Removed an extension folder left by an older version: "

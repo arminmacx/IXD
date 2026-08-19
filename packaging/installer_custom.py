@@ -117,6 +117,12 @@ ShowInstDetails show
 !ifndef LR_LOADFROMFILE
   !define LR_LOADFROMFILE 0x0010
 !endif
+!ifndef GW_HWNDNEXT
+  !define GW_HWNDNEXT    2
+!endif
+!ifndef GW_CHILD
+  !define GW_CHILD       5
+!endif
 !ifndef SM_CXSCREEN
   !define SM_CXSCREEN 0
 !endif
@@ -664,13 +670,20 @@ Function PageInstallShow
   ; emitted.
   ShowWindow $PageHwnd ${SW_HIDE}
 
-  ; NSIS's three: the file list, the "show details" button, and the bar.
-  GetDlgItem $1 $PageHwnd 1000
-  ShowWindow $1 ${SW_HIDE}
-  GetDlgItem $1 $PageHwnd 1004
-  ShowWindow $1 ${SW_HIDE}
-  GetDlgItem $1 $PageHwnd 1016
-  ShowWindow $1 ${SW_HIDE}
+  ; **Every** child of this page, whatever its id, and then back come the ones
+  ; we want. Hiding them by id was hiding three — the file list, the "show
+  ; details" button and the bar — and missing a fourth: a grey rule at
+  ; (11, 220), 290 px wide, measured off the user's screenshot at 0xA0A0A0.
+  ; That is NSIS's own template geometry, and no id in this script accounted
+  ; for it. Walking the children needs to know nothing.
+  System::Call 'user32::GetWindow(p $PageHwnd, i ${GW_CHILD}) p .r1'
+  ${Do}
+    ${If} $1 == 0
+      ${ExitDo}
+    ${EndIf}
+    ShowWindow $1 ${SW_HIDE}
+    System::Call 'user32::GetWindow(p $1, i ${GW_HWNDNEXT}) p .r1'
+  ${Loop}
 
   ; A backdrop of our own across the whole page. The dialog's background brush
   ; already paints it, but a control that owns the pixels is what stops the
@@ -733,6 +746,7 @@ Function PageInstallShow
   ; It is the one part of this page worth borrowing: it says what is being
   ; written, and it is already correct.
   GetDlgItem $1 $PageHwnd 1006
+  ShowWindow $1 ${SW_SHOW}
   SetCtlColors $1 ${C_DIM} ${C_SURFACE}
   !insertmacro Font $1 $FontSmall
   !insertmacro Place $1 302 208 366 18

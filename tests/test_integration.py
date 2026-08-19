@@ -7187,6 +7187,7 @@ def main() -> int:
                  test_the_splash_says_what_is_happening,
                  check_dialogs_do_not_block_a_hand_over,
                  check_batch_files_have_windows_line_endings,
+                 check_the_extension_folder_does_not_move_with_privileges,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7384,6 +7385,84 @@ def check_batch_files_have_windows_line_endings():
             lone = raw.replace(b"\r\n", b"").count(b"\n")
             check(f"{name.split('/', 1)[-1]} keeps CRLF through packaging",
                   lone == 0, f"{lone} LF-only line(s)")
+
+
+
+def check_the_extension_folder_does_not_move_with_privileges():
+    """An all-users install keeps its extension in one place, always.
+
+    Reported, and confirmed from the user's own Log: `C:\\Program Files\\IXD`
+    held extension 1.0.27 while `%APPDATA%\\IXD` held 1.0.28, and Chrome —
+    pointed at the first — reported 1.0.27 through an in-app update *and* a
+    remove-and-re-add. *"update from app itself didnt put the extension … but
+    when i manually update by downloading the latest version again it put
+    extension."*
+
+    The mechanism is `_is_writable`, which asks **this process**. The
+    installer's own "run it now" hands the application an administrator token,
+    so that one launch writes beside the application; every ordinary launch
+    afterwards writes the data directory and never touches the first folder
+    again.
+
+    A pure function with the platform passed in is what §3.62 says catches
+    this, so the install mode is injected rather than read from a registry
+    nothing here has.
+    """
+    print("\n[an all-users install keeps its extension in one place]")
+    from ixd import config, integration, updates
+
+    root = Path(tempfile.mkdtemp(prefix="ixd-extroot-"))
+    beside = root / "ProgramFiles" / "IXD"
+    beside.mkdir(parents=True, exist_ok=True)
+    data = root / "data"
+    data.mkdir(parents=True, exist_ok=True)
+
+    saved = (integration.installation_dir, config.DATA_DIR,
+             updates.registered_install_mode, integration.sys.frozen
+             if hasattr(integration.sys, "frozen") else None)
+    try:
+        integration.installation_dir = lambda: beside
+        integration.sys.frozen = True
+        config.DATA_DIR = data
+
+        # Writable beside the application — which an elevated launch is — and
+        # the install recorded as all-users. Before the fix this answered
+        # "beside", and that is the whole defect.
+        updates.registered_install_mode = lambda reader=None: "AllUsers"
+        where = integration.extension_root()
+        check("an all-users install uses the data directory even when it "
+              "could write beside the application",
+              where == data, f"{where} (wanted {data})")
+
+        updates.registered_install_mode = lambda reader=None: "CurrentUser"
+        where = integration.extension_root()
+        check("a per-user install still keeps them beside the application",
+              where == beside, f"{where} (wanted {beside})")
+
+        # And the folder left behind by the launch that could write there is
+        # named, so the Log can say which one the browser is reading.
+        (beside / "extension").mkdir(parents=True, exist_ok=True)
+        (beside / "extension" / "manifest.json").write_text(
+            '{"version": "1.0.27"}', encoding="utf-8")
+        updates.registered_install_mode = lambda reader=None: "AllUsers"
+        stranded = integration.stranded_extension_copies(data)
+        check("a stranded copy beside the application is found",
+              len(stranded) == 1, str(stranded))
+        check("and its version is read out of its own manifest",
+              bool(stranded) and stranded[0][1] == "1.0.27", str(stranded))
+
+        # The folder in use is never reported as stranded.
+        check("the folder in use is not reported",
+              integration.stranded_extension_copies(beside) == [],
+              str(integration.stranded_extension_copies(beside)))
+    finally:
+        integration.installation_dir, config.DATA_DIR = saved[0], saved[1]
+        updates.registered_install_mode = saved[2]
+        if saved[3] is None:
+            del integration.sys.frozen
+        else:
+            integration.sys.frozen = saved[3]
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
