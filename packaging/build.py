@@ -178,6 +178,60 @@ def package_extension() -> list[Path]:
     return produced
 
 
+def materialise_extension(binary_dir: Path) -> list[Path]:
+    """Put the two extension folders **into the payload**, beside the launcher.
+
+    They used to be written by the application, at start-up, into whichever
+    folder that launch could write. On an all-users install that is not the
+    folder the user chose: `Program Files` is writable to the elevated launch
+    the installer starts and to nothing afterwards, so the extension landed
+    there once and in `%APPDATA%` every time after — two folders, and the
+    browser pointed at one (context.md §3.71).
+
+    The installer runs with the privileges to write the folder the user picked.
+    So it writes them, and the application stops needing to. The user's words:
+    *"when user select for all user the installed install everything in the
+    path user selected and updater later need to check this and update exactly
+    where the user installed the old version."*
+
+    Each browser's own manifest is written as `manifest.json`, exactly as
+    `package_extension` does for the zips and `integration._write_manifest`
+    does at run time — one folder, one manifest, no flavoured copies left in it
+    for a browser that is not the one loading it (§3.43).
+    """
+    source = ROOT / "extension"
+    if not source.is_dir() or not binary_dir.is_dir():
+        return []
+
+    section("Extension folders in the payload")
+    produced = []
+    for folder, manifest_name in (("extension", "manifest.chrome.json"),
+                                  ("extension-firefox", "manifest.firefox.json")):
+        manifest = source / manifest_name
+        if not manifest.exists():
+            continue
+        body = manifest.read_text(encoding="utf-8")
+        declared = json.loads(body).get("version")
+        if declared != VERSION:
+            raise SystemExit(
+                f"{manifest_name} says version {declared!r}, "
+                f"but this is {VERSION!r} — update the manifest."
+            )
+        target = binary_dir / folder
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)
+        for path in sorted(source.rglob("*")):
+            if path.is_dir() or path.name.startswith("manifest."):
+                continue
+            destination = target / path.relative_to(source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+        (target / "manifest.json").write_text(body, encoding="utf-8")
+        produced.append(target)
+        log(f"wrote {folder}/ ({sum(1 for _ in target.rglob('*') if _.is_file())} files)")
+    return produced
+
+
 # ----------------------------------------------------------------------
 def _desktop_entry() -> str:
     return (
@@ -498,7 +552,16 @@ ShowUninstDetails show
 !define MUI_ABORTWARNING
 !define MUI_ICON "{icon}"
 !define MUI_UNICON "{icon}"
-!define MUI_FINISHPAGE_RUN "$INSTDIR\{launcher}"
+; **Not `MUI_FINISHPAGE_RUN "$INSTDIR\..."`.** That runs the application as a
+; child of this installer, and a child of an elevated process is elevated too —
+; so ticking the box on the finish page left a download manager running as
+; administrator for the rest of the session, and, worse, gave that one launch
+; write access to `Program Files` when no launch afterwards has it. That is
+; what put an extension folder there that nothing could ever update again
+; (context.md §3.71). Explorer runs as the logged-in user, so it launders the
+; token away — the same trick the silent branch of the install section uses.
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION StartAsTheUser
 !define MUI_FINISHPAGE_RUN_TEXT "Start {app_name}"
 
 !insertmacro MULTIUSER_PAGE_INSTALLMODE
@@ -539,14 +602,20 @@ Function OnInstallModeChanged
   ; No previous install in this mode: choose the default. All users goes to
   ; Program Files, which needs administrator and which the person who *runs*
   ; the application afterwards cannot write to — so the extension folder falls
-  ; back to their data directory, by design. Just me goes to %APPDATA%, which
-  ; is writable, needs no elevation, and keeps the extension folder inside the
-  ; install where the browser can be pointed at it once.
+  ; needs administrator to install into. The extension folders are **in the
+  ; payload** now, so this installer writes them into whichever folder was
+  ; chosen, with the privileges to do it — the application no longer creates
+  ; them at start-up and no longer decides where they go (§3.71). Just me goes
+  ; to %APPDATA%, which needs no elevation at all.
   ${{If}} $MultiUser.InstallMode == "AllUsers"
     StrCpy $INSTDIR "$PROGRAMFILES64\{app_slug}"
   ${{Else}}
     StrCpy $INSTDIR "$APPDATA\{app_slug}"
   ${{EndIf}}
+FunctionEnd
+
+Function StartAsTheUser
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\{launcher}"'
 FunctionEnd
 
 Function .onInit
@@ -964,6 +1033,10 @@ def main() -> int:
     build_icons()
     binary = build_binary(clean=not arguments.no_clean)
     package_extension()
+    # Before anything packages `binary`: every archive, installer and .deb
+    # below copies that folder, so the extension has to be in it first.
+    materialise_extension(binary if not IS_MACOS
+                          else binary / "Contents" / "MacOS")
 
     if arguments.package:
         if IS_LINUX:

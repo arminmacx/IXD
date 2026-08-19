@@ -339,6 +339,7 @@ Function .onGUIInit
   CreateFont $FontButton "Segoe UI" 10 600
 
   Call HideStockButtons
+  Call HideParentChrome
   StrCpy $Step 0
   StrCpy $StartNow 1
 
@@ -363,6 +364,37 @@ FunctionEnd
 ; NSIS's three buttons are never shown. They cannot take our colours, and they
 ; sit under a page dialog that covers the window; the pills post WM_COMMAND to
 ; the parent instead, which is what clicking them would have sent.
+; NSIS's outer window has furniture of its own, and hiding it by id was
+; hiding the two ids this script happened to know. What was left is an etched
+; separator — measured off the user's screenshot twice: two rows, 0xA0A0A0 over
+; 0xFFFFFF, 291 px wide and inset 11 px, which is `SS_ETCHEDHORZ` drawing
+; COLOR_3DSHADOW over COLOR_3DHIGHLIGHT and nothing else in Windows looks like
+; that. It survived hiding every child of the *page* because it is a child of
+; the parent.
+;
+; So: every child of the parent goes, except the page dialogs themselves —
+; class `#32770` — which are the only children this installer draws into.
+; Knowing no ids is the point; NSIS's template is free to hold whatever it
+; likes.
+Function HideParentChrome
+  System::Call 'user32::GetWindow(p $HWNDPARENT, i ${GW_CHILD}) p .r1'
+  ${Do}
+    ${If} $1 == 0
+      ${ExitDo}
+    ${EndIf}
+    ; 1018 is the placeholder whose rectangle NSIS puts each page dialog over.
+    ; It draws nothing, and it is exempt because hiding the thing that defines
+    ; where the pages go is not a risk worth taking to remove a line.
+    System::Call 'user32::GetDlgCtrlID(p $1) i .r3'
+    System::Call 'user32::GetClassNameW(p $1, t .r2, i 64) i'
+    ${If} $2 != "#32770"
+    ${AndIf} $3 != 1018
+      ShowWindow $1 ${SW_HIDE}
+    ${EndIf}
+    System::Call 'user32::GetWindow(p $1, i ${GW_HWNDNEXT}) p .r1'
+  ${Loop}
+FunctionEnd
+
 Function HideStockButtons
   GetDlgItem $0 $HWNDPARENT 1
   ShowWindow $0 ${SW_HIDE}
@@ -487,6 +519,7 @@ Function PageWhere
   Pop $Dialog
   SetCtlColors $Dialog ${C_TEXT} ${C_BG}
   Call HideStockButtons
+  Call HideParentChrome
   Call BrandPanel
 
   !insertmacro Label $0 "Where should it go?" 284 44 380 30 $FontH1 ${C_TEXT} ${C_BG}
@@ -655,6 +688,7 @@ Function PageInstallShow
   StrCpy $Step 1
   StrCpy $Ticks 0
   Call HideStockButtons
+  Call HideParentChrome
   FindWindow $PageHwnd "#32770" "" $HWNDPARENT
   SetCtlColors $PageHwnd ${C_TEXT} ${C_BG}
   !insertmacro Place $PageHwnd 0 0 ${WIN_W} ${WIN_H}
@@ -807,6 +841,7 @@ Function PageDone
   Pop $Dialog
   SetCtlColors $Dialog ${C_TEXT} ${C_BG}
   Call HideStockButtons
+  Call HideParentChrome
   Call BrandPanel
 
   ${NSD_CreateBitmap} 0 0 10u 10u ""

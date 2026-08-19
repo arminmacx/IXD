@@ -7188,6 +7188,7 @@ def main() -> int:
                  check_dialogs_do_not_block_a_hand_over,
                  check_batch_files_have_windows_line_endings,
                  check_the_extension_folder_does_not_move_with_privileges,
+                 check_the_payload_carries_the_extension,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7388,28 +7389,39 @@ def check_batch_files_have_windows_line_endings():
 
 
 
-def check_the_extension_folder_does_not_move_with_privileges():
-    """An all-users install keeps its extension in one place, always.
+def ixd_version() -> str:
+    """The version this tree declares, read once rather than pasted."""
+    from ixd import __version__
 
-    Reported, and confirmed from the user's own Log: `C:\\Program Files\\IXD`
+    return __version__
+
+
+def check_the_extension_folder_does_not_move_with_privileges():
+    """The extension stays in the folder the user installed into.
+
+    Reported, and confirmed from the user's own Log: `Program Files\\IXD`
     held extension 1.0.27 while `%APPDATA%\\IXD` held 1.0.28, and Chrome —
     pointed at the first — reported 1.0.27 through an in-app update *and* a
-    remove-and-re-add. *"update from app itself didnt put the extension … but
-    when i manually update by downloading the latest version again it put
-    extension."*
+    remove-and-re-add.
 
-    The mechanism is `_is_writable`, which asks **this process**. The
-    installer's own "run it now" hands the application an administrator token,
-    so that one launch writes beside the application; every ordinary launch
-    afterwards writes the data directory and never touches the first folder
-    again.
+    Two causes, both fixed:
 
-    A pure function with the platform passed in is what §3.62 says catches
-    this, so the install mode is injected rather than read from a registry
-    nothing here has.
+    * The installer ran the application from its finish page as its own child,
+      so that one launch was elevated and could write `Program Files`. No
+      launch afterwards can, so the folder was written once and abandoned.
+    * `extension_root()` asked `_is_writable` first, which is false for every
+      ordinary launch of an all-users install — so the answer moved to the data
+      directory and the browser was left reading the stale folder.
+
+    Now the **installer** ships the extension folders in the payload, into
+    whichever directory the user chose, and `extension_root()` prefers a
+    current extension already sitting beside the application over any question
+    of privileges. The user's requirement, in their words: *"when user install
+    the app where ever they want updater should respect that and update the app
+    in that same installed path instead of going to unknown path."*
     """
-    print("\n[an all-users install keeps its extension in one place]")
-    from ixd import config, integration, updates
+    print("\n[the extension stays where the app was installed]")
+    from ixd import config, integration
 
     root = Path(tempfile.mkdtemp(prefix="ixd-extroot-"))
     beside = root / "ProgramFiles" / "IXD"
@@ -7417,52 +7429,90 @@ def check_the_extension_folder_does_not_move_with_privileges():
     data = root / "data"
     data.mkdir(parents=True, exist_ok=True)
 
-    saved = (integration.installation_dir, config.DATA_DIR,
-             updates.registered_install_mode, integration.sys.frozen
-             if hasattr(integration.sys, "frozen") else None)
+    def put(folder: Path, version: str) -> None:
+        (folder / "extension").mkdir(parents=True, exist_ok=True)
+        (folder / "extension" / "manifest.json").write_text(
+            json.dumps({"version": version}), encoding="utf-8")
+
+    saved_dir, saved_data = integration.installation_dir, config.DATA_DIR
+    saved_writable = integration._is_writable
     try:
         integration.installation_dir = lambda: beside
         integration.sys.frozen = True
         config.DATA_DIR = data
 
-        # Writable beside the application — which an elevated launch is — and
-        # the install recorded as all-users. Before the fix this answered
-        # "beside", and that is the whole defect.
-        updates.registered_install_mode = lambda reader=None: "AllUsers"
+        # The case that was broken: an all-users install, an ordinary launch
+        # that cannot write Program Files, and the installer's extension
+        # sitting there. Before the fix this answered the data directory.
+        integration._is_writable = lambda directory: directory != beside
+        put(beside, ixd_version())
         where = integration.extension_root()
-        check("an all-users install uses the data directory even when it "
-              "could write beside the application",
-              where == data, f"{where} (wanted {data})")
+        check("an unelevated launch still uses the folder the app was "
+              "installed into", where == beside, f"{where} (wanted {beside})")
 
-        updates.registered_install_mode = lambda reader=None: "CurrentUser"
+        # An *older* extension there is not something to keep quiet about: the
+        # folder is not current, so it is not preferred, and it is reported.
+        shutil.rmtree(beside / "extension")
+        put(beside, "0.0.1")
         where = integration.extension_root()
-        check("a per-user install still keeps them beside the application",
+        check("a stale copy there does not win on its own",
+              where == data, f"{where} (wanted {data})")
+        stranded = integration.stranded_extension_copies(data)
+        check("and it is reported, with the version in it",
+              len(stranded) == 1 and stranded[0][1] == "0.0.1", str(stranded))
+
+        # A writable installation — portable, or a per-user install — is
+        # unchanged: beside the application, as it always was.
+        shutil.rmtree(beside / "extension")
+        integration._is_writable = lambda directory: True
+        where = integration.extension_root()
+        check("a writable installation keeps them beside the application",
               where == beside, f"{where} (wanted {beside})")
 
-        # And the folder left behind by the launch that could write there is
-        # named, so the Log can say which one the browser is reading.
-        (beside / "extension").mkdir(parents=True, exist_ok=True)
-        (beside / "extension" / "manifest.json").write_text(
-            '{"version": "1.0.27"}', encoding="utf-8")
-        updates.registered_install_mode = lambda reader=None: "AllUsers"
-        stranded = integration.stranded_extension_copies(data)
-        check("a stranded copy beside the application is found",
-              len(stranded) == 1, str(stranded))
-        check("and its version is read out of its own manifest",
-              bool(stranded) and stranded[0][1] == "1.0.27", str(stranded))
-
-        # The folder in use is never reported as stranded.
-        check("the folder in use is not reported",
+        # And nothing anywhere is reported as stranded when only one exists.
+        check("the folder in use is never reported",
               integration.stranded_extension_copies(beside) == [],
               str(integration.stranded_extension_copies(beside)))
     finally:
-        integration.installation_dir, config.DATA_DIR = saved[0], saved[1]
-        updates.registered_install_mode = saved[2]
-        if saved[3] is None:
-            del integration.sys.frozen
-        else:
-            integration.sys.frozen = saved[3]
+        integration.installation_dir, config.DATA_DIR = saved_dir, saved_data
+        integration._is_writable = saved_writable
+        del integration.sys.frozen
         shutil.rmtree(root, ignore_errors=True)
+
+
+def check_the_payload_carries_the_extension():
+    """The installer writes the extension; the application no longer has to.
+
+    This is what makes the folder land where the user chose: the installer runs
+    with the privileges to write it, and every ordinary launch afterwards finds
+    it already correct. Checked in the built payload, because a build that
+    forgets it puts the whole defect back.
+    """
+    print("\n[the payload carries the extension folders]")
+    payload = Path(__file__).resolve().parents[1] / "dist" / "ixd"
+    if not (payload / "ixd").exists() and not (payload / "ixd.exe").exists():
+        print("  (nothing built; skipping)")
+        return
+    for folder, flavour in (("extension", "chrome"),
+                            ("extension-firefox", "firefox")):
+        manifest = payload / folder / "manifest.json"
+        check(f"{folder}/manifest.json is in the payload", manifest.is_file(),
+              str(manifest))
+        if not manifest.is_file():
+            continue
+        body = json.loads(manifest.read_text(encoding="utf-8"))
+        check(f"and {folder} carries this version",
+              body.get("version") == ixd_version(),
+              f"{body.get('version')} != {ixd_version()}")
+        # One manifest per folder, and it is the browser's own — a flavoured
+        # copy left beside it is a manifest for a browser that is not the one
+        # loading this folder (§3.43).
+        leftovers = sorted(q.name for q in (payload / folder).glob("manifest.*")
+                           if q.name != "manifest.json")
+        check(f"and nothing else called manifest.* is left in {folder}",
+              not leftovers, str(leftovers))
+        check(f"and {folder} holds the background script",
+              (payload / folder / "background.js").is_file())
 
 
 if __name__ == "__main__":

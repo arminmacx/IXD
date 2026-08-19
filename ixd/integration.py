@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
+from . import __version__
 from .core.browsers import (
     FIREFOX_EXTENSION_ID,
     HOST_NAME,
@@ -199,21 +200,34 @@ def extension_root() -> Path:
     and does not change between launches.
     """
     if getattr(sys, "frozen", False):
-        if _installed_for_all_users():
-            return config.DATA_DIR
         beside = installation_dir()
-        if _is_writable(beside):
+        # **A current extension already beside the application wins**, whether
+        # or not this process could have written it. The installer puts it
+        # there, with the privileges to write the folder the user chose, so on
+        # an installed copy this is the normal answer and nothing is written at
+        # start-up at all. Asking `_is_writable` first was the defect: it is
+        # false for every ordinary launch of an all-users install, so the
+        # answer moved to the data directory and left the browser reading a
+        # folder nothing updated again.
+        if _holds_current_extension(beside) or _is_writable(beside):
             return beside
     return config.DATA_DIR
 
 
-def _installed_for_all_users() -> bool:
-    """Did the installer record an all-users install? Never guessed."""
-    try:
-        from . import updates      # noqa: PLC0415 - avoids an import cycle
+def _holds_current_extension(directory: Path) -> bool:
+    """Is there already an extension of *this* version in this folder?
 
-        return updates.registered_install_mode().lower() == "allusers"
-    except Exception:               # noqa: BLE001 - never fatal at start-up
+    The version matters. A folder holding an older one is not a folder to keep
+    using without saying so — that is exactly the state §3.71 was reported
+    from — and it is reported by :func:`stranded_extension_copies`.
+    """
+    import json as _json           # noqa: PLC0415
+
+    manifest = directory / EXTENSION_DIR_NAME / "manifest.json"
+    try:
+        return str(_json.loads(
+            manifest.read_text(encoding="utf-8")).get("version")) == __version__
+    except (OSError, ValueError):
         return False
 
 
