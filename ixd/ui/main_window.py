@@ -33,7 +33,7 @@ from ..core.events import EventType
 from ..core.http_client import format_bytes, format_eta, format_speed
 from ..core.models import DownloadStatus, TransferMode
 from .taskbar import TaskbarProgress
-from .theme import DARK, Palette, status_colour
+from .theme import DARK, Palette, own_window, status_colour
 from .widgets.add_dialog import AddDownloadDialog
 from .widgets.chunk_bars import ChunkBars
 from .widgets.download_table import (
@@ -1040,6 +1040,7 @@ class MainWindow(QMainWindow):
         # or Escape lands on rather than the destructive one.
         box.setDefaultButton(keep)
         box.setEscapeButton(cancel)
+        own_window(box)
         box.exec()
 
         clicked = box.clickedButton()

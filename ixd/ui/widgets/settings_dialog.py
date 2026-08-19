@@ -44,6 +44,7 @@ from ...core.models import (
 from ...core.net import list_interfaces
 from ...core.scheduler import WEEKDAY_NAMES, format_days
 from ...power import CompletionAction
+from ..theme import own_window
 from ..workers import Worker
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -76,6 +77,7 @@ class ProxyDialog(QDialog):
     def __init__(self, proxy: ProxyEntry | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Proxy server")
+        own_window(self)
         self.setMinimumWidth(430)
         self.proxy = proxy or ProxyEntry()
 
@@ -205,6 +207,7 @@ class ScheduleDownloadsDialog(QDialog):
         #: "All queues" — the schedule fires on every one of them.
         self.all_queues = schedule.queue_id is None
         self.setWindowTitle(f"Downloads for “{schedule.name or 'schedule'}”")
+        own_window(self)
         self.setMinimumSize(720, 480)
 
         layout = QVBoxLayout(self)
@@ -380,6 +383,7 @@ class ScheduleDialog(QDialog):
                  parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Schedule")
+        own_window(self)
         self.setMinimumWidth(470)
         self.schedule = schedule or Schedule()
 
@@ -490,6 +494,7 @@ class QueueDialog(QDialog):
     def __init__(self, queue: DownloadQueue | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Queue")
+        own_window(self)
         self.setMinimumWidth(400)
         self.queue = queue or DownloadQueue(name="New queue")
 
@@ -574,6 +579,7 @@ class SettingsDialog(QDialog):
         self.service = service
         self.settings = service.settings
         self.setWindowTitle("Settings")
+        own_window(self)
         self.setMinimumSize(760, 620)
         self._worker: Worker | None = None
 
@@ -1685,6 +1691,7 @@ class SettingsDialog(QDialog):
         else:
             box.setText("The integration could not be completed.")
         box.setDetailedText(result.render())
+        own_window(box)
         box.exec()
 
     def _open_extension_folder(self) -> None:

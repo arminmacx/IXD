@@ -549,3 +549,31 @@ def status_colour(status: str, palette: Palette = DARK) -> str:
         "needs_link": palette.bad,
         "cancelled": palette.text_faint,
     }.get(status, palette.text_dim)
+
+
+def own_window(dialog) -> None:
+    """Modal to the window that opened it, and to nothing else.
+
+    **`QDialog.exec()` is application-modal.** It blocks every other window in
+    the process, including ones with no parent — and the file-info window a
+    browser hand-over opens is deliberately parentless (§3.62, log §460), so
+    that Windows gives it its own taskbar button.
+
+    The two decisions collided. Reported: check for updates, then click a
+    download in the browser, and the window asking where to put it cannot be
+    brought to the front — the update dialog is holding the whole application.
+    The extension has already cancelled the browser's own download by then and
+    is waiting on an answer nobody can give.
+
+    `WindowModal` blocks the dialog's parent and the parent's children, which
+    is what these dialogs actually mean: you should not reach the toolbar
+    behind Settings. A separate top-level window is not part of that chain and
+    stays usable.
+
+    The principle was already written down for the shutdown countdown — *"a
+    modal box would block the rest of the application while the machine is
+    still perfectly usable"* — and it applies to every one of them.
+    """
+    from PySide6.QtCore import Qt
+
+    dialog.setWindowModality(Qt.WindowModality.WindowModal)

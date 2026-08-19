@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from ...core.http_client import format_bytes, format_eta, format_speed
 from ...core.models import DownloadStatus, HashStatus
-from ..theme import DARK, Palette, status_colour
+from ..theme import DARK, Palette, own_window, status_colour
 from .chunk_bars import ChunkBars, SegmentedProgress
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -41,6 +41,7 @@ class PropertiesDialog(QDialog):
         self._palette = palette
 
         self.setWindowTitle("Download properties")
+        own_window(self)
         self.setMinimumSize(660, 560)
 
         layout = QVBoxLayout(self)

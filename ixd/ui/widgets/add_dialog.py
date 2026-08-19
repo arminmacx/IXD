@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..theme import own_window
+
 from ...core.models import MediaInfo
 from ..workers import BackgroundCall
 
@@ -36,6 +38,7 @@ class AddDownloadDialog(QDialog):
         super().__init__(parent)
         self.service = service
         self.setWindowTitle("Add download")
+        own_window(self)
         self.setMinimumWidth(600)
 
         self._media: MediaInfo | None = None

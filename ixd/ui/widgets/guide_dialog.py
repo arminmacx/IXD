@@ -25,7 +25,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QHBoxLayout,
                                QLabel, QPushButton, QVBoxLayout, QWidget)
 
-from ..theme import DARK, Palette
+from ..theme import DARK, Palette, own_window
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...service import DownloadService
@@ -390,6 +390,7 @@ class GuideDialog(QDialog):
         self._first_run = first_run
 
         self.setWindowTitle("Getting started")
+        own_window(self)
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.setFixedWidth(ART_W + 56)
 

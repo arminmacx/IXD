@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..theme import own_window
+
 if TYPE_CHECKING:  # pragma: no cover
     from ...service import DownloadService
 
@@ -44,6 +46,7 @@ class LogDialog(QDialog):
         super().__init__(parent)
         self.service = service
         self.setWindowTitle("Log")
+        own_window(self)
         self.resize(940, 560)
 
         layout = QVBoxLayout(self)

@@ -547,6 +547,7 @@ class FakeBox:
     """Answers the question in place and records that it was asked."""
     asked = []
     answer = "keep"
+    modality = None
     class Icon:
         Question = 0
     class ButtonRole:
@@ -559,6 +560,9 @@ class FakeBox:
         self._buttons = []
     def setIcon(self, *a): pass
     def setWindowTitle(self, *a): pass
+    #: Recorded rather than ignored: an application-modal box would block the
+    #: window a browser hand-over opens (context §3.69).
+    def setWindowModality(self, mode): FakeBox.modality = mode
     def setText(self, text): self._text = text
     def setInformativeText(self, *a): pass
     def setDefaultButton(self, *a): pass
@@ -592,6 +596,9 @@ entries = [a for a in menu.actions if a.text.lower().startswith("remove")]
 print("MENU_ENTRY", entries[0].text if entries else "<none>")
 if entries:
     entries[0].trigger()
+from PySide6.QtCore import Qt as _Qt
+print("BOX_MODALITY",
+      FakeBox.modality == _Qt.WindowModality.WindowModal)
 print("ASKED", len(FakeBox.asked))
 print("PROMPT", FakeBox.asked[0] if FakeBox.asked else "")
 print("FILE_KEPT", payload.exists())
@@ -631,6 +638,8 @@ shutil.rmtree(root, ignore_errors=True)
     detail = (output.strip()[-400:] or "") + (process.stderr[-400:] or "")
     check("the menu offers Remove", "MENU_ENTRY Remove" in output, detail)
     check("clicking it asks the question", "ASKED 1" in output, detail)
+    check("and the box blocks its own window, not the application",
+          "BOX_MODALITY True" in output, detail)
     check("and the question names the file, not just the row",
           "finished.bin" in output.split("PROMPT", 1)[-1].splitlines()[0]
           if "PROMPT" in output else False, detail)
@@ -718,6 +727,7 @@ class Button:
 class FakeBox:
     asked = []
     answer = "keep"
+    modality = None
     class Icon: Question = 0
     class ButtonRole: AcceptRole = 0; DestructiveRole = 1
     class StandardButton: Cancel = 2
@@ -725,6 +735,7 @@ class FakeBox:
         self._text = ""; self._buttons = []
     def setIcon(self, *a): pass
     def setWindowTitle(self, *a): pass
+    def setWindowModality(self, mode): FakeBox.modality = mode
     def setText(self, t): self._text = t
     def setInformativeText(self, *a): pass
     def setDefaultButton(self, *a): pass
@@ -7173,6 +7184,7 @@ def main() -> int:
                  test_no_credential_shaped_literal_ships,
                  test_windows_only_imports_exist_on_windows,
                  test_the_splash_says_what_is_happening,
+                 check_dialogs_do_not_block_a_hand_over,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7214,6 +7226,111 @@ def main() -> int:
         print(f"  FAILED: {failure}")
     print("=" * 68)
     return 1 if FAILED else 0
+
+
+
+def check_dialogs_do_not_block_a_hand_over():
+    """No dialog of ours may hold the window a browser hand-over opens.
+
+    Reported: check for updates, then click a download in the browser, and the
+    window asking where to put it will not come to the front. `QDialog.exec()`
+    is application-modal — it blocks every other window in the process, and the
+    file-info window is deliberately parentless so Windows gives it its own
+    taskbar button (§3.62). The two decisions collided.
+
+    Constructed rather than argued: every dialog is built against a real main
+    window under the offscreen platform and asked what its modality is.
+    `WindowModal` blocks the parent chain and nothing else.
+    """
+    print("\n[a dialog blocks its own window, not the application]")
+    script = '''
+import sys, tempfile, shutil
+from pathlib import Path
+from ixd import config
+root = Path(tempfile.mkdtemp(prefix="ixd-modal-"))
+config.DATA_DIR = root; config.TEMP_DIR = root / "inc"; config.LOG_DIR = root / "logs"
+config.IPC_PORT_FILE = root / "ipc.json"; config.ensure_dirs()
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from ixd.config import Settings
+from ixd.core.db import Database
+from ixd.core.models import Download, DownloadStatus
+from ixd.service import DownloadService
+from ixd.ui import main_window as mw
+from ixd.ui.theme import DARK, apply_theme
+
+app = QApplication(sys.argv[:1])
+apply_theme(app, DARK)
+settings = Settings(root / "settings.json")
+out = root / "out"; out.mkdir(parents=True, exist_ok=True)
+settings.set("download_dir", str(out))
+service = DownloadService(settings, Database(root / "state.sqlite3"))
+window = mw.MainWindow(service, DARK)
+
+from ixd.ui.widgets.add_dialog import AddDownloadDialog
+from ixd.ui.widgets.log_dialog import LogDialog
+from ixd.ui.widgets.update_dialog import UpdateDialog
+from ixd.ui.widgets.guide_dialog import GuideDialog
+from ixd.ui.widgets.properties_dialog import PropertiesDialog
+from ixd.ui.widgets.settings_dialog import SettingsDialog
+from ixd.ui.widgets.browser_dialog import BrowserDownloadDialog
+
+download_id = service.db.insert_download(Download(
+    url="https://example.invalid/f.bin", filename="f.bin",
+    dest_dir=str(out), status=DownloadStatus.PAUSED))
+
+made = {
+    "add": AddDownloadDialog(service, window, ""),
+    "log": LogDialog(service, window),
+    "update": UpdateDialog(service, {}, window),
+    "guide": GuideDialog(window, DARK),
+    "properties": PropertiesDialog(service, download_id, DARK, window),
+    "settings": SettingsDialog(service, window),
+}
+# Flushed as they go. Some of these start a worker thread, and a QThread still
+# running at exit aborts the process (log §421) — which would take the buffered
+# output with it and look exactly like the dialogs failing to build.
+for name, dialog in made.items():
+    print("MODALITY", name,
+          dialog.windowModality() == Qt.WindowModality.WindowModal, flush=True)
+
+# And the one that must stay reachable: parentless, so nothing in the parent
+# chain of the others can be holding it.
+payload = {"url": "https://example.invalid/f.bin", "filename": "f.bin"}
+handover = BrowserDownloadDialog(service, None, payload)
+print("HANDOVER_PARENTLESS", handover.parent() is None, flush=True)
+print("HANDOVER_NOT_MODAL",
+      handover.windowModality() == Qt.WindowModality.NonModal, flush=True)
+
+service.db.close()
+shutil.rmtree(root, ignore_errors=True)
+'''
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["IXD_HOME"] = tempfile.mkdtemp(prefix="ixd-modal-home-")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=120, env=environment, cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        check("every dialog is window-modal", False, "timed out")
+        return
+    out = process.stdout
+    if "MODALITY" not in out:
+        check("the dialogs could be built at all", False,
+              (process.stderr or out)[-600:])
+        return
+    for line in out.splitlines():
+        if line.startswith("MODALITY"):
+            _, name, verdict = line.split()
+            check(f"the {name} dialog blocks its own window only",
+                  verdict == "True", line)
+    check("the hand-over window has no parent",
+          "HANDOVER_PARENTLESS True" in out, out[-400:])
+    check("and is not modal itself",
+          "HANDOVER_NOT_MODAL True" in out, out[-400:])
 
 
 if __name__ == "__main__":

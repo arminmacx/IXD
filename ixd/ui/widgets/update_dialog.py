@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..theme import own_window
+
 from ... import __version__
 from ... import updates
 from ..workers import Worker
@@ -45,6 +47,7 @@ class UpdateDialog(QDialog):
         self._release: updates.Release | None = None
 
         self.setWindowTitle("Update")
+        own_window(self)
         self.setMinimumSize(560, 460)
 
         layout = QVBoxLayout(self)
