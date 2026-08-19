@@ -889,9 +889,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build Internet Xtreme Downloader")
     parser.add_argument("--package", action="store_true",
                         help="also produce a distributable package for this OS")
-    parser.add_argument("--custom-installer", action="store_true",
+    parser.add_argument("--custom-installer", nargs="?", const="", default=None,
+                        metavar="PAYLOAD",
                         help="only build the custom-window Windows installer "
-                             "(not built by a normal run, and not published)")
+                             "(not built by a normal run, and not published). "
+                             "Takes the folder to pack, which for a testable "
+                             "installer is a real Windows build unpacked from "
+                             "the release's ixd-<version>-windows-x64.zip; "
+                             "defaults to dist/ixd, which on this machine is a "
+                             "Linux build and only compiles the script")
     parser.add_argument("--extension", action="store_true",
                         help="only build the browser extension archives")
     parser.add_argument("--icons", action="store_true", help="only regenerate icons")
@@ -909,11 +915,22 @@ def main() -> int:
         build_icons()
         return 0
 
-    if arguments.custom_installer:
+    if arguments.custom_installer is not None:
         # Deliberately not part of any normal run and matching no upload glob:
         # it is built when it is asked for, tested by hand, and published only
         # when the user says so.
-        build_windows_custom_installer(DIST / "ixd")
+        #
+        # The payload is an argument because the useful one is never the folder
+        # this machine just built: PyInstaller does not cross-compile, so a
+        # testable Windows installer is made by packing a real Windows build
+        # (§3.64). That used to be a manual swap of dist/ixd and nothing
+        # recorded it.
+        payload = Path(arguments.custom_installer) if arguments.custom_installer \
+            else DIST / "ixd"
+        if not (payload / "ixd.exe").is_file():
+            log(f"note: {payload} holds no ixd.exe — this compiles the script "
+                f"but the installer it makes will not run on Windows")
+        build_windows_custom_installer(payload)
         return 0
     if arguments.extension:
         package_extension()

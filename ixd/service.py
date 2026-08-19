@@ -591,6 +591,8 @@ class DownloadService:
                 self.db.log_event(
                     "Removed update staging left by a finished update: "
                     + ", ".join(swept))
+            else:
+                self.db.log_event("No update staging left to remove.")
         except Exception as error:      # noqa: BLE001 - never fatal at launch
             self.db.log_event(f"Could not sweep update staging: {error}",
                               level="warning")
@@ -826,6 +828,17 @@ class DownloadService:
         except Exception as error:      # noqa: BLE001 - reported to the caller
             self.db.log_event(f"Update download failed: {error}", level="warning")
             return False, str(error)
+
+        # The archive has been unpacked; nothing reads it again. It is the
+        # biggest file this application writes, and the self-update archives
+        # carry no version in their names, so the launch-time sweep cannot tell
+        # a spent one from a part-finished download of a newer version. Here it
+        # is unambiguous.
+        try:
+            archive.unlink(missing_ok=True)
+        except OSError as error:
+            self.db.log_event(f"Could not remove {archive}: {error}",
+                              level="warning")
 
         target = updates.install_root()
         if target is None:

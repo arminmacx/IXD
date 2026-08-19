@@ -1684,6 +1684,70 @@ function moveAndCloseChecks(done) {
   }, 30);
 }
 
+// ---------------------------------------------------------------------------
+// A download the browser is picking back up is not a download beginning now.
+//
+// Reported: signing in to Windows opened the file-info window asking where to
+// put something that had been paused the night before. `onCreated` fires for
+// the items a browser restores at start-up as well as for the ones a click
+// just made, and nothing told them apart.
+// ---------------------------------------------------------------------------
+console.log("\n[a restored download is not a new one]");
+{
+  // `shouldIntercept` calls `extensionOf`, so the slice starts there.
+  const from = source.indexOf("function extensionOf");
+  const to = source.indexOf("// ------", source.indexOf("function shouldIntercept"));
+  const scope = new Function(
+    source.slice(from, to)
+    + "; return { restoredReason, shouldIntercept, FRESH_DOWNLOAD_MS };")();
+
+  const now = Date.parse("2026-08-19T09:00:00.000Z");
+  const settings = {
+    enabled: true, interceptDownloads: true, ignoredHosts: [],
+    minSizeBytes: 0, extensions: [],
+  };
+  const fresh = {
+    id: 1, url: "https://example.com/film.mkv", filename: "film.mkv",
+    state: "in_progress", paused: false, bytesReceived: 0,
+    startTime: "2026-08-19T08:59:59.900Z", fileSize: 0,
+  };
+
+  check("a download that is beginning now is taken",
+    scope.restoredReason(fresh, now) === "" &&
+    scope.shouldIntercept(fresh, settings, now) === true);
+
+  check("one the browser restored from last night is left alone",
+    scope.shouldIntercept(
+      { ...fresh, startTime: "2026-08-18T22:14:00.000Z" }, settings, now) === false);
+
+  check("and the reason names the time it began",
+    scope.restoredReason(
+      { ...fresh, startTime: "2026-08-18T22:14:00.000Z" }, now)
+      .includes("2026-08-18T22:14:00.000Z"));
+
+  check("one the browser already has bytes of is left alone",
+    scope.shouldIntercept({ ...fresh, bytesReceived: 4096 }, settings, now) === false);
+
+  check("a paused one is left alone",
+    scope.shouldIntercept({ ...fresh, paused: true }, settings, now) === false);
+
+  check("an interrupted one is left alone",
+    scope.shouldIntercept({ ...fresh, state: "interrupted" }, settings, now) === false);
+
+  check("a completed one is left alone",
+    scope.shouldIntercept({ ...fresh, state: "complete" }, settings, now) === false);
+
+  // The clock is only consulted when the item carries one: a stub item in some
+  // other test, and an older browser, both leave `startTime` out.
+  check("an item with no start time is judged on its other signals",
+    scope.restoredReason({ ...fresh, startTime: undefined }, now) === "");
+
+  // Two minutes is far longer than the gap between a click and `onCreated`,
+  // and far shorter than a session. Pinned so a later edit has to mean it.
+  check("the freshness window is two minutes",
+    scope.FRESH_DOWNLOAD_MS === 120000, String(scope.FRESH_DOWNLOAD_MS));
+}
+
 panelChecks(() => moveAndCloseChecks(async () => {
   await Promise.all(pendingAsync);
   console.log(`\n${"=".repeat(60)}`);

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -493,17 +494,49 @@ def stage(archive: Path, into: Path, launcher: str = "") -> Path:
 #: any update takes.
 STAGING_KEEP_SECONDS = 60 * 60
 
+#: A version number inside an asset's name: `ixd-1.0.26-windows-x64-setup.exe`.
+_VERSION_IN_NAME = re.compile(r"(\d+(?:\.\d+)+)")
 
-def _sweep_old_staging(parent: Path, keep: str = "") -> None:
+
+def spent_update(name: str, current: str = __version__) -> bool:
+    """Is this downloaded file an update this copy has already taken?
+
+    **Age was the wrong signal for the file itself.** A silent installer runs,
+    reopens the application about a minute later, and the sweep at that launch
+    finds a ninety-megabyte `setup.exe` four minutes old and keeps it — because
+    an hour has not passed. It is then swept only at some *later* launch that
+    happens to be an hour after the download, which on a day of seven releases
+    never came: each restart preserved the file the last one had just used, and
+    the folder grew by one installer per update. Reported as the disk filling
+    up with them.
+
+    The version in the name answers it exactly. A file that installs the
+    version now running has done its job, whatever its age; a file for a
+    *newer* version is a part-finished download to be resumed (§3.63) and is
+    left alone. A name with no version in it is judged by age as before.
+    """
+    match = _VERSION_IN_NAME.search(name)
+    if match is None:
+        return False
+    return not is_newer(match.group(1), current)
+
+
+def _sweep_old_staging(parent: Path, keep: str = "",
+                       current: str = __version__) -> list[str]:
     """Remove staging folders from *old* attempts, and never a recent one.
 
     Best-effort throughout: a folder that will not go is one something is
-    still holding, and it will be swept next time instead.
+    still holding, and it will be swept next time instead — including the
+    installer that is still running while its own replacement starts up, which
+    Windows refuses to delete and which goes at the launch after that.
+
+    Returns what it removed, so the log can name it.
     """
+    removed: list[str] = []
     try:
         entries = list(parent.iterdir())
     except OSError:
-        return
+        return removed
     cutoff = time.time() - STAGING_KEEP_SECONDS
     for entry in entries:
         if entry.name == keep:
@@ -513,21 +546,27 @@ def _sweep_old_staging(parent: Path, keep: str = "") -> None:
         # this application ever writes — sitting there for good.
         if entry.is_dir() and not entry.name.startswith("unpacked"):
             continue
-        try:
-            if entry.stat().st_mtime > cutoff:
-                continue              # recent: something may be running in it
-        except OSError:
-            continue
+        if entry.is_dir() or not spent_update(entry.name, current):
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue          # recent: something may be running in it
+            except OSError:
+                continue
         if entry.is_dir():
             shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                removed.append(entry.name)
         else:
             try:
                 entry.unlink()
+                removed.append(entry.name)
             except OSError:
                 pass
+    return removed
 
 
-def sweep_leftover_staging(fallback: Path) -> list[str]:
+def sweep_leftover_staging(fallback: Path,
+                           current: str = __version__) -> list[str]:
     """Clear staging folders left behind by finished updates.
 
     Two of them, because two versions made two messes: the data directory's,
@@ -535,9 +574,12 @@ def sweep_leftover_staging(fallback: Path) -> list[str]:
     to 1.0.20 created even when it was an installer build that could never use
     it. Returns what it removed, so the log can say so.
 
-    Age-gated throughout, and for the same reason as everywhere else here: an
-    updater may still be running out of one of these, and taking its files away
-    underneath it is the failure this whole scheme exists to prevent.
+    Age-gated for the *folders*, and for the same reason as everywhere else
+    here: an updater may still be running out of one of these, and taking its
+    files away underneath it is the failure this whole scheme exists to
+    prevent. The downloaded update **file** is judged by its version instead —
+    see `spent_update`; an hour's grace on that one is what let a day of seven
+    releases leave seven installers behind.
     """
     removed: list[str] = []
     roots = [fallback]
@@ -547,7 +589,8 @@ def sweep_leftover_staging(fallback: Path) -> list[str]:
     for staging in roots:
         if not staging.is_dir():
             continue
-        _sweep_old_staging(staging)
+        removed.extend(f"{staging}{os.sep}{name}"
+                       for name in _sweep_old_staging(staging, current=current))
         try:
             if not any(staging.iterdir()):
                 staging.rmdir()

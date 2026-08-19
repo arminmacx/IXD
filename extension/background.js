@@ -308,8 +308,51 @@ function announceCaptures(tabId) {
   }
 }
 
-function shouldIntercept(item, settings) {
+//: Why an item announced by `onCreated` is not a download that is beginning
+//: now: the empty string when it is. Separate from `shouldIntercept` so the
+//: listener can say which signal it was — rule 8, a path that only speaks when
+//: it acts is indistinguishable from one that never ran, and this one is the
+//: answer to a field report that took a night's sleep to reproduce.
+function restoredReason(item, now) {
+  const state = item.state || "in_progress";
+  if (state !== "in_progress") return `it is ${state}`;
+  if (item.paused) return "it is paused";
+  if ((item.bytesReceived || 0) > 0) {
+    return `the browser already has ${item.bytesReceived} bytes of it`;
+  }
+  if (item.startTime) {
+    const began = Date.parse(item.startTime);
+    const at = now === undefined ? Date.now() : now;
+    if (!Number.isNaN(began) && at - began > FRESH_DOWNLOAD_MS) {
+      return `it began at ${item.startTime}`;
+    }
+  }
+  return "";
+}
+
+//: How old a download may be and still count as one that is beginning now.
+//: `onCreated` fires within milliseconds of a click, so anything approaching
+//: this is not a new download — it is an old one the browser is re-announcing.
+const FRESH_DOWNLOAD_MS = 2 * 60 * 1000;
+
+function shouldIntercept(item, settings, now) {
   if (!settings.enabled || !settings.interceptDownloads) return false;
+
+  // **A download the browser is picking back up is not a new download.**
+  //
+  // Reported: signing in to Windows put the file-info window on screen asking
+  // where to save something that had been paused the night before. Nothing in
+  // the application can do that — no pending hand-over is written to the
+  // database, and a paused row never opens a window — so it arrived over IPC,
+  // which means the extension announced it.
+  //
+  // `onCreated` fires for items the browser restores at start-up as well as
+  // for ones a click just made, and nothing here told them apart. Intercepting
+  // a restored one is wrong twice over: it asks a question nobody asked for,
+  // and it would restart from zero a transfer that already has bytes on disk.
+  //
+  // Four signals, any one of which means "not new" — see `restoredReason`.
+  if (restoredReason(item, now)) return false;
 
   const url = item.finalUrl || item.url || "";
   if (!/^https?:\/\//i.test(url)) return false;      // blob:, data:, filesystem:
@@ -341,6 +384,13 @@ const handledDownloads = new Set();
 chrome.downloads.onCreated.addListener(async (item) => {
   if (handledDownloads.has(item.id)) return;
   const settings = await getSettings();
+  if (!settings.enabled || !settings.interceptDownloads) return;
+  const restored = restoredReason(item);
+  if (restored) {
+    report(`Leaving “${basename(item.filename || "") || item.url}” to the `
+           + `browser: ${restored}, so it is not a download beginning now.`);
+    return;
+  }
   if (!shouldIntercept(item, settings)) return;
 
   handledDownloads.add(item.id);

@@ -2505,6 +2505,41 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
                   not beside.exists(), str(swept))
             check("an update that may still be running is left alone",
                   recent.exists())
+
+            # **The reported one.** A silent installer reopens the application
+            # about a minute after it ran, so the sweep at that launch found a
+            # ninety-megabyte setup.exe four minutes old and kept it — an hour
+            # had not passed. On a day of seven releases every restart
+            # preserved the file the last one had just used. The version in the
+            # name settles it: this file installs the version now running, so
+            # it is spent whatever its age.
+            check("a name with the running version in it is a spent update",
+                  updates.spent_update("ixd-1.0.26-windows-x64-setup.exe",
+                                       "1.0.26"))
+            check("an older one is spent too",
+                  updates.spent_update("ixd-1.0.20-windows-x64-setup.exe",
+                                       "1.0.26"))
+            check("a newer one is a download to be resumed, not rubbish",
+                  not updates.spent_update("ixd-1.0.27-windows-x64-setup.exe",
+                                           "1.0.26"))
+            check("and a name with no version in it is judged by age",
+                  not updates.spent_update("ixd-linux-x86_64-selfupdate.tar.gz",
+                                           "1.0.26"))
+
+            just_used = fallback / "ixd-1.0.26-windows-x64-setup.exe"
+            just_used.write_bytes(b"z" * 128)
+            half_done = fallback / "ixd-1.0.27-windows-x64-setup.exe"
+            half_done.write_bytes(b"z" * 8)
+            swept = updates.sweep_leftover_staging(fallback, "1.0.26")
+            check("the installer this copy was made by goes at once",
+                  not just_used.exists(), str(swept))
+            check("and it is named in what the sweep reports",
+                  any("1.0.26-windows" in name for name in swept), str(swept))
+            check("a part-downloaded newer update survives the sweep",
+                  half_done.exists())
+            check("and so does an unversioned archive that is still recent",
+                  recent.exists())
+            half_done.unlink()
         finally:
             updates.install_root = original_root
 
