@@ -518,221 +518,6 @@ def build_windows_source() -> Path:
 #: in it has to agree with what the build just produced — and a template that
 #: drifts from the build is an installer that ships the wrong version number
 #: or omits a file nobody notices until somebody runs it.
-_NSIS_SCRIPT = r"""
-Unicode true
-
-; MultiUser gives the "everyone / just me" page, and with it the two things
-; that have to change together: where the files go, and which hive the
-; uninstall entry is written to. Doing that by hand is how an installer ends up
-; writing an all-users install into HKCU, where Add/Remove Programs shows it to
-; one account and nobody else can remove it.
-;
-; `Highest` means: elevate when the person running this can, and offer only the
-; per-user option when they cannot. A standard user still gets a working
-; install, which is the whole point of having the second option.
-!define MULTIUSER_EXECUTIONLEVEL Highest
-!define MULTIUSER_MUI
-!define MULTIUSER_INSTALLMODE_COMMANDLINE
-!define MULTIUSER_INSTALLMODE_INSTDIR "{app_slug}"
-!define MULTIUSER_INSTALLMODE_INSTALL_REGISTRY_KEY "Software\{app_slug}"
-!define MULTIUSER_INSTALLMODE_INSTALL_REGISTRY_VALUENAME "InstallDir"
-!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_KEY "Software\{app_slug}"
-!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_VALUENAME "InstallDir"
-!define MULTIUSER_INSTALLMODE_FUNCTION OnInstallModeChanged
-!include "MultiUser.nsh"
-!include "MUI2.nsh"
-!include "LogicLib.nsh"
-
-Name "{app_name}"
-OutFile "{output}"
-BrandingText "{app_name} {version}"
-ShowInstDetails show
-ShowUninstDetails show
-
-!define MUI_ABORTWARNING
-!define MUI_ICON "{icon}"
-!define MUI_UNICON "{icon}"
-; **Not `MUI_FINISHPAGE_RUN "$INSTDIR\..."`.** That runs the application as a
-; child of this installer, and a child of an elevated process is elevated too —
-; so ticking the box on the finish page left a download manager running as
-; administrator for the rest of the session, and, worse, gave that one launch
-; write access to `Program Files` when no launch afterwards has it. That is
-; what put an extension folder there that nothing could ever update again
-; (context.md §3.71). Explorer runs as the logged-in user, so it launders the
-; token away — the same trick the silent branch of the install section uses.
-!define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_FUNCTION StartAsTheUser
-!define MUI_FINISHPAGE_RUN_TEXT "Start {app_name}"
-
-!insertmacro MULTIUSER_PAGE_INSTALLMODE
-!insertmacro MUI_PAGE_DIRECTORY
-!insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_PAGE_FINISH
-!insertmacro MUI_UNPAGE_CONFIRM
-!insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "English"
-
-; Chosen on the page above, and the two answers are not symmetrical.
-;
-; All users goes to Program Files, which needs administrator and which the
-; person who *runs* the application afterwards cannot write to — so the
-; extension folder falls back to their data directory, by design.
-;
-; Just me goes to %APPDATA%\{app_slug} — writable, no elevation, and the
-; extension folder therefore sits inside the install where the browser can be
-; pointed at it once and keep working across updates.
-Function OnInstallModeChanged
-  ; **A remembered installation wins.** MultiUser calls this whenever the mode
-  ; is set, including from MULTIUSER_INIT — which runs *after* it has read the
-  ; previous InstallDir out of the registry. Overwriting $INSTDIR here threw
-  ; that away on every run, so an upgrade never targeted the folder the user
-  ; actually installed into: it reset to this mode's default, and anybody who
-  ; had installed anywhere else was relocated by every update they took.
-  ;
-  ; SHCTX follows the mode, so this reads HKLM for an all-users install and
-  ; HKCU for a per-user one — the same place the Install section wrote it.
-  ClearErrors
-  ReadRegStr $0 SHCTX "Software\{app_slug}" "InstallDir"
-  ${{IfNot}} ${{Errors}}
-  ${{AndIf}} $0 != ""
-    StrCpy $INSTDIR "$0"
-    Return
-  ${{EndIf}}
-
-  ; No previous install in this mode: choose the default. All users goes to
-  ; Program Files, which needs administrator and which the person who *runs*
-  ; the application afterwards cannot write to — so the extension folder falls
-  ; needs administrator to install into. The extension folders are **in the
-  ; payload** now, so this installer writes them into whichever folder was
-  ; chosen, with the privileges to do it — the application no longer creates
-  ; them at start-up and no longer decides where they go (§3.71). Just me goes
-  ; to %APPDATA%, which needs no elevation at all.
-  ${{If}} $MultiUser.InstallMode == "AllUsers"
-    StrCpy $INSTDIR "$PROGRAMFILES64\{app_slug}"
-  ${{Else}}
-    StrCpy $INSTDIR "$APPDATA\{app_slug}"
-  ${{EndIf}}
-FunctionEnd
-
-Function StartAsTheUser
-  Exec '"$WINDIR\explorer.exe" "$INSTDIR\{launcher}"'
-FunctionEnd
-
-Function .onInit
-  !insertmacro MULTIUSER_INIT
-FunctionEnd
-
-Function un.onInit
-  !insertmacro MULTIUSER_UNINIT
-FunctionEnd
-
-Section "Install"
-  ; Close a copy that is already running, before a single file is written.
-  ;
-  ; Reported on the first in-app update: the application starts this installer
-  ; and quits — but "and quits" is a race, and NSIS got to the first locked
-  ; file first: *"its not close and quit the app completely and hit with error
-  ; that ixd is running and i should manually quit the app then hit retry"*.
-  ;
-  ; So the installer stops depending on the timing and does it itself. Politely
-  ; first, because the application is writing out its database; then plainly,
-  ; because by that point it has had five seconds and the person is watching a
-  ; progress bar. `ixd.exe` is also the name the browser's messaging host runs
-  ; under, so this closes that too — which is the other thing holding the
-  ; folder open (context.md §3.14u57).
-  DetailPrint "Closing {app_name} if it is running…"
-  ExecWait 'taskkill /IM "{launcher}"'
-  Sleep 2500
-  ExecWait 'taskkill /IM "{launcher}" /F'
-  Sleep 800
-
-  SetOutPath "$INSTDIR"
-  ; Everything the portable build contains, exactly as it was tested.
-  ; `\*` and not `\*.*`: the second is the DOS spelling and is reported to skip
-  ; files with no extension. Only one file in the build has none — the launcher,
-  ; which on Windows is `ixd.exe` and does — but this is a script that cannot be
-  ; run here, and the superset costs nothing.
-  File /r "{payload}\*"
-
-  CreateDirectory "$SMPROGRAMS\{app_name}"
-  CreateShortCut "$SMPROGRAMS\{app_name}\{app_name}.lnk" "$INSTDIR\{launcher}"
-  CreateShortCut "$SMPROGRAMS\{app_name}\Uninstall {app_name}.lnk" "$INSTDIR\uninstall.exe"
-  CreateShortCut "$DESKTOP\{app_name}.lnk" "$INSTDIR\{launcher}"
-
-  ; SHCTX is HKLM for an all-users install and HKCU for a per-user one.
-  ; MultiUser sets it; writing the literal hive is the mistake it exists to
-  ; prevent.
-  WriteRegStr SHCTX "Software\{app_slug}" "InstallDir" "$INSTDIR"
-  WriteRegStr SHCTX "Software\{app_slug}" "InstallMode" "$MultiUser.InstallMode"
-  ; The entry Add/Remove Programs reads. Without it the application can be
-  ; installed and not uninstalled, which is worse than not installing at all.
-  WriteRegStr SHCTX "{uninstall_key}" "DisplayName" "{app_name}"
-  WriteRegStr SHCTX "{uninstall_key}" "DisplayVersion" "{version}"
-  WriteRegStr SHCTX "{uninstall_key}" "Publisher" "{publisher}"
-  WriteRegStr SHCTX "{uninstall_key}" "DisplayIcon" "$INSTDIR\{launcher}"
-  WriteRegStr SHCTX "{uninstall_key}" "UninstallString" "$INSTDIR\uninstall.exe"
-  WriteRegStr SHCTX "{uninstall_key}" "InstallLocation" "$INSTDIR"
-  WriteRegDWORD SHCTX "{uninstall_key}" "NoModify" 1
-  WriteRegDWORD SHCTX "{uninstall_key}" "NoRepair" 1
-  WriteUninstaller "$INSTDIR\uninstall.exe"
-
-  ; An in-app update runs this silently, and a silent run has no finish page to
-  ; offer "run it now" on — so it reopens the application itself. That is the
-  ; whole difference between taking an update and being made to answer an
-  ; install wizard to take a patch.
-  ;
-  ; **Through Explorer on purpose.** This installer may be elevated, and a
-  ; child of an elevated process is elevated too: `Exec "$INSTDIR\{launcher}"`
-  ; would leave a download manager running as administrator for the rest of the
-  ; session. `explorer.exe` runs as the logged-in user, so what it starts does
-  ; too. No plugin, which is the constraint that rules out the usual answer.
-  ${{If}} ${{Silent}}
-    Exec '"$WINDIR\explorer.exe" "$INSTDIR\{launcher}"'
-  ${{EndIf}}
-SectionEnd
-
-Section "Uninstall"
-  ; The application is asked to close first: a folder cannot be removed while
-  ; anything inside it is running, which is the same lesson the updater
-  ; learned the hard way.
-  ExecWait 'taskkill /IM "{launcher}" /F'
-  Sleep 500
-  Delete "$DESKTOP\{app_name}.lnk"
-  Delete "$SMPROGRAMS\{app_name}\{app_name}.lnk"
-  Delete "$SMPROGRAMS\{app_name}\Uninstall {app_name}.lnk"
-  RMDir "$SMPROGRAMS\{app_name}"
-  ; Takes the generated extension folders with it. They are written by the
-  ; application rather than by this installer, so nothing else would.
-  RMDir /r "$INSTDIR"
-  DeleteRegKey SHCTX "{uninstall_key}"
-  DeleteRegKey SHCTX "Software\{app_slug}"
-SectionEnd
-"""
-
-
-def windows_installer_script(binary_dir: Path, output: Path) -> str:
-    """The installer script for what has just been built.
-
-    `app_name` is the **display** name and `app_slug` the one that goes in
-    paths and the registry. They were the same string — the slug — until the
-    script was compiled and its preprocessed output read: Add/Remove Programs
-    would have said `ixd`, and so would the Start menu folder and the desktop
-    shortcut. Nothing about reading the template showed it.
-    """
-    icon = ROOT / "packaging" / "icons" / "ixd.ico"
-    return _NSIS_SCRIPT.format(
-        app_name=BUNDLE_NAME,
-        app_slug="IXD",
-        version=VERSION,
-        publisher="IXD",
-        output=str(output),
-        payload=str(binary_dir),
-        launcher="ixd.exe",
-        icon=str(icon),
-        uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
-                       r"\Uninstall\IXD"),
-    )
-
 
 def build_macos_pkg(app_bundle: Path) -> Path | None:
     """A double-clickable installer, which a .dmg is not.
@@ -812,16 +597,43 @@ def build_windows_installer(binary_dir: Path) -> Path | None:
     """A real installer, when the machine has something to build one with.
 
     NSIS is the tool Windows installers are built with; it is not something
-    this project reimplements, and it is not something a Linux machine has. So
-    the script is written either way — it can be read, and it is checked by a
-    test — and it is compiled only where `makensis` exists, which is CI.
+    this project reimplements. `makensis` runs on Linux, so this machine can
+    compile it, and CI does too.
+
+    **This is the custom-window installer**, and it replaced the MUI2 one on
+    2026-08-20 at the user's word: *"from now on you can replace the old nsis
+    installer with our custom one."* It publishes under the same
+    `windows-x64-setup.exe` name, which matters more than it looks: an
+    installed build asks its update for `("windows", "setup", ".exe")` and
+    `Release.asset()` returns the first published file containing all three,
+    so there must be exactly one. `build_windows_custom_installer` — the
+    by-hand route that takes a payload argument — writes a name matching no
+    upload glob, and nothing publishes it.
+
+    The payload is `_installer_payload`, not the folder as it stands: what the
+    installer packs has to carry the marker that says it was installed, or
+    every copy from `setup.exe` offers a link to the release page instead of
+    an update (§432).
     """
+    from installer_custom import script as custom_script
+
     section("Windows installer")
     output = DIST / f"ixd-{VERSION}-windows-x64-setup.exe"
     payload = _installer_payload(binary_dir)
     script_path = DIST / "installer.nsi"
-    script_path.write_text(windows_installer_script(payload, output),
-                           encoding="utf-8")
+    script_path.write_text(custom_script(
+        app_name=BUNDLE_NAME,
+        app_slug="IXD",
+        version=VERSION,
+        publisher="IXD",
+        output=str(output),
+        payload=str(payload),
+        launcher="ixd.exe",
+        icon=str(ROOT / "packaging" / "icons" / "ixd.ico"),
+        art=str(ROOT / "packaging" / "installer-art"),
+        uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
+                       r"\Uninstall\IXD"),
+    ), encoding="utf-8")
     log(f"wrote {script_path.name}")
     if not have("makensis"):
         log("makensis is not installed here, so the installer is not compiled")

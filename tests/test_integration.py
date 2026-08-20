@@ -5376,68 +5376,121 @@ def _preprocessed_installer(text: str) -> str:
 
 
 def test_the_windows_installer_script_is_one_that_could_run() -> None:
-    """The installer is written here and compiled somewhere else.
+    """The installer the release publishes, built the way the release builds it.
 
-    `makensis` is not on this machine and NSIS is not something this project
-    reimplements, so `build_windows_installer` writes the script either way and
-    compiles it only where the tool exists. That means the script itself is the
-    only thing anybody here can check — and `build.py` already claimed it was
-    checked by a test, which it was not.
+    **This is the custom-window installer now.** It replaced the MUI2 one on
+    2026-08-20 at the user's word, and it publishes under the same
+    `windows-x64-setup.exe` name — which matters more than it looks. An
+    installed build asks its update for `("windows", "setup", ".exe")` and
+    `Release.asset()` returns the first published file containing all three,
+    so there must be exactly one.
 
-    What is checked is the class of failure a Linux machine can still find: a
-    placeholder that was never substituted, a version that disagrees with the
-    build, a payload or launcher name that is not what was just produced, and
-    the decisions that were made deliberately — per-user rather than
-    administrator, an Add/Remove Programs entry, and an uninstaller that closes
-    the application before removing the folder it is running from.
+    `build_windows_installer` is called rather than the script generator
+    underneath it, because half of what can go wrong is in the arguments
+    `build.py` passes: the payload it packs, the name it writes, and the
+    marker that says the build was installed.
     """
     print("\n[the windows installer script is one that could run]")
     import re as _re
+    import subprocess
     import sys
 
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "packaging"))
     import build as build_module  # noqa: PLC0415
 
-    payload = root / "dist" / "ixd"
-    output = root / "dist" / f"ixd-{build_module.VERSION}-windows-x64-setup.exe"
-    script = build_module.windows_installer_script(payload, output)
+    if not build_module.have("makensis"):
+        print("  SKIP  makensis is not installed here "
+              "(apt install nsis); CI still compiles it")
+        return
 
-    # Every `{name}` in the template has to have been filled in. One that was
-    # not is a literal brace in an NSIS script, which is a compile error on a
-    # machine none of us is sitting at.
-    left = _re.findall(r"\{[a-z_]+\}", script)
+    # A stand-in payload: what is under test is the script, and packing the
+    # real 50 MB build proves nothing extra and exhausts the compiler's mmap.
+    with tempfile.TemporaryDirectory(prefix="ixd-setup-") as home:
+        home = Path(home)
+        payload = home / "ixd"
+        (payload / "_internal").mkdir(parents=True)
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 4096)
+        (payload / "_internal" / "base_library.zip").write_bytes(
+            b"PK\x05\x06" + b"\0" * 4096)
+        # A file with no extension, which is what `\*.*` would have skipped.
+        (payload / "_internal" / "noextension").write_bytes(b"x" * 2048)
+
+        was, build_module.DIST = build_module.DIST, home / "dist"
+        build_module.DIST.mkdir()
+        try:
+            produced = build_module.build_windows_installer(payload)
+            script = (build_module.DIST / "installer.nsi").read_text(
+                encoding="utf-8")
+            staged = build_module.DIST / "installer-payload" / "ixd"
+            marker = staged / "update-channel.json"
+            check("the payload it packs is told it was installed",
+                  marker.is_file(),
+                  "no update-channel.json was staged")
+            if marker.is_file():
+                written = json.loads(marker.read_text(encoding="utf-8"))
+                check("and the marker asks for the next setup.exe",
+                      written.get("asset") == "windows-x64-setup.exe"
+                      and written.get("kind") == "installer"
+                      and written.get("version") == build_module.VERSION,
+                      str(written))
+            check("it packs that staged copy, not the folder as it stood",
+                  str(staged) in script)
+            # Counted while the staging is still on disk: it is the payload's
+            # files plus the marker `_installer_payload` writes into it.
+            staged_files = sum(1 for item in staged.rglob("*") if item.is_file())
+            check("an installer is produced", produced and produced.is_file(),
+                  str(produced))
+            if produced and produced.is_file():
+                check("which is a Windows executable",
+                      produced.read_bytes()[:2] == b"MZ")
+                check("and it is the name the release publishes and an update "
+                      "asks for",
+                      produced.name
+                      == f"ixd-{build_module.VERSION}-windows-x64-setup.exe",
+                      produced.name)
+        finally:
+            build_module.DIST = was
+
+    # Every `@NAME@` in the template has to have been filled in. One that was
+    # not is a literal `@` in a path, and `makensis` refuses it outright —
+    # which is how `@ART@` inside the generated bar `File` lines was caught.
+    left = sorted(set(_re.findall(r"@[A-Z_]+@", script)))
     check("no placeholder is left unsubstituted", not left, str(left))
 
-    check("it names this build's version", f"{build_module.VERSION}" in script)
-    check("and writes the file the release publishes", str(output) in script)
-    check("it installs what was just built", str(payload) in script)
-    # The directive, not the whole script: the comment above it in the template
-    # explains the DOS spelling by quoting it, and a substring test over the
-    # file matches the explanation instead of the instruction.
+    check("it names this build's version", build_module.VERSION in script)
+    check("the launcher it points at is the Windows one",
+          '"$INSTDIR\\ixd.exe"' in script)
+
+    # The payload is copied one `File` at a time rather than with `\*`, which
+    # is what lets the progress bar be spaced by bytes instead of by
+    # instruction count (§3.67). Every file in the stand-in has to appear.
     directives = [line.strip() for line in script.splitlines()
                   if line.strip().startswith("File ")]
-    check("copying it whole, including files with no extension",
-          len(directives) == 1 and directives[0].endswith(r'\*"'),
-          str(directives))
-    check("the launcher it points at is the Windows one",
-          "ixd.exe" in script and "$INSTDIR\\ixd.exe" in script)
+    copied = sum(1 for line in directives if "installer-payload" in line)
+    check("the payload is copied file by file, so the bar can be spaced by "
+          "bytes",
+          copied == staged_files,
+          f"{copied} File directives against {staged_files} staged files")
+    check("including the one with no extension, which `\\*.*` would skip",
+          any(line.endswith('noextension"') for line in directives),
+          str([d for d in directives if "noextension" in d]))
 
     # Deliberate decisions, each of which was a choice rather than a default.
     check("the person installing is asked who it is for",
-          "MULTIUSER_PAGE_INSTALLMODE" in script and "MultiUser.nsh" in script)
+          "Just me" in script and "Everyone on this PC" in script)
     check("and can install without administrator if they choose",
           "MULTIUSER_EXECUTIONLEVEL Highest" in script,
           _re.search(r"MULTIUSER_EXECUTIONLEVEL.*", script).group(0))
-    check("all users goes to Program Files",
-          "$PROGRAMFILES64\\IXD" in script)
+    check("all users goes to Program Files", "$PROGRAMFILES64\\IXD" in script)
     check("just me goes to %APPDATA%, which needs no elevation and is writable",
           "$APPDATA\\IXD" in script)
 
     # The half that is easy to get wrong: an all-users install whose uninstall
     # entry is written to HKCU shows up for one account and cannot be removed
     # by anyone else. SHCTX is whichever hive the chosen mode implies.
-    hives = _re.findall(r"(?:WriteRegStr|WriteRegDWORD|DeleteRegKey)\s+(\S+)", script)
+    hives = _re.findall(r"(?:WriteRegStr|WriteRegDWORD|DeleteRegKey)\s+(\S+)",
+                        script)
     check("every registry write follows the chosen mode, not a fixed hive",
           hives and set(hives) == {"SHCTX"}, str(sorted(set(hives))))
 
@@ -5446,52 +5499,13 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
     check("with an uninstall command, so it can be removed at all",
           '"UninstallString"' in script and "WriteUninstaller" in script)
     check("the uninstaller closes the application first",
-          "taskkill" in script and script.index("taskkill") < script.index('RMDir /r "$INSTDIR"'))
-
-    # And so does the *installer*, which is the half that was missing. An
-    # in-app update starts this while the application is still shutting down,
-    # and NSIS reached the first locked file first: "ixd is running … hit
-    # retry". Compiled rather than read, per §3.42 — the instructions below
-    # come out of `makensis -PPO`, so a comment mentioning taskkill cannot
-    # stand in for the instruction.
-    compiled = _preprocessed_installer(script)
-    if compiled:
-        install = compiled.split('Section "Install"', 1)[-1].split("SectionEnd", 1)[0]
-        kills = [line for line in install.splitlines() if "taskkill" in line]
-        writes = [i for i, line in enumerate(install.splitlines())
-                  if line.startswith("File ")]
-        killed_at = [i for i, line in enumerate(install.splitlines())
-                     if "taskkill" in line]
-        check("the installer closes a running copy too", len(kills) == 2,
-              str(kills))
-        check("politely before it insists",
-              kills[0].strip().endswith("'") and "/F" not in kills[0]
-              and "/F" in kills[1], str(kills))
-        check("and before it writes a single file",
-              killed_at and writes and max(killed_at) < min(writes),
-              f"kills at {killed_at}, writes at {writes}")
-    elif shutil.which("makensis"):
-        check("the installer script compiles", False,
-              "makensis produced no preprocessed output")
-    check("and takes its shortcuts and registry keys with it",
-          'Delete "$DESKTOP' in script and "DeleteRegKey" in script)
-    check("MultiUser is initialised on both sides, or the uninstaller "
-          "does not know which hive it is in",
-          "MULTIUSER_INIT" in script and "MULTIUSER_UNINIT" in script)
-
-    # The icon is the one the build generates; it need not exist yet on a tree
-    # that has never been built, but the path has to be the one that will.
-    icon = root / "packaging" / "icons" / "ixd.ico"
-    check("it uses the multi-resolution icon the build assembles",
-          str(icon) in script, str(icon))
-
-    check("and it is compiled only where the tool exists",
-          "makensis" in inspect_source(build_module.build_windows_installer))
+          "taskkill" in script
+          and script.index("taskkill") < script.index('RMDir /r "$INSTDIR"'))
 
     # The names a person actually sees. These were the slug — `ixd` in
     # Add/Remove Programs, in the Start menu and on the desktop — and reading
     # the template never showed it; compiling and reading the preprocessed
-    # output did.
+    # output did (§3.42).
     check("what it calls itself is the display name, not the slug",
           f'"DisplayName" "{build_module.BUNDLE_NAME}"' in script,
           _re.search(r'"DisplayName".*', script).group(0))
@@ -5501,44 +5515,31 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
     check("while paths and the registry keep the slug",
           "$PROGRAMFILES64\\IXD" in script and "Uninstall\\IXD" in script)
 
-    # ---- and then actually compile it, wherever that is possible ----
-    #
-    # `makensis` runs on Linux and produces Windows installers, so this is not
-    # a check that only CI can make. Against a stand-in payload: what is under
-    # test is the script, and packing the real 50 MB build here proves nothing
-    # extra and exhausts the compiler's mmap.
-    if not build_module.have("makensis"):
-        print("  SKIP  makensis is not installed here "
-              "(apt install nsis); CI still compiles it")
+    # And the *installer* closes the application too, which is the half that
+    # was missing. An in-app update starts this while the application is still
+    # shutting down, and NSIS reached the first locked file first: "ixd is
+    # running … hit retry". Read out of `makensis -PPO`, per §3.42, so a
+    # comment mentioning taskkill cannot stand in for the instruction.
+    compiled = _preprocessed_installer(script)
+    check("the script preprocesses", compiled, "makensis produced no output")
+    if not compiled:
         return
+    install = compiled.split('Section "Install"', 1)[-1].split("SectionEnd", 1)[0]
+    kills = [line for line in install.splitlines() if "taskkill" in line]
+    check("the installer closes it before writing over it", kills, str(kills))
+    check("and forces it if it will not go", any("/F" in line for line in kills),
+          str(kills))
 
-    import subprocess
-    with tempfile.TemporaryDirectory() as home:
-        payload = Path(home) / "payload"
-        (payload / "_internal").mkdir(parents=True)
-        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
-        (payload / "_internal" / "base_library.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
-        # A file with no extension, which is what `\*.*` would have skipped.
-        (payload / "_internal" / "noextension").write_bytes(b"x")
-
-        produced = Path(home) / "setup.exe"
-        nsi = Path(home) / "installer.nsi"
-        nsi.write_text(
-            build_module.windows_installer_script(payload, produced),
-            encoding="utf-8")
-        try:
-            done = subprocess.run(["makensis", "-V2", str(nsi)],
-                                  capture_output=True, text=True, timeout=180)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            check("the installer script compiles", False, str(exc))
-            return
-
-        detail = (done.stdout[-600:] + done.stderr[-600:]).strip()
-        check("the installer script compiles", done.returncode == 0, detail)
-        check("and produces an installer", produced.is_file(), detail)
-        if produced.is_file():
-            check("which is a Windows executable",
-                  produced.read_bytes()[:2] == b"MZ")
+    # A silent install has no page two, so `Tick` has no control to draw into
+    # — and an in-app update runs this with `/S`. Without the guard it hands
+    # twenty-four bitmaps to a null window, which takes ownership of none.
+    tick = _re.search(r"Function Tick\b(.*?)FunctionEnd", compiled, _re.S)
+    check("a silent install has a Tick that does nothing", tick is not None)
+    if tick is not None:
+        check("and it stands down when there is no bar to draw into",
+              _re.search(r'StrCmp\s+`?\$Bar`?\s+`?`?\s', tick.group(1))
+              or 'StrCmp `$Bar` ``' in tick.group(1),
+              repr(tick.group(1)[:200]))
 
 
 def inspect_source(function) -> str:

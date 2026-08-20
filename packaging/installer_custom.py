@@ -853,6 +853,16 @@ Function Tick
     StrCpy $Ticks ${TICKS}
   ${EndIf}
 
+  ; **A silent install has no page two**, so there is no control to put a
+  ; frame into — and an in-app update runs this installer with `/S`. Without
+  ; this the loop would still load twenty-four bitmaps and hand each to a null
+  ; window, which takes ownership of none of them.
+  ${If} $Bar == ""
+    Pop $1
+    Pop $0
+    Return
+  ${EndIf}
+
   ; Swap the frame. `STM_SETIMAGE` invalidates the control itself, so there is
   ; nothing to force: the card and the step dots on this page are the same
   ; kind of control and they paint correctly in every screenshot.
