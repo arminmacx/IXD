@@ -16,24 +16,35 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QRect, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QApplication
 
-PANEL = QColor("#0a0c12")     # behind the mark
-BG = QColor("#0d0f16")        # behind the tick
+PANEL = QColor("#0a0c12")     # behind the mark, and behind the step dots
+BG = QColor("#0d0f16")        # behind the tick, and behind the card
+SURFACE = QColor("#141827")   # the card itself
 ACCENT = QColor("#5b8cff")
 ACCENT_2 = QColor("#7e60ff")
 GOOD = QColor("#43d6a0")
+FAINT = QColor("#6b7597")
 TEXT = QColor("#e7ecff")
 
+#: The card's corner, in pixels. NSIS's `CreateRoundRectRgn` takes the
+#: *ellipse* through the corner and Qt takes the radius, so the installer's
+#: `RADIUS 14` is this doubled. Page one's card measures a radius-7 arc.
+CARD_RADIUS = 7
 
-def _canvas(size: int, background: QColor) -> tuple[QImage, QPainter]:
-    image = QImage(size, size, QImage.Format.Format_RGB32)
+
+def _image(width: int, height: int, background: QColor) -> tuple[QImage, QPainter]:
+    image = QImage(width, height, QImage.Format.Format_RGB32)
     image.fill(background)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     return image, painter
+
+
+def _canvas(size: int, background: QColor) -> tuple[QImage, QPainter]:
+    return _image(size, size, background)
 
 
 def mark(size: int = 40) -> QImage:
@@ -81,10 +92,50 @@ def tick(size: int = 36) -> QImage:
     return image
 
 
+def card(width: int = 402, height: int = 110) -> QImage:
+    """The install page's card, rounded, on the background it sits on.
+
+    **Why this is a picture and not a control.** The `STATIC` class is
+    registered `CS_PARENTDC`, so a window region set on one is ignored when it
+    paints and the corners come out square — measured on `l1.png`, 402x110
+    with every row full width. `WS_CLIPSIBLINGS` is the bit that would make the
+    region count, and adding it emptied the page (`l2.png`, context §3.75).
+
+    Baking the corners into pixels asks Windows to round nothing. The colour
+    behind it is known from the layout and there is no alpha in a BMP, so the
+    background is painted first and the card drawn over it.
+    """
+    image, p = _image(width, height, BG)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(SURFACE)
+    p.drawRoundedRect(QRectF(0, 0, width, height), CARD_RADIUS, CARD_RADIUS)
+    p.end()
+    return image
+
+
+def dot(colour: QColor, size: int = 11) -> QImage:
+    """One step-list dot: a filled circle on the brand panel.
+
+    The installer asks for `CreateRoundRectRgn(0, 0, 11, 11, 11, 11)` — an
+    ellipse as wide and tall as the square, which is a circle. Same reason as
+    `card()` for it being a picture.
+    """
+    image, p = _image(size, size, PANEL)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(colour)
+    p.drawEllipse(QRectF(0, 0, size, size))
+    p.end()
+    return image
+
+
 def write(directory: Path) -> list[Path]:
     directory.mkdir(parents=True, exist_ok=True)
     written = []
-    for name, image in (("mark", mark()), ("tick", tick())):
+    for name, image in (("mark", mark()), ("tick", tick()),
+                        ("card", card()),
+                        ("dot-good", dot(GOOD)),
+                        ("dot-accent", dot(ACCENT)),
+                        ("dot-faint", dot(FAINT))):
         target = directory / f"{name}.bmp"
         if not image.save(str(target), "BMP"):
             raise RuntimeError(f"could not write {target}")

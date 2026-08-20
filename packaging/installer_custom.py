@@ -268,6 +268,20 @@ Var Ticks
   Pop ${var}
 !macroend
 
+; **A picture instead of a shape.** `RoundCorners` cannot round a `STATIC`:
+; the class is registered `CS_PARENTDC`, so the control paints its whole
+; rectangle whatever region it was given, and the one style bit that changes
+; that empties this page (§3.75). Anything on page two that has to be round is
+; therefore drawn by `packaging/installer_art.py` with the colour behind it
+; already in the pixels, and shown by a control that only blits.
+!macro RawPicture var file x y w h
+  System::Call 'user32::LoadImageW(p 0, w "$PLUGINSDIR\${file}", \
+      i ${IMAGE_BITMAP}, i 0, i 0, i ${LR_LOADFROMFILE}) p .r4'
+  IntOp $5 ${RAW_STYLE} | ${SS_BITMAPCTL}
+  !insertmacro RawCtl ${var} "STATIC" "" $5 ${x} ${y} ${w} ${h}
+  SendMessage ${var} ${STM_SETIMAGE} ${IMAGE_BITMAP} $4
+!macroend
+
 !macro RawFill var x y w h colour
   !insertmacro RawCtl ${var} "STATIC" "" ${RAW_STYLE} ${x} ${y} ${w} ${h}
   SetCtlColors ${var} ${colour} ${colour}
@@ -318,6 +332,13 @@ Function .onInit
   InitPluginsDir
   File /oname=$PLUGINSDIR\mark.bmp "@ART@\mark.bmp"
   File /oname=$PLUGINSDIR\tick.bmp "@ART@\tick.bmp"
+  ; Page two's rounded rectangles, drawn at build time by
+  ; packaging/installer_art.py because a region on a STATIC does not round it
+  ; (§3.75). The colour behind each is baked in; there is no alpha in a BMP.
+  File /oname=$PLUGINSDIR\card.bmp "@ART@\card.bmp"
+  File /oname=$PLUGINSDIR\dot-good.bmp "@ART@\dot-good.bmp"
+  File /oname=$PLUGINSDIR\dot-accent.bmp "@ART@\dot-accent.bmp"
+  File /oname=$PLUGINSDIR\dot-faint.bmp "@ART@\dot-faint.bmp"
 FunctionEnd
 
 Function un.onInit
@@ -754,29 +775,22 @@ Function PageInstallShow
   ; The panel, the same one as pages one and three. `BrandPanel` cannot be
   ; called here — every control in it is an ${NSD_Create*} — so it is the same
   ; layout through the raw macros.
-  System::Call 'user32::LoadImageW(p 0, w "$PLUGINSDIR\mark.bmp", \
-      i ${IMAGE_BITMAP}, i 0, i 0, i ${LR_LOADFROMFILE}) p .r4'
-  IntOp $5 ${RAW_STYLE} | ${SS_BITMAPCTL}
-  !insertmacro RawCtl $0 "STATIC" "" $5 28 34 40 40
-  SendMessage $0 ${STM_SETIMAGE} ${IMAGE_BITMAP} $4
+  !insertmacro RawPicture $0 "mark.bmp" 28 34 40 40
 
   !insertmacro RawLabel $0 "Internet Xtreme" 28 84 200 26 $FontH1 ${C_TEXT} ${C_PANEL}
   !insertmacro RawLabel $0 "Downloader" 28 110 200 26 $FontH1 ${C_TEXT} ${C_PANEL}
   !insertmacro RawLabel $0 "Version @VERSION@" 28 144 200 18 $FontSmall ${C_FAINT} ${C_PANEL}
 
-  ; Step one is behind us, step two is this page, step three is not yet. Every
-  ; colour a literal, for the reason BrandPanel gives: SetCtlColors reads its
-  ; arguments at compile time.
-  !insertmacro RawFill $0 28 204 11 11 ${C_GOOD}
-  !insertmacro RoundCorners $0 11 11 11
+  ; Step one is behind us, step two is this page, step three is not yet. The
+  ; dots are pictures — each is a circle on the panel's colour, and the panel
+  ; is the only thing behind them, so the blend is known at build time.
+  !insertmacro RawPicture $0 "dot-good.bmp" 28 204 11 11
   !insertmacro RawLabel $0 "Where it goes" 52 200 180 20 $FontBody ${C_DIM} ${C_PANEL}
 
-  !insertmacro RawFill $0 28 248 11 11 ${C_ACCENT}
-  !insertmacro RoundCorners $0 11 11 11
+  !insertmacro RawPicture $0 "dot-accent.bmp" 28 248 11 11
   !insertmacro RawLabel $0 "Installing" 52 244 180 20 $FontButton ${C_TEXT} ${C_PANEL}
 
-  !insertmacro RawFill $0 28 292 11 11 ${C_FAINT}
-  !insertmacro RoundCorners $0 11 11 11
+  !insertmacro RawPicture $0 "dot-faint.bmp" 28 292 11 11
   !insertmacro RawLabel $0 "Ready" 52 288 180 20 $FontBody ${C_FAINT} ${C_PANEL}
 
   !insertmacro RawLabel $0 "No ffmpeg. No yt-dlp. No telemetry." \
@@ -787,8 +801,8 @@ Function PageInstallShow
   !insertmacro RawLabel $0 "About half a minute. Nothing else is asked of you." \
       284 78 380 20 $FontBody ${C_DIM} ${C_BG}
 
-  !insertmacro RawFill $0 284 130 402 110 ${C_SURFACE}
-  !insertmacro RoundCorners $0 402 110 ${RADIUS}
+  ; The card, drawn rounded at build time on the background it sits on.
+  !insertmacro RawPicture $0 "card.bmp" 284 130 402 110
   !insertmacro RawLabel $0 "Copying files" 302 150 366 20 $FontButton ${C_TEXT} ${C_SURFACE}
 
   ; The bar: groove, then fill, then the fill lifted above it by name. Both are

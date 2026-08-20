@@ -7192,6 +7192,7 @@ def main() -> int:
                  check_a_check_you_asked_for_does_not_install_anything,
         check_the_progress_bar_paints_what_it_gains,
         check_page_two_is_not_clipped_against_its_siblings,
+        check_page_two_draws_its_round_things,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7847,6 +7848,168 @@ def check_page_two_is_not_clipped_against_its_siblings() -> None:
     check("the full-page backdrop is still there, and still full-page",
           backdrop and (int(backdrop.group(1)), int(backdrop.group(2))) == (720, 460),
           backdrop.group(0)[:80] if backdrop else "no backdrop found")
+
+
+def check_page_two_draws_its_round_things() -> None:
+    """The card and the step dots are pictures, and the pictures are round.
+
+    `RoundCorners` cannot round a `STATIC`: the class is registered
+    `CS_PARENTDC`, so the control paints its whole rectangle whatever region
+    it was handed (`l1.png` — the card 402x110 with every row full width), and
+    `WS_CLIPSIBLINGS`, the bit that would make the region count, empties the
+    page (`l2.png` — 97.1% bare background). Context §3.75.
+
+    So page two asks Windows to round nothing. `packaging/installer_art.py`
+    draws the card and the three dots at build time with the colour behind
+    each already in the pixels, and the page shows them with controls that
+    only blit.
+
+    Three things can rot here and each is checked: the committed bitmaps
+    drifting from the generator, a control sized differently from the picture
+    it shows (which crops it), and somebody putting the regions back.
+    """
+    print("\n[page two draws its round things]")
+    import re as _re
+    import struct
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    art_dir = root / "packaging" / "installer-art"
+
+    # ---- the committed bitmaps are what the generator makes ----
+    #
+    # They are checked in rather than built, so nothing regenerates them on a
+    # release and a colour changed in one file and not the other would ship.
+    try:
+        from PySide6.QtWidgets import QApplication  # noqa: PLC0415
+        import installer_art  # noqa: PLC0415
+    except ImportError as exc:                      # pragma: no cover
+        check("the art module imports", False, str(exc))
+        return
+    if QApplication.instance() is None:
+        QApplication([])
+    with tempfile.TemporaryDirectory(prefix="ixd-art-") as folder:
+        fresh = {path.name: path.read_bytes()
+                 for path in installer_art.write(Path(folder))}
+    drifted = sorted(
+        name for name, data in fresh.items()
+        if not (art_dir / name).is_file() or (art_dir / name).read_bytes() != data)
+    check("every committed bitmap is what the generator draws today",
+          not drifted, str(drifted))
+
+    # ---- and they are actually round ----
+    def read_bmp(path: Path):
+        raw = path.read_bytes()
+        start = struct.unpack_from("<I", raw, 10)[0]
+        width, height = struct.unpack_from("<ii", raw, 18)
+        depth = struct.unpack_from("<H", raw, 28)[0]
+        stride = ((width * depth // 8) + 3) // 4 * 4
+
+        def pixel(x: int, y: int) -> tuple[int, int, int]:
+            # A BMP with a positive height is stored bottom row first.
+            at = start + (height - 1 - y) * stride + x * (depth // 8)
+            return raw[at + 2], raw[at + 1], raw[at]
+
+        return width, height, pixel
+
+    BG, PANEL, SURFACE = (0x0D, 0x0F, 0x16), (0x0A, 0x0C, 0x12), (0x14, 0x18, 0x27)
+    art = {"card.bmp": (402, 110, BG, SURFACE)}
+    for name, colour in (("dot-good.bmp", (0x43, 0xD6, 0xA0)),
+                         ("dot-accent.bmp", (0x5B, 0x8C, 0xFF)),
+                         ("dot-faint.bmp", (0x6B, 0x75, 0x97))):
+        art[name] = (11, 11, PANEL, colour)
+
+    for name, (width, height, behind, front) in art.items():
+        path = art_dir / name
+        check(f"{name} is there", path.is_file())
+        if not path.is_file():
+            continue
+        made, tall, pixel = read_bmp(path)
+        check(f"{name} is {width}x{height}", (made, tall) == (width, height),
+              f"{made}x{tall}")
+        if (made, tall) != (width, height):
+            continue
+        # The corner is the background and the middle is the shape: that is
+        # what "rounded" means in a picture, and a square one fails it.
+        check(f"{name} has its corner cut", pixel(0, 0) == behind,
+              f"#{pixel(0, 0)[0]:02x}{pixel(0, 0)[1]:02x}{pixel(0, 0)[2]:02x}")
+        check(f"{name} is filled in the middle",
+              pixel(width // 2, height // 2) == front,
+              f"#{pixel(width // 2, height // 2)[0]:02x}"
+              f"{pixel(width // 2, height // 2)[1]:02x}"
+              f"{pixel(width // 2, height // 2)[2]:02x}")
+
+    # ---- the page shows them, at their own size, and rounds nothing ----
+    if not shutil.which("makensis"):
+        print("  SKIP  makensis is not installed here (apt install nsis)")
+        return
+    import installer_custom  # noqa: PLC0415
+    with tempfile.TemporaryDirectory(prefix="ixd-pictures-") as folder:
+        folder = Path(folder)
+        payload = folder / "payload"
+        payload.mkdir()
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
+        source = folder / "installer-custom.nsi"
+        source.write_text(installer_custom.script(
+            app_name="Internet Xtreme Downloader", app_slug="IXD",
+            version="1.0.0", publisher="IXD",
+            output=str(folder / "custom.exe"), payload=str(payload),
+            launcher="ixd.exe",
+            icon=str(root / "packaging" / "icons" / "ixd.ico"),
+            art=str(art_dir),
+            uninstall_key=r"Software\Microsoft\Windows\CurrentVersion"
+                          r"\Uninstall\IXD",
+        ), encoding="utf-8")
+        try:
+            done = subprocess.run(["makensis", "-PPO", str(source)],
+                                  capture_output=True, text=True, timeout=240)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            check("the custom installer preprocesses", False, str(exc))
+            return
+        preprocessed = done.stdout
+
+    packed = set(_re.findall(r"File /oname=\$PLUGINSDIR\\([\w.\-]+)", preprocessed))
+    page = _re.search(r"Function PageInstallShow\b(.*?)FunctionEnd",
+                      preprocessed, _re.S)
+    check("page two is there to read", page is not None)
+    if page is None:
+        return
+    page = page.group(1)
+
+    # Walk it: a LoadImageW names a file, and the CreateWindowExW after it is
+    # the control that shows it.
+    shown, pending = {}, None
+    for line in page.splitlines():
+        found = _re.search(r'LoadImageW\(p 0, w "\$PLUGINSDIR\\([\w.\-]+)"', line)
+        if found:
+            pending = found.group(1)
+            continue
+        made = _re.search(r'CreateWindowExW\(i 0, w "STATIC", w "", i \$\d, '
+                          r"i (\d+), i (\d+), i (\d+), i (\d+)", line)
+        if made and pending:
+            shown[pending] = (int(made.group(3)), int(made.group(4)))
+            pending = None
+
+    for name in art:
+        check(f"the page shows {name}", name in shown, str(sorted(shown)))
+        if name not in shown:
+            continue
+        check(f"and {name} travels in the installer", name in packed,
+              str(sorted(packed)))
+        check(f"and its control is the size of the picture",
+              shown[name] == (art[name][0], art[name][1]),
+              f"control {shown[name]} against picture "
+              f"{(art[name][0], art[name][1])}")
+
+    # Nothing on this page may be rounded by a region again except the bar's
+    # groove, which is not a picture and is square in every screenshot so far.
+    regions = _re.findall(r"CreateRoundRectRgn\(i 0, i 0, i (\d+), i (\d+),",
+                          page)
+    check("the only region left on the page is the bar's groove",
+          regions == [("366", "8")], str(regions))
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
