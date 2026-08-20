@@ -7190,7 +7190,7 @@ def main() -> int:
                  check_the_extension_folder_does_not_move_with_privileges,
                  check_the_payload_carries_the_extension,
                  check_a_check_you_asked_for_does_not_install_anything,
-        check_the_progress_bar_paints_what_it_gains,
+        check_the_progress_bar_is_a_flip_book,
         check_page_two_is_not_clipped_against_its_siblings,
         check_page_two_draws_its_round_things,
                  test_the_icons_are_registered_as_a_theme,
@@ -7610,39 +7610,44 @@ def check_a_check_you_asked_for_does_not_install_anything():
 
 
 
-def check_the_progress_bar_paints_what_it_gains() -> None:
-    """The custom installer's bar, and the strip each step adds to it.
+def check_the_progress_bar_is_a_flip_book() -> None:
+    """The bar is twenty-five pictures, and each tick swaps one in.
 
-    `packaging/installer_custom.py` had no checks of any kind — it is the one
-    file in this project whose whole output is pixels on a machine nobody here
-    can run, and every fault in it so far has been found by measuring a
-    screenshot the user sent back.
+    It was the last thing on the install page built out of a control that gets
+    resized with a fresh window region every step, and it failed three ways in
+    three screenshots:
 
-    This one was `l1.png` (§3.74): a 15 px band of the groove's colour inside
-    the fill, near its right end. It was not a smudge and not a theme — its
-    left edge traced a radius-4 cap peaking at x=639 and its right edge one
-    peaking at x=653, which are the fill's rounded ends at tick 22 and tick 23.
-    The band was `new region − old region` exactly: the strip that step had
-    just gained, never painted. 366/24 = 15.25 px, one tick wide to the pixel.
+    * `l1.png` — a 15 px band of the groove's colour inside the fill, its two
+      edges tracing the rounded cap at tick 22 and at tick 23. Exactly the
+      strip that step had gained, never painted; `InvalidateRect` only marks a
+      window and `Tick` runs on NSIS's install thread.
+    * `l3.png` — with the paint forced, a **hollow outline**: accent at x=302
+      and x=525 on every row, the whole bottom row, and nothing inside.
 
-    `Tick` runs on NSIS's install thread and returns straight into a `File`
-    that extracts a hundred megabytes, so `InvalidateRect` — which only marks a
-    window — left the paint to whenever the dialog's thread got to it. What is
-    asserted here is that the paint is *made to happen*, over a rectangle that
-    really covers the bar, and that the resize cannot keep stale bits.
+    Nothing here resizes and nothing has a region. `installer_art.py` draws one
+    frame per tick plus the empty one it starts on, and `Tick` loads the next
+    and sends `STM_SETIMAGE` — which is what the card and the step dots on the
+    same page already do, correctly, in every screenshot.
 
-    Read out of `makensis -PPO` rather than out of the template, for §3.42's
-    reason: eighteen assertions once read this project's other NSIS script and
-    passed while it put the wrong name in Add/Remove Programs.
+    What is checked is that the frames and the arithmetic cannot drift apart,
+    since they live in two files: the script asks for `bar-$Ticks.bmp` and the
+    generator has to have drawn that many.
     """
-    print("\n[the progress bar paints what it gains]")
+    print("\n[the progress bar is a flip book]")
     import re as _re
+    import struct
     import subprocess
     import sys
 
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "packaging"))
+    import installer_art  # noqa: PLC0415
     import installer_custom  # noqa: PLC0415
+
+    # The two files that have to agree on how many steps there are.
+    check("the generator draws a frame for every tick the script takes",
+          installer_art.BAR_STEPS == installer_custom.TICKS,
+          f"art {installer_art.BAR_STEPS} against script {installer_custom.TICKS}")
 
     # The steps are spaced by bytes, and the bar has to arrive full.
     with tempfile.TemporaryDirectory(prefix="ixd-ticks-") as folder:
@@ -7659,36 +7664,84 @@ def check_the_progress_bar_paints_what_it_gains() -> None:
           emitted == installer_custom.TICKS,
           f"{emitted} of {installer_custom.TICKS}")
 
+    # ---- the frames themselves ----
+    art_dir = root / "packaging" / "installer-art"
+    ACCENT = (0x5B, 0x8C, 0xFF)
+
+    def accent_run(path: Path) -> tuple[int, int, int]:
+        raw = path.read_bytes()
+        at = struct.unpack_from("<I", raw, 10)[0]
+        width, height = struct.unpack_from("<ii", raw, 18)
+        depth = struct.unpack_from("<H", raw, 28)[0]
+        stride = ((width * depth // 8) + 3) // 4 * 4
+        middle = height // 2
+
+        def pixel(x: int) -> tuple[int, int, int]:
+            i = at + (height - 1 - middle) * stride + x * (depth // 8)
+            return raw[i + 2], raw[i + 1], raw[i]
+
+        run = [x for x in range(width) if pixel(x) == ACCENT]
+        return width, height, len(run)
+
+    missing, wrong = [], []
+    for step in range(installer_custom.TICKS + 1):
+        path = art_dir / f"bar-{step}.bmp"
+        if not path.is_file():
+            missing.append(path.name)
+            continue
+        width, height, filled = accent_run(path)
+        if (width, height) != (installer_art.BAR_WIDTH, installer_art.BAR_HEIGHT):
+            wrong.append(f"{path.name} is {width}x{height}")
+            continue
+        # The exact-colour run is a little short of the nominal width because
+        # the rounded end is antialiased into the groove, so this is a band
+        # rather than an equality.
+        want = installer_art.bar_width_at(step)
+        if not (want - 3 <= filled <= want):
+            wrong.append(f"{path.name} filled {filled}, wanted about {want}")
+    check("every frame the script can ask for exists", not missing, str(missing))
+    check("and each one is filled to its own step", not wrong, str(wrong))
+
+    empty = accent_run(art_dir / "bar-0.bmp")[2]
+    full = accent_run(art_dir / f"bar-{installer_custom.TICKS}.bmp")[2]
+    check("the first frame is empty", empty == 0, str(empty))
+    check("and the last one fills the groove",
+          full >= installer_art.BAR_WIDTH - 3, str(full))
+
+    # ---- and the script drives them ----
     if not shutil.which("makensis"):
         print("  SKIP  makensis is not installed here (apt install nsis)")
         return
 
-    with tempfile.TemporaryDirectory(prefix="ixd-custom-") as folder:
+    with tempfile.TemporaryDirectory(prefix="ixd-bar-") as folder:
         folder = Path(folder)
         payload = folder / "payload"
         payload.mkdir()
         (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
-        text = installer_custom.script(
+        source = folder / "installer-custom.nsi"
+        source.write_text(installer_custom.script(
             app_name="Internet Xtreme Downloader", app_slug="IXD",
             version="1.0.0", publisher="IXD",
             output=str(folder / "custom.exe"), payload=str(payload),
             launcher="ixd.exe",
             icon=str(root / "packaging" / "icons" / "ixd.ico"),
-            art=str(root / "packaging" / "installer-art"),
+            art=str(art_dir),
             uninstall_key=r"Software\Microsoft\Windows\CurrentVersion"
                           r"\Uninstall\IXD",
-        )
-        source = folder / "installer-custom.nsi"
-        source.write_text(text, encoding="utf-8")
+        ), encoding="utf-8")
         try:
             done = subprocess.run(["makensis", "-PPO", str(source)],
                                   capture_output=True, text=True, timeout=240)
         except (OSError, subprocess.TimeoutExpired) as exc:
             check("the custom installer preprocesses", False, str(exc))
             return
-        check("the custom installer preprocesses", done.returncode == 0,
-              (done.stdout[-400:] + done.stderr[-400:]).strip())
         preprocessed = done.stdout
+
+    packed = set(_re.findall(r"File /oname=\$PLUGINSDIR\\(bar-\d+\.bmp)",
+                             preprocessed))
+    wanted = {f"bar-{step}.bmp" for step in range(installer_custom.TICKS + 1)}
+    check("every frame travels in the installer", packed == wanted,
+          str(sorted(wanted - packed)))
 
     found = _re.search(r"Function Tick\b(.*?)FunctionEnd", preprocessed, _re.S)
     check("and it has a Tick", found is not None)
@@ -7696,65 +7749,23 @@ def check_the_progress_bar_paints_what_it_gains() -> None:
         return
     tick = found.group(1)
 
-    # Nothing may be left merely *marked*: that is the defect.
-    check("the fill is not left to be repainted later",
-          "InvalidateRect" not in tick)
+    # None of the three mechanisms that failed may come back.
+    for name, needle in (("it does not resize a control", "SetWindowPos"),
+                         ("it does not set a region", "SetWindowRgn"),
+                         ("and it leaves nothing merely marked",
+                          "InvalidateRect")):
+        check(name, needle not in tick)
 
-    # The geometry, taken from the calls rather than from the template.
-    step = _re.search(r"IntOp \$0 \$Ticks \* (\d+)", tick)
-    over = _re.search(r"IntOp \$0 \$0 / (\d+)", tick)
-    place = _re.search(
-        r"SetWindowPos\(p \$BarFill, p \d+, i (\d+), i (\d+), "
-        r"i \$0, i (\d+), i (0x[0-9A-Fa-f]+)\)", tick)
-    check("the bar's width, its origin and its flags are all readable",
-          step and over and place,
-          repr(tick[:400]))
-    if not (step and over and place):
-        return
-    width, ticks = int(step.group(1)), int(over.group(1))
-    flags = int(place.group(4), 16)
-
-    # SWP_NOCOPYBITS. Growing a window, Windows keeps the bits it believes are
-    # still valid — worked out from the region as it stood before this step
-    # replaced it, which is the wrong region.
-    check("the resize keeps no bits from the previous step",
-          flags & 0x0100, hex(flags))
-
-    # The last tick has to land on the full width, or the bar stops short of
-    # its own groove. Integer division, as NSIS does it.
-    reached = [min(width, count * width // ticks)
-               for count in range(1, ticks + 1)]
-    check("the last step fills the groove", reached[-1] == width,
-          f"{reached[-1]} of {width}")
-    biggest = max(b - a for a, b in zip(reached, reached[1:]))
-    check("and no step moves it more than one share",
-          biggest <= -(-width // ticks), str(biggest))
-
-    # The repaint: this window, forced, and nothing else.
-    call = _re.search(
-        r"RedrawWindow\(p (\$\w+), p 0, p 0, i (0x[0-9A-Fa-f]+)\)", tick)
-    check("the bar is redrawn rather than merely marked", call,
-          repr(tick[-300:]))
-    if not call:
-        return
-    check("and it is the fill that is redrawn", call.group(1) == "$BarFill",
-          call.group(1))
-
-    style = int(call.group(2), 16)
-    # RDW_UPDATENOW is the whole point: this function is on the install thread,
-    # and it goes back to extracting the moment it returns.
-    check("the paint happens now, not when the dialog gets to it",
-          style & 0x0100, hex(style))
-    check("erasing as it goes", style & 0x0004, hex(style))
-    # RDW_ALLCHILDREN would drag the full-page backdrop into all twenty-four
-    # steps. The first version of this fix asked the *page* to redraw over the
-    # bar's rectangle and that is the flag it carried (§3.75).
-    check("and nothing else is invited to repaint with it",
-          not style & 0x0080, hex(style))
-
-    # Nothing is allocated any more, so nothing can leak.
-    check("no struct is allocated for it", "System::Free" not in tick)
-
+    check("it loads the frame for the step it is on",
+          '"$PLUGINSDIR\\bar-$Ticks.bmp"' in tick, repr(tick[:300]))
+    # STM_SETIMAGE. The step is clamped first, so the name can never point at
+    # a frame the generator did not draw.
+    check("and swaps it into the bar", "0x0172" in tick, repr(tick[:300]))
+    check("the step is clamped to the frames that exist",
+          _re.search(r"StrCpy \$Ticks " + str(installer_custom.TICKS), tick),
+          repr(tick[:300]))
+    # The message hands back the bitmap it replaced and that one is ours.
+    check("the bitmap it replaces is freed", "DeleteObject" in tick)
 
 
 def check_page_two_is_not_clipped_against_its_siblings() -> None:
@@ -8003,12 +8014,12 @@ def check_page_two_draws_its_round_things() -> None:
               f"control {shown[name]} against picture "
               f"{(art[name][0], art[name][1])}")
 
-    # Nothing on this page may be rounded by a region again except the bar's
-    # groove, which is not a picture and is square in every screenshot so far.
+    # Nothing on this page may be rounded by a region again. Every rounded
+    # thing on it is now a picture, the bar included, and a region on a
+    # CS_PARENTDC static does not round it anyway.
     regions = _re.findall(r"CreateRoundRectRgn\(i 0, i 0, i (\d+), i (\d+),",
                           page)
-    check("the only region left on the page is the bar's groove",
-          regions == [("366", "8")], str(regions))
+    check("no region is set on this page at all", not regions, str(regions))
 
 
 if __name__ == "__main__":

@@ -128,14 +128,63 @@ def dot(colour: QColor, size: int = 11) -> QImage:
     return image
 
 
+#: The install page's bar, and how many frames it has. One per `Call Tick`
+#: plus the empty one it starts on. `installer_custom.TICKS` is the same 24 and
+#: a check pins the two together.
+BAR_WIDTH, BAR_HEIGHT, BAR_STEPS = 366, 8, 24
+
+
+def bar_width_at(step: int, steps: int = BAR_STEPS,
+                 width: int = BAR_WIDTH) -> int:
+    """How wide the accent is at *step*, as NSIS computes it.
+
+    `IntOp` is integer arithmetic on signed 32-bit, and the installer does
+    `$Ticks * 366 / TICKS` in that order — multiply first, then divide. Doing
+    it the other way here would drift by a pixel or two per step and the
+    frames would not line up with the script they replace.
+    """
+    return step * width // steps
+
+
+def bar(step: int, steps: int = BAR_STEPS, width: int = BAR_WIDTH,
+        height: int = BAR_HEIGHT) -> QImage:
+    """One frame of the progress bar: groove and fill, on the card.
+
+    **Why the bar is a flip-book.** It was the last thing on that page built
+    out of a control that gets resized with a fresh window region every step,
+    and it misbehaved three different ways — a 15 px unpainted strip where the
+    step had just grown (`l1.png`), and then, after the paint was forced, a
+    hollow outline with nothing inside it (`l3.png`). Nothing here resizes and
+    nothing has a region: each tick swaps the picture, which is what the card
+    and the dots already do.
+
+    Both ends are round, which the two-control version never managed — the
+    fill's square corners would have poked out of a rounded groove at full
+    width.
+    """
+    image, p = _image(width, height, SURFACE)
+    p.setPen(Qt.PenStyle.NoPen)
+    radius = height / 2
+    p.setBrush(BG)
+    p.drawRoundedRect(QRectF(0, 0, width, height), radius, radius)
+    filled = bar_width_at(step, steps, width)
+    if filled:
+        p.setBrush(ACCENT)
+        p.drawRoundedRect(QRectF(0, 0, filled, height), radius, radius)
+    p.end()
+    return image
+
+
 def write(directory: Path) -> list[Path]:
     directory.mkdir(parents=True, exist_ok=True)
     written = []
+    frames = tuple((f"bar-{step}", bar(step))
+                   for step in range(BAR_STEPS + 1))
     for name, image in (("mark", mark()), ("tick", tick()),
                         ("card", card()),
                         ("dot-good", dot(GOOD)),
                         ("dot-accent", dot(ACCENT)),
-                        ("dot-faint", dot(FAINT))):
+                        ("dot-faint", dot(FAINT))) + frames:
         target = directory / f"{name}.bmp"
         if not image.save(str(target), "BMP"):
             raise RuntimeError(f"could not write {target}")

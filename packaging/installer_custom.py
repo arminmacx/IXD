@@ -199,7 +199,7 @@ Var Tmp
 Var StartNow
 Var StartBox
 Var PageHwnd
-Var BarFill
+Var Bar
 Var Ticks
 
 !macro RoundCorners hwnd w h radius
@@ -339,6 +339,8 @@ Function .onInit
   File /oname=$PLUGINSDIR\dot-good.bmp "@ART@\dot-good.bmp"
   File /oname=$PLUGINSDIR\dot-accent.bmp "@ART@\dot-accent.bmp"
   File /oname=$PLUGINSDIR\dot-faint.bmp "@ART@\dot-faint.bmp"
+  ; One frame of the progress bar per tick, plus the empty one it starts on.
+@BAR_FILES@
 FunctionEnd
 
 Function un.onInit
@@ -805,13 +807,18 @@ Function PageInstallShow
   !insertmacro RawPicture $0 "card.bmp" 284 130 402 110
   !insertmacro RawLabel $0 "Copying files" 302 150 366 20 $FontButton ${C_TEXT} ${C_SURFACE}
 
-  ; The bar: groove, then fill, then the fill lifted above it by name. Both are
-  ; square — a rounded fill needs a fresh region on every step, and a radius on
-  ; a four-pixel-wide window is a shape nobody can predict from here.
-  !insertmacro RawFill $0 302 188 366 8 ${C_BG}
-  !insertmacro RoundCorners $0 366 8 8
-  !insertmacro RawFill $BarFill 302 188 0 8 ${C_ACCENT}
-  !insertmacro ToTop $BarFill
+  ; **The bar is a flip-book, and it is one control rather than two.** Groove
+  ; and fill are drawn together into each frame, so both ends are round — the
+  ; two-control version could never manage that, because the fill's square
+  ; corners would poke out of a rounded groove at full width.
+  ;
+  ; It was the last thing on this page built out of a control that is resized
+  ; with a fresh window region every step, and it failed three ways: a 15 px
+  ; unpainted strip where the step had just grown (`l1.png`), and then, once
+  ; the paint was forced, a hollow outline with nothing inside it (`l3.png` —
+  ; left cap, right cap, bottom edge, and no interior). Nothing here resizes
+  ; and nothing has a region.
+  !insertmacro RawPicture $Bar "bar-0.bmp" 302 188 366 8
 
   ; NSIS's own "Extract: …" line, kept, moved onto the card and recoloured.
   ; It is the one part of this page worth borrowing: it says what is being
@@ -842,49 +849,24 @@ Function Tick
   Push $0
   Push $1
   IntOp $Ticks $Ticks + 1
-  IntOp $0 $Ticks * 366
-  IntOp $0 $0 / ${TICKS}
-  ${If} $0 > 366
-    StrCpy $0 366
+  ${If} $Ticks > ${TICKS}
+    StrCpy $Ticks ${TICKS}
   ${EndIf}
-  ; Sized **and** raised on every step, in one call. The fill is created after
-  ; the groove and lifted above it once in `PageInstallShow`, and it still did
-  ; not appear — the screenshot has the groove's colour across the whole bar
-  ; and the accent nowhere. Whether that was the z-order or the resize, this
-  ; asserts both, and it costs one call a second.
-  ;
-  ; Its own position, not the origin: a child is placed against its parent, so
-  ; passing 0,0 would put the bar in the corner of the window.
-  System::Call 'user32::SetWindowPos(p $BarFill, p ${IXD_HWND_TOP}, \
-      i 302, i 188, i $0, i 8, i ${SWP_BARSTEP})'
-  ; Rounded to match the groove it sits in, at whatever width it has reached.
-  ; The region has to be made afresh each step — `RoundCorners` takes its size
-  ; at compile time and this one is only known here. `SetWindowRgn` takes
-  ; ownership of the region, so there is nothing to free.
-  System::Call 'gdi32::CreateRoundRectRgn(i 0, i 0, i $0, i 8, i 8, i 8) p .s'
-  Pop $1
-  System::Call 'user32::SetWindowRgn(p $BarFill, p $1, i 1)'
 
-  ; **Painted now, and only this window.** What was here was `InvalidateRect`
-  ; on the fill, which only marks it: the paint happens whenever the dialog's
-  ; thread next gets to it, and this function runs on the install thread,
-  ; which returns straight into a `File` extracting a hundred megabytes.
-  ;
-  ; Measured on the user's screenshot (l1.png, §3.74): a 15 px band of the
-  ; groove's colour sat inside the fill, near its right end. Its left edge
-  ; traced a radius-4 cap peaking at x=639 and its right edge one peaking at
-  ; x=653 — the fill at tick 22 and at tick 23, so the band was exactly `new
-  ; region − old region`, the strip that step had just gained, never painted.
-  ; 366/24 is 15.25 px: one tick wide, to the pixel.
-  ;
-  ; `RDW_UPDATENOW` is the whole of the fix — the window paints before this
-  ; returns instead of being left marked. It is asked of the **fill alone**:
-  ; the gained strip is inside the fill's own rectangle, so nothing else needs
-  ; to draw, and the first version of this asked the page with
-  ; `RDW_ALLCHILDREN`, which would have brought the full-page backdrop into
-  ; every one of the twenty-four steps (§3.75). The groove never needs
-  ; repainting because the bar only ever grows.
-  System::Call 'user32::RedrawWindow(p $BarFill, p 0, p 0, i ${RDW_NOW})'
+  ; Swap the frame. `STM_SETIMAGE` invalidates the control itself, so there is
+  ; nothing to force: the card and the step dots on this page are the same
+  ; kind of control and they paint correctly in every screenshot.
+  System::Call 'user32::LoadImageW(p 0, w "$PLUGINSDIR\bar-$Ticks.bmp", \
+      i ${IMAGE_BITMAP}, i 0, i 0, i ${LR_LOADFROMFILE}) p .r0'
+  ${If} $0 != 0
+    ; The message hands back the bitmap it replaced, and that one is ours.
+    ; Twenty-four leaked bitmaps would not sink anything; a handle leak in an
+    ; installer is still a handle leak.
+    SendMessage $Bar ${STM_SETIMAGE} ${IMAGE_BITMAP} $0 $1
+    ${If} $1 != 0
+      System::Call 'gdi32::DeleteObject(p $1)'
+    ${EndIf}
+  ${EndIf}
   Pop $1
   Pop $0
 FunctionEnd
@@ -1076,6 +1058,13 @@ def script(*, app_name: str, app_slug: str, version: str, publisher: str,
         "@ART@": art,
         "@UNINSTALL_KEY@": uninstall_key,
         "@TICKS@": str(ticks),
+        # The art path is written in rather than left as `@ART@`: the tokens
+        # are substituted in order, and `@ART@` has already been through by
+        # the time this value is put in, so a placeholder here would survive
+        # into the script and `makensis` would refuse it.
+        "@BAR_FILES@": "\n".join(
+            f'  File /oname=$PLUGINSDIR\\bar-{step}.bmp "{art}\\bar-{step}.bmp"'
+            for step in range(ticks + 1)),
         # Last, because it is the only value that itself contains a path with
         # no placeholders left to confuse — and the biggest by far.
         "@COPY_BODY@": copy_body(Path(payload), ticks),
