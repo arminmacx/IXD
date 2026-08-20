@@ -7190,6 +7190,8 @@ def main() -> int:
                  check_the_extension_folder_does_not_move_with_privileges,
                  check_the_payload_carries_the_extension,
                  check_a_check_you_asked_for_does_not_install_anything,
+        check_the_progress_bar_paints_what_it_gains,
+        check_page_two_rounds_its_corners,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -7604,6 +7606,277 @@ def check_a_check_you_asked_for_does_not_install_anything():
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         stray = sorted(used - assigned - {"self", "UpdateDialog", "_time", "float"})
         check("and it uses no name it does not have", not stray, str(stray))
+
+
+
+def check_the_progress_bar_paints_what_it_gains() -> None:
+    """The custom installer's bar, and the strip each step adds to it.
+
+    `packaging/installer_custom.py` had no checks of any kind — it is the one
+    file in this project whose whole output is pixels on a machine nobody here
+    can run, and every fault in it so far has been found by measuring a
+    screenshot the user sent back.
+
+    This one was `l1.png` (§3.74): a 15 px band of the groove's colour inside
+    the fill, near its right end. It was not a smudge and not a theme — its
+    left edge traced a radius-4 cap peaking at x=639 and its right edge one
+    peaking at x=653, which are the fill's rounded ends at tick 22 and tick 23.
+    The band was `new region − old region` exactly: the strip that step had
+    just gained, never painted. 366/24 = 15.25 px, one tick wide to the pixel.
+
+    `Tick` runs on NSIS's install thread and returns straight into a `File`
+    that extracts a hundred megabytes, so `InvalidateRect` — which only marks a
+    window — left the paint to whenever the dialog's thread got to it. What is
+    asserted here is that the paint is *made to happen*, over a rectangle that
+    really covers the bar, and that the resize cannot keep stale bits.
+
+    Read out of `makensis -PPO` rather than out of the template, for §3.42's
+    reason: eighteen assertions once read this project's other NSIS script and
+    passed while it put the wrong name in Add/Remove Programs.
+    """
+    print("\n[the progress bar paints what it gains]")
+    import re as _re
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import installer_custom  # noqa: PLC0415
+
+    # The steps are spaced by bytes, and the bar has to arrive full.
+    with tempfile.TemporaryDirectory(prefix="ixd-ticks-") as folder:
+        payload = Path(folder) / "payload"
+        (payload / "_internal").mkdir(parents=True)
+        # One huge file and a crowd of small ones — the shape that made the
+        # spacing by bytes necessary in the first place.
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 4_000_000)
+        for index in range(40):
+            (payload / "_internal" / f"f{index}.dat").write_bytes(b"x" * 1024)
+        body = installer_custom.copy_body(payload)
+    emitted = body.count("Call Tick")
+    check("the payload is walked with exactly one tick per share",
+          emitted == installer_custom.TICKS,
+          f"{emitted} of {installer_custom.TICKS}")
+
+    if not shutil.which("makensis"):
+        print("  SKIP  makensis is not installed here (apt install nsis)")
+        return
+
+    with tempfile.TemporaryDirectory(prefix="ixd-custom-") as folder:
+        folder = Path(folder)
+        payload = folder / "payload"
+        payload.mkdir()
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
+        text = installer_custom.script(
+            app_name="Internet Xtreme Downloader", app_slug="IXD",
+            version="1.0.0", publisher="IXD",
+            output=str(folder / "custom.exe"), payload=str(payload),
+            launcher="ixd.exe",
+            icon=str(root / "packaging" / "icons" / "ixd.ico"),
+            art=str(root / "packaging" / "installer-art"),
+            uninstall_key=r"Software\Microsoft\Windows\CurrentVersion"
+                          r"\Uninstall\IXD",
+        )
+        source = folder / "installer-custom.nsi"
+        source.write_text(text, encoding="utf-8")
+        try:
+            done = subprocess.run(["makensis", "-PPO", str(source)],
+                                  capture_output=True, text=True, timeout=240)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            check("the custom installer preprocesses", False, str(exc))
+            return
+        check("the custom installer preprocesses", done.returncode == 0,
+              (done.stdout[-400:] + done.stderr[-400:]).strip())
+        preprocessed = done.stdout
+
+    found = _re.search(r"Function Tick\b(.*?)FunctionEnd", preprocessed, _re.S)
+    check("and it has a Tick", found is not None)
+    if found is None:
+        return
+    tick = found.group(1)
+
+    # Nothing may be left merely *marked*: that is the defect.
+    check("the fill is not left to be repainted later",
+          "InvalidateRect" not in tick)
+
+    # The geometry, taken from the calls rather than from the template.
+    step = _re.search(r"IntOp \$0 \$Ticks \* (\d+)", tick)
+    over = _re.search(r"IntOp \$0 \$0 / (\d+)", tick)
+    place = _re.search(
+        r"SetWindowPos\(p \$BarFill, p \d+, i (\d+), i (\d+), "
+        r"i \$0, i (\d+), i (0x[0-9A-Fa-f]+)\)", tick)
+    check("the bar's width, its origin and its flags are all readable",
+          step and over and place,
+          repr(tick[:400]))
+    if not (step and over and place):
+        return
+    width, ticks = int(step.group(1)), int(over.group(1))
+    x, y, height = (int(place.group(index)) for index in (1, 2, 3))
+    flags = int(place.group(4), 16)
+
+    # SWP_NOCOPYBITS. Growing a window, Windows keeps the bits it believes are
+    # still valid — worked out from the region as it stood before this step
+    # replaced it, which is the wrong region.
+    check("the resize keeps no bits from the previous step",
+          flags & 0x0100, hex(flags))
+
+    # The last tick has to land on the full width, or the bar stops short of
+    # its own groove. Integer division, as NSIS does it.
+    reached = [min(width, count * width // ticks)
+               for count in range(1, ticks + 1)]
+    check("the last step fills the groove", reached[-1] == width,
+          f"{reached[-1]} of {width}")
+    biggest = max(b - a for a, b in zip(reached, reached[1:]))
+    check("and no step moves it more than one share",
+          biggest <= -(-width // ticks), str(biggest))
+
+    # The repaint: from the page, forced, children included, over the bar.
+    redraw = _re.search(
+        r"\*\(i (\d+), i (\d+), i (\d+), i (\d+)\) p \.r(\d)", tick)
+    call = _re.search(
+        r"RedrawWindow\(p \$PageHwnd, p \$(\d), p 0, i (0x[0-9A-Fa-f]+)\)",
+        tick)
+    check("the page is asked to redraw over a rectangle",
+          redraw and call, repr(tick[-400:]))
+    if not (redraw and call):
+        return
+    check("and it is the rectangle the struct was built into",
+          redraw.group(5) == call.group(1))
+    left, top, right, bottom = (int(redraw.group(i)) for i in (1, 2, 3, 4))
+    check("which covers the bar exactly",
+          (left, top, right, bottom) == (x, y, x + width, y + height),
+          f"{(left, top, right, bottom)} against the bar at "
+          f"{(x, y, x + width, y + height)}")
+
+    style = int(call.group(2), 16)
+    # RDW_UPDATENOW is the whole point: this function is on the install thread,
+    # and it goes back to extracting the moment it returns.
+    check("the paint happens now, not when the dialog gets to it",
+          style & 0x0100, hex(style))
+    # RDW_ALLCHILDREN — the groove and the fill are both children of the page.
+    check("and it reaches the children, not just the page",
+          style & 0x0080, hex(style))
+    check("erasing as it goes", style & 0x0004, hex(style))
+
+    # The struct is freed. A leak twenty-four times is nothing; a leak in a
+    # loop somebody copies this into is not.
+    check("the rectangle is freed", "System::Free" in tick)
+
+
+
+def check_page_two_rounds_its_corners() -> None:
+    """A window region on a `STATIC` does nothing unless the window is clipped.
+
+    Two screenshots settled this, and neither could have been argued from the
+    script. `newinstaller.png` is page one: its cards round on a radius-7 arc
+    (row 116 starts at x=288, row 121 at x=283) and its step dots are circles.
+    `l1.png` is page two: the card is 402x110 with **every row full width** and
+    the dots are 11x11 squares. Both go through the same `RoundCorners`, and
+    `makensis -PPO` shows `CreateRoundRectRgn` + `SetWindowRgn` emitted on
+    both.
+
+    The `STATIC` class is registered `CS_PARENTDC`, which hands the control a
+    device context clipped to its *parent* rather than to itself — so the
+    region is ignored when it paints and it fills its whole rectangle.
+    `WS_CLIPSIBLINGS` is what makes Windows compute a real visible region
+    instead. nsDialogs' `DEFAULT_STYLES` carries it (`nsDialogs.nsh:251`);
+    `RawCtl`, which is page two's only way of making a control, did not.
+
+    What is asserted is the invariant rather than the instance: **every
+    control that gets a region must have been created with the clipping
+    style.** Read out of the preprocessed script, so a new control added
+    without it is caught. Context §3.75.
+    """
+    print("\n[page two rounds its corners]")
+    import re as _re
+    import subprocess
+    import sys
+
+    if not shutil.which("makensis"):
+        print("  SKIP  makensis is not installed here (apt install nsis)")
+        return
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import installer_custom  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory(prefix="ixd-corners-") as folder:
+        folder = Path(folder)
+        payload = folder / "payload"
+        payload.mkdir()
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
+        source = folder / "installer-custom.nsi"
+        source.write_text(installer_custom.script(
+            app_name="Internet Xtreme Downloader", app_slug="IXD",
+            version="1.0.0", publisher="IXD",
+            output=str(folder / "custom.exe"), payload=str(payload),
+            launcher="ixd.exe",
+            icon=str(root / "packaging" / "icons" / "ixd.ico"),
+            art=str(root / "packaging" / "installer-art"),
+            uninstall_key=r"Software\Microsoft\Windows\CurrentVersion"
+                          r"\Uninstall\IXD",
+        ), encoding="utf-8")
+        try:
+            done = subprocess.run(["makensis", "-PPO", str(source)],
+                                  capture_output=True, text=True, timeout=240)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            check("the custom installer preprocesses", False, str(exc))
+            return
+        preprocessed = done.stdout
+
+    found = _re.search(r"Function PageInstallShow\b(.*?)FunctionEnd",
+                       preprocessed, _re.S)
+    check("page two is there to read", found is not None)
+    if found is None:
+        return
+    page = found.group(1)
+
+    CLIPSIBLINGS = 0x04000000
+
+    # Every literal style a control on this page is created with.
+    literal = [int(value, 16) for value
+               in _re.findall(r'CreateWindowExW\(i 0, w "STATIC", w "[^"]*", '
+                              r'i (0x[0-9A-Fa-f]+),', page)]
+    check("page two creates controls at all", literal, str(literal))
+    unclipped = [hex(value) for value in literal if not value & CLIPSIBLINGS]
+    check("and every one of them is clipped against its siblings",
+          not unclipped, str(unclipped))
+
+    # The bitmap static builds its style in a register; it must start from the
+    # same constant rather than from a bare CHILD|VISIBLE.
+    composed = _re.search(r"IntOp \$\d (0x[0-9A-Fa-f]+) \| ", page)
+    check("the bitmap control's style is built from it too",
+          composed and int(composed.group(1), 16) & CLIPSIBLINGS,
+          composed.group(0) if composed else "no IntOp style found")
+
+    # The invariant. Walk the page in order, remembering which handle each
+    # creation put where, and check every window that receives a region.
+    holder, rounded, bad = None, 0, []
+    for line in page.splitlines():
+        line = line.strip()
+        made = _re.match(r'System::Call .user32::CreateWindowExW\(i 0, '
+                         r'w "STATIC", w "[^"]*", i (\S+),', line)
+        if made:
+            holder = made.group(1)
+            continue
+        # Only the Pop that immediately follows a creation — `Pop $Tmp`
+        # inside RoundCorners is not the control's handle.
+        if line.startswith("Pop $") and isinstance(holder, str):
+            holder = (holder, line[4:].strip())
+            continue
+        if "SetWindowRgn" in line:
+            target = _re.search(r"SetWindowRgn\(p (\$\w+),", line)
+            rounded += 1
+            if not (isinstance(holder, tuple) and target
+                    and target.group(1) == holder[1]):
+                bad.append(line[:90])
+                continue
+            style = holder[0]
+            if style.startswith("0x") and not int(style, 16) & CLIPSIBLINGS:
+                bad.append(f"{target.group(1)} created with {style}")
+    check("something on this page is actually rounded", rounded >= 4,
+          f"{rounded} regions")
+    check("and every rounded control was created clipped", not bad, str(bad))
 
 
 if __name__ == "__main__":

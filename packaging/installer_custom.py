@@ -107,9 +107,28 @@ ShowInstDetails show
 !define IXD_HWND_TOP     0
 !define SWP_QUIET        0x0013   ; NOSIZE | NOMOVE | NOACTIVATE
 !define SWP_NOACTIVATE   0x0010
+; NOACTIVATE | NOCOPYBITS. Growing a window, Windows copies the bits it thinks
+; are still valid and invalidates only the rest — and it works that out from
+; the window region as it stood *before* this step replaced it. NOCOPYBITS
+; gives up the optimisation and invalidates the lot, which is what a control
+; whose region changes on every step needs.
+!define SWP_BARSTEP      0x0110
 ; INVALIDATE | ERASE | ALLCHILDREN | UPDATENOW
 !define RDW_WHOLE        0x0185
-!define WS_CHILDVISIBLE  0x50000000
+; **What `RawCtl` creates its controls with, and the reason it is not just
+; `WS_CHILD | WS_VISIBLE`.** The `STATIC` class is registered `CS_PARENTDC`,
+; which hands a static a device context clipped to its *parent* instead of to
+; itself — so `SetWindowRgn` on one is ignored at paint time and it fills its
+; whole rectangle. `WS_CLIPSIBLINGS` is what makes Windows work out a real
+; visible region for the window rather than take that shortcut.
+;
+; Measured, not reasoned (§3.75). Page one's cards and step dots are round and
+; page two's are square to the pixel — 402x110 and 11x11 exactly, every row
+; full width — while both go through the same `RoundCorners` and `makensis
+; -PPO` shows the region calls emitted on both. The one thing that differs is
+; this bit: nsDialogs' `DEFAULT_STYLES` carries it (nsDialogs.nsh:251) and
+; `RawCtl` did not.
+!define RAW_STYLE        0x54000000   ; CHILD | VISIBLE | CLIPSIBLINGS
 !define SS_BITMAPCTL     0x0000000E
 !ifndef IMAGE_BITMAP
   !define IMAGE_BITMAP   0
@@ -246,12 +265,12 @@ Var Ticks
 !macroend
 
 !macro RawFill var x y w h colour
-  !insertmacro RawCtl ${var} "STATIC" "" ${WS_CHILDVISIBLE} ${x} ${y} ${w} ${h}
+  !insertmacro RawCtl ${var} "STATIC" "" ${RAW_STYLE} ${x} ${y} ${w} ${h}
   SetCtlColors ${var} ${colour} ${colour}
 !macroend
 
 !macro RawLabel var text x y w h font fg bg
-  !insertmacro RawCtl ${var} "STATIC" "${text}" ${WS_CHILDVISIBLE} ${x} ${y} ${w} ${h}
+  !insertmacro RawCtl ${var} "STATIC" "${text}" ${RAW_STYLE} ${x} ${y} ${w} ${h}
   SetCtlColors ${var} ${fg} ${bg}
   !insertmacro Font ${var} ${font}
 !macroend
@@ -733,7 +752,7 @@ Function PageInstallShow
   ; layout through the raw macros.
   System::Call 'user32::LoadImageW(p 0, w "$PLUGINSDIR\mark.bmp", \
       i ${IMAGE_BITMAP}, i 0, i 0, i ${LR_LOADFROMFILE}) p .r4'
-  IntOp $5 ${WS_CHILDVISIBLE} | ${SS_BITMAPCTL}
+  IntOp $5 ${RAW_STYLE} | ${SS_BITMAPCTL}
   !insertmacro RawCtl $0 "STATIC" "" $5 28 34 40 40
   SendMessage $0 ${STM_SETIMAGE} ${IMAGE_BITMAP} $4
 
@@ -804,6 +823,7 @@ Function Tick
   ; runs.
   Push $0
   Push $1
+  Push $2
   IntOp $Ticks $Ticks + 1
   IntOp $0 $Ticks * 366
   IntOp $0 $0 / ${TICKS}
@@ -819,7 +839,7 @@ Function Tick
   ; Its own position, not the origin: a child is placed against its parent, so
   ; passing 0,0 would put the bar in the corner of the window.
   System::Call 'user32::SetWindowPos(p $BarFill, p ${IXD_HWND_TOP}, \
-      i 302, i 188, i $0, i 8, i ${SWP_NOACTIVATE})'
+      i 302, i 188, i $0, i 8, i ${SWP_BARSTEP})'
   ; Rounded to match the groove it sits in, at whatever width it has reached.
   ; The region has to be made afresh each step — `RoundCorners` takes its size
   ; at compile time and this one is only known here. `SetWindowRgn` takes
@@ -827,7 +847,29 @@ Function Tick
   System::Call 'gdi32::CreateRoundRectRgn(i 0, i 0, i $0, i 8, i 8, i 8) p .s'
   Pop $1
   System::Call 'user32::SetWindowRgn(p $BarFill, p $1, i 1)'
-  System::Call 'user32::InvalidateRect(p $BarFill, p 0, i 1)'
+
+  ; **Painted from the parent, now, over the bar's rectangle.** What was here
+  ; was `InvalidateRect` on the fill, which only marks it: the paint happens
+  ; whenever the dialog's thread next gets to it, and this function runs on the
+  ; install thread, which returns straight into a `File` extracting a hundred
+  ; megabytes.
+  ;
+  ; Measured on the user's screenshot (l1.png, §3.74): a 15 px band of the
+  ; groove's colour sat inside the fill, near its right end. Its left edge
+  ; traced a radius-4 cap peaking at x=639 and its right edge one peaking at
+  ; x=653 — the fill at tick 22 and at tick 23, so the band was exactly `new
+  ; region − old region`, the strip that step had just gained, never painted.
+  ; 366/24 is 15.25 px: one tick wide, to the pixel.
+  ;
+  ; `RDW_WHOLE` carries `RDW_UPDATENOW` and `RDW_ALLCHILDREN`, so the groove
+  ; and the fill are both drawn, in z-order, before this returns. It is asked
+  ; of the page and not of the fill because the strip in question belonged to
+  ; the page until a moment ago. The rectangle keeps it to the bar — the whole
+  ; page twenty-four times is a flicker.
+  System::Call '*(i 302, i 188, i 668, i 196) p .r2'
+  System::Call 'user32::RedrawWindow(p $PageHwnd, p $2, p 0, i ${RDW_WHOLE})'
+  System::Free $2
+  Pop $2
   Pop $1
   Pop $0
 FunctionEnd
