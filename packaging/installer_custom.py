@@ -115,20 +115,24 @@ ShowInstDetails show
 !define SWP_BARSTEP      0x0110
 ; INVALIDATE | ERASE | ALLCHILDREN | UPDATENOW
 !define RDW_WHOLE        0x0185
-; **What `RawCtl` creates its controls with, and the reason it is not just
-; `WS_CHILD | WS_VISIBLE`.** The `STATIC` class is registered `CS_PARENTDC`,
-; which hands a static a device context clipped to its *parent* instead of to
-; itself — so `SetWindowRgn` on one is ignored at paint time and it fills its
-; whole rectangle. `WS_CLIPSIBLINGS` is what makes Windows work out a real
-; visible region for the window rather than take that shortcut.
+; INVALIDATE | ERASE | UPDATENOW — one window, painted before the call
+; returns, and nothing else invited to repaint with it. `RDW_WHOLE` on the
+; page would bring the full-page backdrop along, and on this page that is the
+; control that can wipe everything else (§3.75).
+!define RDW_NOW          0x0105
+; **`WS_CLIPSIBLINGS` does not belong here, and it was measured out again.**
+; Page one's cards and dots round; page two's are square to the pixel through
+; the same `RoundCorners`, and the one style bit that differs is nsDialogs'
+; `WS_CLIPSIBLINGS` (nsDialogs.nsh:251). Adding it to `RawCtl` **emptied the
+; page**: `l2.png` is 97.1% bare background, the panel's colour absent
+; altogether, and the only thing still drawn is control 1006 — NSIS's own,
+; and the only control on the page without the bit.
 ;
-; Measured, not reasoned (§3.75). Page one's cards and step dots are round and
-; page two's are square to the pixel — 402x110 and 11x11 exactly, every row
-; full width — while both go through the same `RoundCorners` and `makensis
-; -PPO` shows the region calls emitted on both. The one thing that differs is
-; this bit: nsDialogs' `DEFAULT_STYLES` carries it (nsDialogs.nsh:251) and
-; `RawCtl` did not.
-!define RAW_STYLE        0x54000000   ; CHILD | VISIBLE | CLIPSIBLINGS
+; This page has a full-page backdrop `STATIC` as a sibling of everything else,
+; and a `CS_PARENTDC` control that is clipped against an overlapping sibling
+; covering the whole page is clipped to nothing. §3.75 has the measurements.
+; Do not add it back without a screenshot of the result.
+!define RAW_STYLE        0x50000000   ; CHILD | VISIBLE
 !define SS_BITMAPCTL     0x0000000E
 !ifndef IMAGE_BITMAP
   !define IMAGE_BITMAP   0
@@ -823,7 +827,6 @@ Function Tick
   ; runs.
   Push $0
   Push $1
-  Push $2
   IntOp $Ticks $Ticks + 1
   IntOp $0 $Ticks * 366
   IntOp $0 $0 / ${TICKS}
@@ -848,11 +851,10 @@ Function Tick
   Pop $1
   System::Call 'user32::SetWindowRgn(p $BarFill, p $1, i 1)'
 
-  ; **Painted from the parent, now, over the bar's rectangle.** What was here
-  ; was `InvalidateRect` on the fill, which only marks it: the paint happens
-  ; whenever the dialog's thread next gets to it, and this function runs on the
-  ; install thread, which returns straight into a `File` extracting a hundred
-  ; megabytes.
+  ; **Painted now, and only this window.** What was here was `InvalidateRect`
+  ; on the fill, which only marks it: the paint happens whenever the dialog's
+  ; thread next gets to it, and this function runs on the install thread,
+  ; which returns straight into a `File` extracting a hundred megabytes.
   ;
   ; Measured on the user's screenshot (l1.png, §3.74): a 15 px band of the
   ; groove's colour sat inside the fill, near its right end. Its left edge
@@ -861,15 +863,14 @@ Function Tick
   ; region − old region`, the strip that step had just gained, never painted.
   ; 366/24 is 15.25 px: one tick wide, to the pixel.
   ;
-  ; `RDW_WHOLE` carries `RDW_UPDATENOW` and `RDW_ALLCHILDREN`, so the groove
-  ; and the fill are both drawn, in z-order, before this returns. It is asked
-  ; of the page and not of the fill because the strip in question belonged to
-  ; the page until a moment ago. The rectangle keeps it to the bar — the whole
-  ; page twenty-four times is a flicker.
-  System::Call '*(i 302, i 188, i 668, i 196) p .r2'
-  System::Call 'user32::RedrawWindow(p $PageHwnd, p $2, p 0, i ${RDW_WHOLE})'
-  System::Free $2
-  Pop $2
+  ; `RDW_UPDATENOW` is the whole of the fix — the window paints before this
+  ; returns instead of being left marked. It is asked of the **fill alone**:
+  ; the gained strip is inside the fill's own rectangle, so nothing else needs
+  ; to draw, and the first version of this asked the page with
+  ; `RDW_ALLCHILDREN`, which would have brought the full-page backdrop into
+  ; every one of the twenty-four steps (§3.75). The groove never needs
+  ; repainting because the bar only ever grows.
+  System::Call 'user32::RedrawWindow(p $BarFill, p 0, p 0, i ${RDW_NOW})'
   Pop $1
   Pop $0
 FunctionEnd
