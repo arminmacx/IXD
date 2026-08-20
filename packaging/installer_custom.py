@@ -202,6 +202,14 @@ Var PageHwnd
 Var Bar
 Var Ticks
 
+; An installation in the *other* mode, found when leaving page one. Two copies
+; of a download manager on one machine is the defect this prevents: they share
+; a control port, a settings file and a browser registration, and the one the
+; Start menu points at is whichever installed last.
+Var OtherMode
+Var OtherDir
+Var OtherUninstall
+
 !macro RoundCorners hwnd w h radius
   System::Call 'gdi32::CreateRoundRectRgn(i 0, i 0, i ${w}, i ${h}, i ${radius}, i ${radius}) p .s'
   Pop $Tmp
@@ -697,6 +705,70 @@ Function OnBrowse
   ${EndIf}
 FunctionEnd
 
+; **Is there already a copy installed the other way round?**
+;
+; The install writes `Software\@APP_SLUG@` through `SHCTX`, so an all-users
+; install records itself in HKLM and a just-me install in HKCU. Picking the
+; opposite mode therefore means reading the opposite hive — `SHCTX` is exactly
+; the wrong thing to use here, because it follows the mode being chosen.
+;
+; A recorded folder is not enough on its own: an uninstall that could not
+; remove a locked file leaves the key behind, and a stale key must not stand in
+; front of somebody who is trying to install. The launcher has to actually be
+; there.
+Function FindOtherInstall
+  StrCpy $OtherMode ""
+  StrCpy $OtherDir ""
+  StrCpy $OtherUninstall ""
+
+  ${If} $MultiUser.InstallMode == "AllUsers"
+    StrCpy $OtherMode "CurrentUser"
+    ReadRegStr $0 HKCU "Software\@APP_SLUG@" "InstallDir"
+    ReadRegStr $1 HKCU "@UNINSTALL_KEY@" "UninstallString"
+  ${Else}
+    StrCpy $OtherMode "AllUsers"
+    ReadRegStr $0 HKLM "Software\@APP_SLUG@" "InstallDir"
+    ReadRegStr $1 HKLM "@UNINSTALL_KEY@" "UninstallString"
+  ${EndIf}
+
+  ${If} $0 == ""
+  ${OrIfNot} ${FileExists} "$0\@LAUNCHER@"
+    StrCpy $OtherMode ""
+    Return
+  ${EndIf}
+  StrCpy $OtherDir "$0"
+  StrCpy $OtherUninstall "$1"
+FunctionEnd
+
+; Runs the other installation's own uninstaller and then **checks**.
+;
+; `_?=` is what makes this waitable at all: without it an NSIS uninstaller
+; copies itself into %TEMP%, starts the copy and returns immediately, so
+; `ExecWait` waits for the wrong process and we would carry on installing over
+; a folder that is still being emptied. With it the uninstaller runs from where
+; it is — and therefore cannot delete itself, which is why the leftovers are
+; swept afterwards.
+;
+; The exit code is not the test. `RMDir /r` reports success it did not have,
+; and the question here is only ever "is the other copy gone", so that is what
+; is asked. Pushes 1 when the folder is clear.
+Function RemoveOtherInstall
+  ${If} $OtherUninstall == ""
+    Push 0
+    Return
+  ${EndIf}
+  ExecWait '$OtherUninstall /S _?=$OtherDir'
+  ; The uninstaller could not remove the file it was running from, nor the
+  ; folder holding it.
+  Delete "$OtherDir\uninstall.exe"
+  RMDir "$OtherDir"
+  ${If} ${FileExists} "$OtherDir\@LAUNCHER@"
+    Push 0
+  ${Else}
+    Push 1
+  ${EndIf}
+FunctionEnd
+
 Function PageWhereLeave
   ; The box wins. The cards move it, and Browse moves it, but somebody who
   ; types a path means it — and the mode macros above rewrite $INSTDIR as a
@@ -705,6 +777,64 @@ Function PageWhereLeave
   ${If} $0 != ""
     StrCpy $INSTDIR "$0"
   ${EndIf}
+
+  ; **A silent run must never reach a dialog.** It is an in-app update: it was
+  ; handed its mode on the command line, it is upgrading the copy that started
+  ; it, and there is nobody sitting there to press a button. A MessageBox here
+  ; would hang the update until the machine was rebooted, with the application
+  ; already closed.
+  ${IfNot} ${Silent}
+    Call FindOtherInstall
+    ${If} $OtherDir != ""
+      ${If} $OtherMode == "AllUsers"
+        StrCpy $1 "everyone on this PC"
+      ${Else}
+        StrCpy $1 "you only"
+      ${EndIf}
+      ; Built up rather than written as one continued line: a line ending in
+      ; `\` carries the next line's indentation into the string, and this text
+      ; is read by somebody.
+      StrCpy $2 "@APP_NAME@ is already installed for $1, in:$\n$\n"
+      StrCpy $2 "$2    $OtherDir$\n$\n"
+      StrCpy $2 "$2Installing it the other way as well would leave two copies "
+      StrCpy $2 "$2on this machine, sharing one settings file and one browser "
+      StrCpy $2 "$2registration.$\n$\n"
+      StrCpy $2 "$2Yes — remove that one, then install into $INSTDIR$\n"
+      StrCpy $2 "$2No — install into $OtherDir instead$\n"
+      StrCpy $2 "$2Cancel — go back"
+      MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "$2" \
+          IDYES ixd_remove_other IDNO ixd_adopt_other
+      ; Cancel falls through to here and keeps them on the page.
+      Abort
+
+      ixd_adopt_other:
+        ; Install into the one that is already there. The mode has to move
+        ; with the folder, or the registry writes would land in the hive the
+        ; other install is not in.
+        ${If} $OtherMode == "AllUsers"
+          Call MultiUser.InstallMode.AllUsers
+        ${Else}
+          Call MultiUser.InstallMode.CurrentUser
+        ${EndIf}
+        StrCpy $INSTDIR "$OtherDir"
+        ${NSD_SetText} $FolderText "$INSTDIR"
+        Goto ixd_conflict_settled
+
+      ixd_remove_other:
+        Call RemoveOtherInstall
+        Pop $3
+        ${If} $3 != 1
+          StrCpy $2 "$OtherDir could not be removed.$\n$\n"
+          StrCpy $2 "$2Uninstall @APP_NAME@ from Settings → Apps, then run "
+          StrCpy $2 "$2this installer again."
+          MessageBox MB_OK|MB_ICONSTOP "$2"
+          Abort
+        ${EndIf}
+
+      ixd_conflict_settled:
+    ${EndIf}
+  ${EndIf}
+
   StrCpy $Step 1
 FunctionEnd
 

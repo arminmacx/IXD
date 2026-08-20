@@ -7216,6 +7216,7 @@ def main() -> int:
         check_the_progress_bar_is_a_flip_book,
         check_page_two_is_not_clipped_against_its_siblings,
         check_page_two_draws_its_round_things,
+        check_a_second_install_is_offered_the_first_ones_uninstall,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8043,6 +8044,135 @@ def check_page_two_draws_its_round_things() -> None:
     regions = _re.findall(r"CreateRoundRectRgn\(i 0, i 0, i (\d+), i (\d+),",
                           page)
     check("no region is set on this page at all", not regions, str(regions))
+
+
+
+def check_a_second_install_is_offered_the_first_ones_uninstall() -> None:
+    """Two copies on one machine is the defect this prevents.
+
+    An install writes `Software\\IXD` through `SHCTX`, so all-users lands in
+    HKLM and just-me in HKCU. Choosing the opposite mode from an existing
+    install used to go straight through and leave both on the machine —
+    sharing a control port, a settings file and one browser registration, with
+    the Start menu pointing at whichever went last.
+
+    Leaving page one now looks in the **opposite** hive, and if the launcher is
+    really there offers three ways out: remove it and carry on, install into
+    it instead, or go back.
+
+    What is asserted is the part that cannot be seen in a screenshot, because
+    it only happens on a machine that already has the other kind of install.
+    Read out of `makensis -PPO`.
+    """
+    print("\n[a second install is offered the first one's uninstall]")
+    import re as _re
+    import subprocess
+    import sys
+
+    if not shutil.which("makensis"):
+        print("  SKIP  makensis is not installed here (apt install nsis)")
+        return
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import installer_custom  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory(prefix="ixd-conflict-") as folder:
+        folder = Path(folder)
+        payload = folder / "payload"
+        payload.mkdir()
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
+        source = folder / "installer-custom.nsi"
+        source.write_text(installer_custom.script(
+            app_name="Internet Xtreme Downloader", app_slug="IXD",
+            version="1.0.0", publisher="IXD",
+            output=str(folder / "custom.exe"), payload=str(payload),
+            launcher="ixd.exe",
+            icon=str(root / "packaging" / "icons" / "ixd.ico"),
+            art=str(root / "packaging" / "installer-art"),
+            uninstall_key=r"Software\Microsoft\Windows\CurrentVersion"
+                          r"\Uninstall\IXD",
+        ), encoding="utf-8")
+        try:
+            done = subprocess.run(["makensis", "-PPO", str(source)],
+                                  capture_output=True, text=True, timeout=240)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            check("the custom installer preprocesses", False, str(exc))
+            return
+        preprocessed = done.stdout
+
+    def body(name: str) -> str:
+        found = _re.search(rf"Function {name}\b(.*?)FunctionEnd",
+                           preprocessed, _re.S)
+        return found.group(1) if found else ""
+
+    finder = body("FindOtherInstall")
+    check("the installer looks for an install in the other mode", finder)
+    if not finder:
+        return
+
+    # **The opposite hive, and never SHCTX.** SHCTX follows the mode being
+    # chosen, which is exactly the one that cannot find the other install.
+    reads = _re.findall(r'ReadRegStr \$\d (\w+) "([^"]+)"', finder)
+    check("it never reads through SHCTX, which follows the mode being chosen",
+          all(hive != "SHCTX" for hive, _ in reads), str(reads))
+    order = [hive for hive, _ in reads]
+    check("all-users looks in HKCU and just-me looks in HKLM",
+          order == ["HKCU", "HKCU", "HKLM", "HKLM"], str(order))
+    # Which branch is which: the mode is stamped before the reads.
+    branches = _re.findall(r'StrCpy \$OtherMode "(\w+)"', finder)
+    check("and it names the mode it went looking for",
+          branches[:2] == ["CurrentUser", "AllUsers"], str(branches))
+
+    # A stale key must not stand in front of somebody installing: an uninstall
+    # that could not remove a locked file leaves one behind.
+    check("a recorded folder only counts when the launcher is really in it",
+          "ixd.exe" in finder and "IfFileExists" in finder,
+          repr(finder[-300:]))
+
+    leave = body("PageWhereLeave")
+    check("page one has a leave to hook", leave)
+    if not leave:
+        return
+
+    # **The silent guard, and it has to come first.** A silent run is an
+    # in-app update: no one is there, and a MessageBox would hang it with the
+    # application already closed.
+    silent = leave.find("IfSilent")
+    dialog = leave.find("MessageBox")
+    check("a silent run is sent past the whole thing", silent != -1)
+    check("and the guard comes before any dialog, not after",
+          silent != -1 and dialog != -1 and silent < dialog,
+          f"IfSilent at {silent}, MessageBox at {dialog}")
+    check("the choice is remove it, use it, or go back",
+          "MB_YESNOCANCEL" in leave
+          and "IDYES" in leave and "IDNO" in leave, repr(leave[dialog:dialog + 120]))
+    # Cancel is the fall-through, and it must not walk on to the install.
+    after = leave[dialog:]
+    check("and cancelling stays on the page",
+          after.split("\n", 1)[1].lstrip().startswith("Abort"),
+          repr(after[:200]))
+
+    remover = body("RemoveOtherInstall")
+    check("there is something to do the removing", remover)
+    if not remover:
+        return
+    run = _re.search(r"ExecWait '([^']+)'", remover)
+    check("it runs the other installation's own uninstaller", run,
+          repr(remover[:200]))
+    if run:
+        # `_?=` is what makes this waitable. Without it an NSIS uninstaller
+        # copies itself to %TEMP%, starts the copy and returns — so ExecWait
+        # waits on the wrong process and the install carries on over a folder
+        # still being emptied.
+        check("silently, and from where it stands so the wait is real",
+              "/S" in run.group(1) and "_?=" in run.group(1), run.group(1))
+    check("the file it was running from is swept up after it",
+          "uninstall.exe" in remover and "RMDir" in remover)
+    # The exit code is not the test. RMDir /r reports success it did not have.
+    check("and the answer is whether the copy is gone, not what it returned",
+          "IfFileExists" in remover and "$OtherDir\\ixd.exe" in remover,
+          repr(remover[-260:]))
 
 
 if __name__ == "__main__":
