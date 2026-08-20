@@ -5476,6 +5476,28 @@ def test_the_windows_installer_script_is_one_that_could_run() -> None:
           any(line.endswith('noextension"') for line in directives),
           str([d for d in directives if "noextension" in d]))
 
+    # **The source side of a `File` is a path on the machine compiling.**
+    # `as_posix()` was used here and built on Linux every time, because there
+    # the POSIX form is the native form. On the Windows runner NSIS was handed
+    # `D:/a/IXD/IXD/dist/installer-payload/ixd/ixd.exe` and answered "no files
+    # found", which failed the 1.0.32 release.
+    #
+    # Passing the path in rather than reading `os.sep` is what makes this
+    # checkable from here (§3.62) — the platform is the argument.
+    import installer_custom  # noqa: PLC0415
+    from pathlib import PureWindowsPath  # noqa: PLC0415
+    windows = PureWindowsPath(r"D:\a\IXD\dist\ixd\ixd.exe")
+    check("a File source keeps the separator its own makensis needs",
+          installer_custom.source_path(windows) == r"D:\a\IXD\dist\ixd\ixd.exe",
+          installer_custom.source_path(windows))
+    # And the target side is always Windows, whatever machine wrote it.
+    check("while the folder it writes into is always a Windows path",
+          all("$INSTDIR" in line and "/" not in line.split("$INSTDIR", 1)[1]
+              for line in script.splitlines()
+              if line.strip().startswith("SetOutPath ")),
+          str([line.strip() for line in script.splitlines()
+               if line.strip().startswith("SetOutPath ")][:3]))
+
     # Deliberate decisions, each of which was a choice rather than a default.
     check("the person installing is asked who it is for",
           "Just me" in script and "Everyone on this PC" in script)

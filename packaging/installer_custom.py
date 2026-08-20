@@ -1013,6 +1013,26 @@ SectionEnd
 TICKS = 24
 
 
+def source_path(item) -> str:
+    """A path for `File`, written the way *this* machine's `makensis` needs it.
+
+    **`as_posix()` was here, and it built on this machine every time.** On
+    Linux the POSIX form *is* the native form, so nothing showed. On a Windows
+    runner NSIS was handed `D:/a/IXD/IXD/dist/installer-payload/ixd/ixd.exe`
+    and answered `File: … -> no files found`, which failed the 1.0.32 release
+    — the first time this installer had ever been compiled on Windows.
+
+    `makensis` runs on whatever machine `build.py` runs on, so the source side
+    of a `File` is a native path. The target side is not: `SetOutPath` and
+    `$INSTDIR\…` are always Windows and are always written with backslashes.
+
+    Taking the path as an argument rather than reading `os.sep` is what makes
+    this checkable from Linux (§3.62): a `PureWindowsPath` put through here has
+    to come back with its backslashes.
+    """
+    return str(item)
+
+
 def copy_body(payload: Path, ticks: int = TICKS, indent: str = "  ") -> str:
     """`SetOutPath`/`File` for every file in *payload*, with the bar's steps.
 
@@ -1041,7 +1061,7 @@ def copy_body(payload: Path, ticks: int = TICKS, indent: str = "  ") -> str:
         if target != here:
             lines.append(f'{indent}SetOutPath "{target}"')
             here = target
-        lines.append(f'{indent}File "{literal(item.as_posix())}"')
+        lines.append(f'{indent}File "{literal(source_path(item))}"')
         written += item.stat().st_size
         while emitted < ticks and written * ticks >= total * (emitted + 1):
             lines.append(f"{indent}Call Tick")
