@@ -25,6 +25,7 @@ from .base import (
 )
 from . import dash, hls
 from . import generic as _generic       # noqa: F401 - registration side effect
+from . import twitch as _twitch         # noqa: F401 - registration side effect
 from . import youtube as _youtube       # noqa: F401 - registration side effect
 
 if TYPE_CHECKING:  # pragma: no cover

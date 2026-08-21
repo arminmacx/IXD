@@ -3152,11 +3152,131 @@ def test_a_webm_stream_publishes_an_index_too() -> None:
           len(_index_in(header)) == 3, str(len(_index_in(header))))
     check("…and still finds an ISOBMFF one", _index_in(b"") == [])
 
+# ----------------------------------------------------------------------
+_TWITCH_MASTER = """#EXTM3U
+#EXT-X-TWITCH-INFO:NODE="video-edge-1.fra01"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="chunked",NAME="1080p60",AUTOSELECT=YES,DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=6397504,CODECS="avc1.64002A,mp4a.40.2",\
+RESOLUTION=1920x1080,FRAME-RATE=60.000,VIDEO="chunked"
+https://cdn.example.net/hash_chan_1_2/chunked/index-dvr.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3438093,CODECS="avc1.4D4020,mp4a.40.2",\
+RESOLUTION=1280x720,FRAME-RATE=60.000,VIDEO="720p60"
+https://cdn.example.net/hash_chan_1_2/720p60/index-dvr.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=294686,CODECS="avc1.4D400C,mp4a.40.2",\
+RESOLUTION=284x160,FRAME-RATE=30.000,VIDEO="160p30"
+https://cdn.example.net/hash_chan_1_2/160p30/index-dvr.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=216000,CODECS="mp4a.40.2",VIDEO="audio_only"
+https://cdn.example.net/hash_chan_1_2/audio_only/index-dvr.m3u8
+""".replace("\\\n", "")
+
+
+def test_a_twitch_vod_is_a_quality_menu_not_one_rendition() -> None:
+    """The master playlist is what carries the resolutions.
+
+    The extension captures whichever *media* playlist the player fetched, and a
+    media playlist has no RESOLUTION and no BANDWIDTH in it — so the panel had
+    one nameless format and "1080p" silently became 360p (context.md §3.82).
+    """
+    print("\n[a Twitch VOD is a quality menu, not one rendition]")
+    from ixd.extractors.twitch import TwitchExtractor
+
+    formats = hls.parse_master(_TWITCH_MASTER, "https://usher.example/vod/v2/1.m3u8")
+    for media in formats:
+        TwitchExtractor._label(media, 1139.0)
+
+    check("every rendition is found", len(formats) == 4, str(len(formats)))
+    labels = [f.quality_label for f in formats]
+    check("each is named by its height",
+          {"1080p", "720p", "160p"} <= set(labels), str(labels))
+    check("the audio rendition is not called a resolution",
+          "Audio only" in labels, str(labels))
+    check("and it is offered as audio",
+          any(f.ext == "m4a" for f in formats if f.quality_label == "Audio only"))
+
+    tallest = max(formats, key=lambda f: f.height)
+    check("the source rendition is 1080p60",
+          (tallest.height, tallest.fps) == (1080, 60.0),
+          f"{tallest.height}p{tallest.fps:g}")
+    check("and is marked as the source", tallest.note == "source", tallest.note)
+
+    # 6,397,504 bit/s over 1139 s ≈ 910,853,632 bytes.
+    check("a size is published rather than 'size not published'",
+          860 <= tallest.filesize / 1048576 <= 880,
+          f"{tallest.filesize / 1048576:.1f} MB")
+
+    chosen = select_format(formats, "1080p")
+    check("asking for 1080p yields 1080p", chosen.height == 1080, str(chosen.height))
+    chosen = select_format(formats, "720p")
+    check("asking for 720p yields 720p", chosen.height == 720, str(chosen.height))
+
+
+def test_twitch_claims_recordings_and_leaves_live_alone() -> None:
+    """A live playlist is a sliding window, so downloading one is not a download.
+
+    Claiming a live channel page would turn "grab this stream" into "grab the
+    last forty seconds of it", which is worse than not claiming it at all.
+    """
+    print("\n[Twitch claims recordings and leaves live channels alone]")
+    from ixd.extractors.twitch import TwitchExtractor as T
+
+    claimed = (
+        "https://www.twitch.tv/videos/2851508926",
+        "https://twitch.tv/videos/12345",
+        "https://www.twitch.tv/somechannel/video/999",
+        "https://d3stzm2eumvgb4.cloudfront.net/h_chan_1_2/chunked/index-dvr.m3u8",
+        "https://d3.cloudfront.net/h_chan_1_2/720p60/highlight-2851508926.m3u8",
+    )
+    for url in claimed:
+        check(f"claims {url.split('/')[-1][:34]}", T.matches(url), url)
+
+    for url in ("https://www.twitch.tv/otplol_",
+                "https://www.twitch.tv/directory/game/Chess",
+                "https://usher.ttvnw.net/api/v2/channel/hls/otplol_.m3u8"):
+        check(f"leaves {url.split('/')[-1][:30]} alone", not T.matches(url), url)
+
+    check("the video id is read from a page URL",
+          T.video_id("https://www.twitch.tv/videos/2851508926") == "2851508926")
+    check("and from the channel form",
+          T.video_id("https://www.twitch.tv/chan/video/42") == "42")
+    check("a live page has none", T.video_id("https://www.twitch.tv/chan") == "")
+
+
+def test_a_twitch_recording_knows_its_own_length_and_channel() -> None:
+    """Everything the fallback route needs is in the URL and the playlist."""
+    print("\n[a Twitch recording knows its own length and channel]")
+    from ixd.extractors.twitch import TwitchExtractor as T, _STORAGE_PLAYLIST
+
+    url = ("https://d3stzm2eumvgb4.cloudfront.net/"
+           "b35b67d3c038e70b17d2_waolol1_75329948354_7164302421/"
+           "360p30/highlight-2851508926.m3u8")
+    match = _STORAGE_PLAYLIST.match(url)
+    check("a storage playlist is recognised", match is not None)
+    if match:
+        check("its rendition is read", match.group("quality") == "360p30",
+              match.group("quality"))
+        title = T._storage_title(match.group("base"), match.group("name"))
+        check("and the channel becomes the name",
+              title == "waolol1 - highlight 2851508926", title)
+        check("a past broadcast is named for its channel too",
+              T._storage_title(match.group("base"), "index-dvr") == "waolol1 - Twitch",
+              T._storage_title(match.group("base"), "index-dvr"))
+
+    playlist = ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n"
+                "#EXT-X-TWITCH-TOTAL-SECS:1139.0\n#EXTINF:10.000,\n0.ts\n")
+    check("the playlist states its own length",
+          T._total_seconds(playlist) == 1139.0, str(T._total_seconds(playlist)))
+    check("and a playlist without one says zero",
+          T._total_seconds("#EXTM3U\n") == 0.0)
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — extractor test suite")
     print("=" * 68)
-    for test in (test_hls, test_dash, test_generic, test_analysis_does_not_download,
+    for test in (test_a_twitch_vod_is_a_quality_menu_not_one_rendition,
+                 test_twitch_claims_recordings_and_leaves_live_alone,
+                 test_a_twitch_recording_knows_its_own_length_and_channel,
+                 test_hls, test_dash, test_generic, test_analysis_does_not_download,
                  test_a_stream_is_named_after_what_it_is,
                  test_the_initialisation_segment_does_not_shift_every_iv,
                  test_a_page_that_delegates_its_player_is_followed,
