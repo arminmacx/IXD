@@ -489,23 +489,34 @@ class HttpClient:
     def probe(self, url: str, headers: dict[str, str] | None = None) -> RemoteFileInfo:
         """Discover size, range support and naming metadata for ``url``.
 
-        HEAD is tried first; many CDNs answer it poorly, so a ranged GET is the
-        authoritative fallback — a ``206`` proves range support outright.
-        """
-        info = RemoteFileInfo(url=url)
+        HEAD is asked first, and its answer about *ranges* is never taken on
+        trust: `Accept-Ranges: bytes` is a claim, and a one-byte GET is the
+        only thing that settles it. A ``206`` proves range support; a ``200``
+        disproves it, whatever the HEAD said.
 
+        This costs one extra request of one byte per download, and it is what
+        keeps a server that advertises ranges and ignores them from being
+        planned as a multi-connection transfer that cannot work (§3.81).
+        """
+        head: RemoteFileInfo | None = None
         try:
             with self.request("HEAD", url, headers) as response:
-                info = self._info_from_response(response)
-                if info.size > 0 and info.supports_ranges:
-                    return info
+                head = self._info_from_response(response)
         except (HttpError, NetworkError):
-            pass  # fall through to the ranged GET
+            pass  # the ranged GET below is the authority anyway
 
         probe_headers = dict(headers or {})
         probe_headers["Range"] = "bytes=0-0"
-        with self.request("GET", url, probe_headers) as response:
-            ranged = self._info_from_response(response)
+        try:
+            with self.request("GET", url, probe_headers) as response:
+                ranged = self._info_from_response(response)
+        except (HttpError, NetworkError):
+            if head is None:
+                raise
+            # An origin that will not answer a one-byte GET is not one to plan
+            # a ranged transfer around, whatever its HEAD advertised.
+            head.supports_ranges = False
+            return head
 
         if ranged.status == 206:
             ranged.supports_ranges = True
@@ -517,10 +528,11 @@ class HttpClient:
             # Server ignored the Range header entirely.
             ranged.supports_ranges = False
 
-        if info.size and not ranged.size:
-            ranged.size = info.size
-        if info.filename and not ranged.filename:
-            ranged.filename = info.filename
+        if head is not None:
+            if head.size and not ranged.size:
+                ranged.size = head.size
+            if head.filename and not ranged.filename:
+                ranged.filename = head.filename
         return ranged
 
     def _info_from_response(self, response: Response) -> RemoteFileInfo:

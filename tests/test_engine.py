@@ -3120,6 +3120,83 @@ def test_a_queue_left_by_a_previous_session_does_not_start_itself() -> None:
         harness.close()
 
 
+def test_a_server_that_advertises_ranges_and_ignores_them() -> None:
+    """`Accept-Ranges: bytes` is a claim, and the probe has to check it.
+
+    gameforge.com's installer host answers HEAD with a size and
+    `Accept-Ranges: bytes`, then returns `200` and the whole 2.2 MB body for
+    every `Range` it is given. Believing the header planned three connections
+    that could not work, and the download failed outright (context.md §3.81).
+    """
+    print("\n[a server that advertises ranges and ignores them]")
+    from ixd.core.http_client import HttpClient
+    from ixd.core.models import TransferMode
+
+    payload = make_payload(3 << 20)
+    digest = hashlib.sha256(payload).hexdigest()
+    harness = Harness()
+    try:
+        with TestOrigin(payload) as origin:
+            origin.state.ignore_ranges = True
+
+            info = HttpClient().probe(origin.url())
+            check("the probe disbelieves the Accept-Ranges header",
+                  info.supports_ranges is False, str(info.supports_ranges))
+            check("and still learns the size",
+                  info.size == len(payload), str(info.size))
+
+            download = harness.engine.add_download(origin.url())
+            done = harness.wait_for(
+                download.id, {DownloadStatus.COMPLETED, DownloadStatus.ERROR}, timeout=60
+            )
+            check("the download completes",
+                  done.status is DownloadStatus.COMPLETED, str(done.error))
+            check("planned as a single stream", done.mode is TransferMode.SINGLE,
+                  done.mode.value)
+            if os.path.isfile(done.filepath):
+                actual = hashlib.sha256(Path(done.filepath).read_bytes()).hexdigest()
+                check("the bytes are correct", actual == digest)
+    finally:
+        harness.close()
+
+
+def test_a_range_lie_found_mid_transfer_restarts_as_one_stream() -> None:
+    """An origin can pass the probe and still ignore every range after it.
+
+    Checking the probe cannot catch that one, so the discovery has to be
+    survivable: the workers stop, whatever is on disk is discarded — none of it
+    can be trusted to be at the offset it was asked for — and the file comes
+    down again on one connection.
+    """
+    print("\n[a range lie found mid-transfer restarts as one stream]")
+    from ixd.core.models import TransferMode
+
+    payload = make_payload(6 << 20)
+    digest = hashlib.sha256(payload).hexdigest()
+    harness = Harness()
+    try:
+        with TestOrigin(payload) as origin:
+            origin.state.ignore_ranges_after_probe = True
+
+            download = harness.engine.add_download(origin.url())
+            done = harness.wait_for(
+                download.id, {DownloadStatus.COMPLETED, DownloadStatus.ERROR}, timeout=90
+            )
+            check("the download completes rather than failing",
+                  done.status is DownloadStatus.COMPLETED, str(done.error))
+            check("it ends up a single stream", done.mode is TransferMode.SINGLE,
+                  done.mode.value)
+            check("and is recorded as non-resumable",
+                  done.supports_ranges is False, str(done.supports_ranges))
+            check("the whole file is there",
+                  done.downloaded == len(payload), str(done.downloaded))
+            if os.path.isfile(done.filepath):
+                actual = hashlib.sha256(Path(done.filepath).read_bytes()).hexdigest()
+                check("byte-exact after the restart", actual == digest)
+    finally:
+        harness.close()
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — engine test suite")
@@ -3158,6 +3235,8 @@ def main() -> int:
         test_the_pages_cookies_do_not_travel_to_a_media_cdn,
         test_the_origins_own_name_beats_the_address,
         test_a_queue_left_by_a_previous_session_does_not_start_itself,
+        test_a_server_that_advertises_ranges_and_ignores_them,
+        test_a_range_lie_found_mid_transfer_restarts_as_one_stream,
     ):
         try:
             test()

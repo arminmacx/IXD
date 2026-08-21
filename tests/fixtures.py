@@ -24,6 +24,14 @@ class OriginState:
     payload: bytes = b""
     etag: str = '"v1"'
     support_ranges: bool = True
+    #: Advertise `Accept-Ranges: bytes` and then answer every `Range` with a
+    #: `200` carrying the whole body. Not a hypothetical: gameforge.com's
+    #: installer host does exactly this (context.md §3.81).
+    ignore_ranges: bool = False
+    #: The nastier version of the same lie: the one-byte probe is answered
+    #: correctly with a `206`, and every range after it is ignored. Such an
+    #: origin cannot be caught before the transfer starts.
+    ignore_ranges_after_probe: bool = False
     send_content_md5: bool = False
     #: Drop the connection after this many bytes of each response (0 = never).
     cut_after: int = 0
@@ -134,7 +142,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         payload = self.state.payload
         range_header = self.headers.get("Range")
 
-        if range_header and self.state.support_ranges:
+        ignoring = self.state.ignore_ranges
+        if self.state.ignore_ranges_after_probe and range_header:
+            # The probe is humoured; nothing else is.
+            ignoring = range_header.strip() != "bytes=0-0"
+
+        if range_header and self.state.support_ranges and not ignoring:
             match = re.match(r"bytes=(\d*)-(\d*)", range_header.strip())
             if match:
                 with self.state.lock:

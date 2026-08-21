@@ -52,10 +52,6 @@ class RangeCappedError(HttpError):
     """
 
 
-class RangeNotSupportedError(IXDError):
-    """The origin dropped Range support mid-transfer; restart linearly."""
-
-
 class ContentChangedError(IXDError):
     """ETag / Last-Modified / length no longer match the resumed state."""
 

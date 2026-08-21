@@ -40,7 +40,6 @@ from .errors import (
     LinkExpiredError,
     NetworkError,
     RangeCappedError,
-    RangeNotSupportedError,
     IXDError,
 )
 from .events import EventBus, EventType
@@ -369,6 +368,14 @@ def unwrap_disguised_segment(payload: bytes) -> bytes:
     return payload
 
 
+class _ReplanRequested(Exception):
+    """Stop every worker: the chunk map this transfer was built on is wrong.
+
+    Not an error and never reported as one — it unwinds the workers so
+    `_transfer` can lay the file out again and start over.
+    """
+
+
 class DownloadTask:
     """Runs a single download to completion (or to a pause)."""
 
@@ -381,6 +388,10 @@ class DownloadTask:
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()          # set by pause and cancel alike
+        #: Set when the transfer has to be re-laid-out and run again — an
+        #: origin that advertised byte ranges and then ignored one. Distinct
+        #: from `_stop`, which means the user asked for this to end.
+        self._replan = threading.Event()
         #: Responses currently being read, so pausing can close them rather
         #: than wait out a socket timeout on a stalled origin.
         self._live: set = set()
@@ -2318,42 +2329,85 @@ class DownloadTask:
     # transfer
     # ------------------------------------------------------------------
     def _transfer(self) -> None:
+        while True:
+            with self._chunk_lock:
+                pending = [c for c in self._chunks if c.status is not ChunkStatus.DONE]
+            if not pending:
+                return
+
+            if self.download.mode is TransferMode.SABR:
+                # The origin drives this one; there is no work to divide up.
+                self._transfer_sabr()
+                return
+
+            if self.download.mode is TransferMode.SINGLE:
+                worker_count = 1
+            else:
+                # Segments and byte ranges are both "pieces this download may
+                # fetch at once", so they answer to the same setting.
+                worker_count = min(self._connection_count(), len(pending))
+            worker_count = max(1, worker_count)
+
+            workers = [
+                threading.Thread(
+                    target=self._worker_loop, args=(i,),
+                    name=f"ixd-worker-{self.download.id}-{i}", daemon=True,
+                )
+                for i in range(worker_count)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+
+            if self._replan.is_set() and not self._stop.is_set():
+                # Every worker has stopped and the chunk map is void. Lay the
+                # file out again and run the whole thing once more.
+                self._replan.clear()
+                self._restart_without_ranges()
+                continue
+
+            self._replan.clear()
+            if self._error is not None:
+                raise self._error
+            return
+
+    def _restart_without_ranges(self) -> None:
+        """Give up on ranges and pull the file down one connection, from zero.
+
+        Some origins advertise `Accept-Ranges: bytes`, answer the probe
+        agreeably, and then send `200` with the entire body for every `Range`
+        they are given — gameforge.com's installer host is one (§3.81). There
+        is no partial content to be had from such a server, so nothing already
+        on disk can be continued and nothing that arrived at an offset can be
+        trusted: the file starts over.
+        """
+        download = self.download
+        self._log(
+            "The server advertised byte ranges and then ignored one — "
+            "restarting on a single connection from the beginning",
+            "warning",
+        )
+        download.supports_ranges = False
+        download.mode = TransferMode.SINGLE
+        self._error = None
         with self._chunk_lock:
-            pending = [c for c in self._chunks if c.status is not ChunkStatus.DONE]
-        if not pending:
-            return
-
-        if self.download.mode is TransferMode.SABR:
-            # The origin drives this one; there is no work to divide up.
-            self._transfer_sabr()
-            return
-
-        if self.download.mode is TransferMode.SINGLE:
-            worker_count = 1
-        else:
-            # Segments and byte ranges are both "pieces this download may fetch
-            # at once", so they answer to the same setting.
-            worker_count = min(self._connection_count(), len(pending))
-        worker_count = max(1, worker_count)
-
-        workers = [
-            threading.Thread(
-                target=self._worker_loop, args=(i,),
-                name=f"ixd-worker-{self.download.id}-{i}", daemon=True,
-            )
-            for i in range(worker_count)
-        ]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join()
-
-        if self._error is not None:
-            raise self._error
+            self._chunks = []
+            self._next_chunk_index = 0
+        self._bytes_done = 0
+        try:
+            if download.temp_path and os.path.exists(download.temp_path):
+                os.remove(download.temp_path)
+        except OSError:
+            pass
+        self._plan_byte_chunks()
+        self._allocate_file(download.total_size)
+        self.db.update_download(download)
+        self._flush_progress()
 
     def _worker_loop(self, worker_id: int) -> None:
         try:
-            while not self._stop.is_set():
+            while not self._stop.is_set() and not self._replan.is_set():
                 chunk = self._acquire_chunk()
                 if chunk is None:
                     return
@@ -2362,6 +2416,10 @@ class DownloadTask:
                         self._transfer_segment_band(chunk)
                     else:
                         self._transfer_byte_range(chunk)
+                except _ReplanRequested:
+                    # The chunk map is about to be thrown away. Nothing to
+                    # record and nothing to report.
+                    return
                 except CancelledError:
                     with self._chunk_lock:
                         if chunk.status is ChunkStatus.ACTIVE:
@@ -2585,6 +2643,8 @@ class DownloadTask:
 
         while True:
             self._check_stop()
+            if self._replan.is_set():
+                raise _ReplanRequested()
             with self._chunk_lock:
                 if chunk.size >= 0 and chunk.downloaded >= chunk.size:
                     chunk.status = ChunkStatus.DONE
@@ -2613,9 +2673,12 @@ class DownloadTask:
                         had_prior_success=self._had_success,
                     ))
                     if response.status == 200 and start > 0:
-                        raise RangeNotSupportedError(
-                            "server ignored the Range header on resume"
-                        )
+                        # The origin advertised ranges and sent the whole file
+                        # anyway. Nothing has been written — the body is not
+                        # what this chunk asked for — so stop every worker and
+                        # let `_transfer` start again as a single stream.
+                        self._replan.set()
+                        raise _ReplanRequested()
                 else:
                     response = self._track(client.get(download.url, headers))
 
@@ -2662,8 +2725,6 @@ class DownloadTask:
                     attempt = 0
                     continue
                 raise
-            except RangeNotSupportedError:
-                raise
             except RETRYABLE_ERRORS as exc:
                 # A 403 confined to the tail of the file means the link's grant
                 # has run out. Signed media links are issued covering only part
@@ -2701,6 +2762,8 @@ class DownloadTask:
                 handle.seek(chunk.cursor)
             while True:
                 self._check_stop()
+                if self._replan.is_set():
+                    raise _ReplanRequested()
                 with self._chunk_lock:
                     remaining = chunk.size - chunk.downloaded if chunk.size >= 0 else -1
                 if remaining == 0:
