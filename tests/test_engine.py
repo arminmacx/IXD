@@ -3282,6 +3282,110 @@ def test_connections_are_reused_and_never_reused_unsafely() -> None:
               sum(len(v) for v in client._pool._idle.values()) == 0)
 
 
+def test_a_dead_pooled_connection_costs_seconds_not_a_timeout() -> None:
+    """Reusing connections must never be slower than not reusing them.
+
+    It was. A connection dropped by a middlebox rather than closed by the
+    origin is **half open**: the write lands in a kernel buffer and succeeds,
+    and the read then waits out the whole socket timeout for an answer that is
+    never coming. Measured against a server that answers once and then goes
+    deaf: **30,009 ms** for the next request, where no pooling at all would
+    have cost a single handshake. The user's words on the release that shipped
+    it — "its even get worser than before and slow".
+    """
+    print("\n[a dead pooled connection costs seconds, not a timeout]")
+    import socket as socket_module
+    import threading as threading_module
+
+    from ixd.core.http_client import HttpClient, _REUSE_HEADER_TIMEOUT
+
+    posts = []
+
+    def deaf_server(answer_once: bool):
+        """Answers the first request on each connection, then never again."""
+        listener = socket_module.socket()
+        listener.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        kept: list = []
+
+        def serve() -> None:
+            while True:
+                try:
+                    conn, _address = listener.accept()
+                except OSError:
+                    return
+
+                def handle(sock) -> None:
+                    try:
+                        request = sock.recv(65536)
+                        if request.startswith(b"POST"):
+                            posts.append(request)
+                        sock.sendall(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+                        if answer_once:
+                            kept.append(sock)      # deaf from here on
+                        else:
+                            sock.close()
+                    except OSError:
+                        pass
+
+                threading_module.Thread(target=handle, args=(conn,),
+                                        daemon=True).start()
+
+        threading_module.Thread(target=serve, daemon=True).start()
+        time.sleep(0.2)
+        return listener, kept
+
+    # 1. The origin closes politely. The socket becomes readable at EOF, so the
+    #    pool must notice before handing it out — no timeout, no retry.
+    listener, _kept = deaf_server(answer_once=False)
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/x"
+    client = HttpClient()
+    client.profile.timeout = 30.0
+    with client.request("GET", url) as first:
+        first.read_all()
+    time.sleep(0.3)
+    started = time.time()
+    with client.request("GET", url) as second:
+        body = second.read_all()
+    elapsed = time.time() - started
+    check("a politely closed connection is noticed at once",
+          elapsed < 2.0 and body == b"hi", f"{elapsed:.1f}s, {body!r}")
+    client.close()
+    listener.close()
+
+    # 2. The flow is dropped without a FIN — nothing can see it but a clock.
+    listener, kept = deaf_server(answer_once=True)
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/x"
+    client = HttpClient()
+    client.profile.timeout = 30.0
+    with client.request("GET", url) as first:
+        first.read_all()
+    started = time.time()
+    with client.request("GET", url) as second:
+        body = second.read_all()
+    elapsed = time.time() - started
+    check("a half-open one costs the leash, not the read timeout",
+          elapsed < _REUSE_HEADER_TIMEOUT + 3.0, f"{elapsed:.1f}s")
+    check("and the request still succeeds, on a fresh connection",
+          body == b"hi", repr(body))
+    check("which is far short of what it used to cost",
+          elapsed < 15.0, f"{elapsed:.1f}s against 30.0s before")
+
+    # 3. A POST must never be re-sent on a timeout: the origin may have had it
+    #    and merely been slow, and doing it twice is worse than failing.
+    posts.clear()
+    try:
+        client.post(url, b"once")
+    except Exception:                                  # noqa: BLE001
+        pass
+    check("a POST is sent exactly once, whatever the socket did",
+          len(posts) <= 1, f"{len(posts)} POSTs reached the origin")
+    client.close()
+    listener.close()
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — engine test suite")
@@ -3323,6 +3427,7 @@ def main() -> int:
         test_a_server_that_advertises_ranges_and_ignores_them,
         test_a_range_lie_found_mid_transfer_restarts_as_one_stream,
         test_connections_are_reused_and_never_reused_unsafely,
+        test_a_dead_pooled_connection_costs_seconds_not_a_timeout,
     ):
         try:
             test()

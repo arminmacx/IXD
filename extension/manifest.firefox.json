@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Internet Xtreme Downloader",
-  "version": "1.0.39",
+  "version": "1.0.40",
   "description": "Send downloads and videos straight to Internet Xtreme Downloader for accelerated, resumable, multi-threaded transfers.",
   "browser_specific_settings": {
     "gecko": {

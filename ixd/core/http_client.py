@@ -14,6 +14,7 @@ import gzip
 import http.client
 import io
 import re
+import select
 import socket
 import ssl
 import threading
@@ -126,10 +127,65 @@ class RemoteFileInfo:
 #: origins hang up on an idle keep-alive somewhere between 5 and 75 seconds and
 #: none of them announce it, so this is deliberately short: a connection worth
 #: reusing is one being reused *now*, in the middle of an extraction.
-_IDLE_TIMEOUT = 20.0
+_IDLE_TIMEOUT = 10.0
+#: How long a *reused* connection is given to produce response headers before
+#: it is written off and the request re-sent on a fresh one.
+#:
+#: This is the number that makes pooling safe rather than fast-and-worse. A
+#: connection dropped by a middlebox rather than closed by the origin is
+#: **half open**: the write lands in a kernel buffer and succeeds, and the read
+#: then waits out the full socket timeout for an answer that is never coming.
+#: Measured against a server that answers once and then goes deaf: **30,009 ms
+#: for the second request**, where no pooling at all would have cost one
+#: handshake. Headers are round-trip-bound, so anything beyond a few seconds is
+#: not a slow origin, it is a dead socket.
+_REUSE_HEADER_TIMEOUT = 5.0
+
+#: Methods it is safe to re-send after a *timeout* on a reused connection.
+#:
+#: A write that fails outright never reached the origin, so re-sending anything
+#: is safe. A timeout is different: the write succeeded, so the origin may have
+#: received the request and merely been slow to answer — and re-sending a POST
+#: on that guess could make it happen twice. So a POST keeps the ordinary
+#: timeout and is never re-sent on one; only a read that cannot be repeated
+#: wrongly gets the short leash.
+_REPEATABLE = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 #: Idle connections kept per origin. Extraction is sequential per client, so
 #: one is usually enough; the rest are headroom for redirects between hosts.
 _POOL_PER_HOST = 4
+
+
+def _looks_dropped(connection: "http.client.HTTPConnection") -> bool:
+    """Has the far end already hung up on this idle connection?
+
+    An idle keep-alive has no reply outstanding, so its socket should have
+    nothing to read. If it *is* readable, what is waiting is end-of-file — the
+    origin closed it — or unsolicited bytes, and either way it cannot carry the
+    next request. Non-blocking, so it costs a syscall.
+
+    This catches the ordinary case, where the origin closes politely. It cannot
+    catch a flow silently dropped in the middle of the network, which is what
+    `_REUSE_HEADER_TIMEOUT` is for.
+    """
+    sock = getattr(connection, "sock", None)
+    if sock is None:
+        return True
+    try:
+        readable, _writable, _bad = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    return bool(readable)
+
+
+def _set_socket_timeout(connection: "http.client.HTTPConnection",
+                        seconds: float) -> None:
+    sock = getattr(connection, "sock", None)
+    if sock is None:
+        return
+    try:
+        sock.settimeout(seconds)
+    except OSError:
+        pass
 
 
 def _quietly_close(connection: "http.client.HTTPConnection") -> None:
@@ -166,7 +222,7 @@ class _ConnectionPool:
             entries = self._idle.get(key)
             while entries:
                 connection, parked_at = entries.pop()
-                if now - parked_at > _IDLE_TIMEOUT:
+                if now - parked_at > _IDLE_TIMEOUT or _looks_dropped(connection):
                     _quietly_close(connection)
                     continue
                 return connection
@@ -550,8 +606,18 @@ class HttpClient:
 
             payload = body.encode("utf-8") if isinstance(body, str) else body
             try:
+                leashed = pooled is not None and method.upper() in _REPEATABLE
+                if leashed:
+                    # A reused connection gets a short leash for its headers,
+                    # then it is written off. See `_REUSE_HEADER_TIMEOUT`: a
+                    # half-open socket accepts the write and never answers, and
+                    # without this that costs the full read timeout — which
+                    # made pooling slower than no pooling at all.
+                    _set_socket_timeout(connection, _REUSE_HEADER_TIMEOUT)
                 connection.request(method, target, body=payload, headers=request_headers)
                 raw = connection.getresponse()
+                if leashed:
+                    _set_socket_timeout(connection, self.profile.timeout)
             except (http.client.HTTPException, ssl.SSLError, socket.error, OSError) as exc:
                 connection.close()
                 # A connection out of the pool can have been closed by the
@@ -559,7 +625,8 @@ class HttpClient:
                 # fails. That is not a failed request — it is a stale socket —
                 # so it is retried once, on a new connection. Without this,
                 # pooling would turn every idle-timeout into a download error.
-                if pooled is None:
+                timed_out = isinstance(exc, TimeoutError)
+                if pooled is None or (timed_out and not leashed):
                     raise NetworkError(f"{method} {current} failed: {exc}") from exc
                 connection, target, extra = self._build_connection(parsed)
                 request_headers.update(extra)
