@@ -150,6 +150,21 @@ _REUSE_HEADER_TIMEOUT = 5.0
 #: timeout and is never re-sent on one; only a read that cannot be repeated
 #: wrongly gets the short leash.
 _REPEATABLE = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+#: A non-repeatable request never reuses a pooled connection.
+#:
+#: It cannot be given the short leash, because re-sending a POST after a
+#: timeout may make it happen twice — so on a dead socket it waits out the
+#: whole socket timeout. Measured: **30,008 ms, and then a failure**. A Twitch
+#: VOD made two of these, which is why reading its qualities hung and why it
+#: then showed no sizes: the second failure was swallowed as an optional
+#: lookup.
+#:
+#: Freshness was tried as a compromise and rejected: a socket parked a moment
+#: ago is *probably* alive, and "probably" is the wrong footing for the one
+#: request that cannot be repeated. A POST pays one handshake instead — which
+#: is what it paid before any of this — and still leaves its connection in the
+#: pool for the GETs that follow it.
 #: Idle connections kept per origin. Extraction is sequential per client, so
 #: one is usually enough; the rest are headroom for redirects between hosts.
 _POOL_PER_HOST = 4
@@ -595,7 +610,8 @@ class HttpClient:
                 raise NetworkError(f"unsupported URL scheme: {parsed.scheme!r}")
 
             key = self._pool_key(parsed)
-            pooled = self._pool.take(key)
+            repeatable = method.upper() in _REPEATABLE
+            pooled = self._pool.take(key) if repeatable else None
             connection, target, extra = self._build_connection(parsed, pooled)
             request_headers = self._default_headers(parsed, headers)
             request_headers.update(extra)
@@ -606,7 +622,7 @@ class HttpClient:
 
             payload = body.encode("utf-8") if isinstance(body, str) else body
             try:
-                leashed = pooled is not None and method.upper() in _REPEATABLE
+                leashed = pooled is not None and repeatable
                 if leashed:
                     # A reused connection gets a short leash for its headers,
                     # then it is written off. See `_REUSE_HEADER_TIMEOUT`: a

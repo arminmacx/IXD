@@ -134,8 +134,8 @@ class TwitchExtractor(Extractor):
 
     # -- the master-playlist route --------------------------------------
     def _from_page(self, url: str, video_id: str) -> MediaInfo:
-        title, duration, thumbnail, channel = self._metadata(video_id)
-        value, signature = self._access_token(video_id)
+        title, duration, thumbnail, _channel, value, signature = (
+            self._video_session(video_id))
 
         query = urllib.parse.urlencode({
             "allow_source": "true",
@@ -356,6 +356,47 @@ class TwitchExtractor(Extractor):
             payload = payload[0] if payload else {}
         return payload if isinstance(payload, dict) else {}
 
+    def _video_session(self, video_id: str
+                       ) -> tuple[str, float, str, str, str, str]:
+        """Everything a recording needs, in **one** request.
+
+        `video` and `videoPlaybackAccessToken` are both root fields, so one
+        query answers both — and that is not only a round trip saved. Asked
+        separately, the metadata call was optional and swallowed its own
+        failures: when it hung, the panel showed a quality menu with no sizes
+        beside it and no hint why (§3.87). Sharing a request makes the two
+        succeed or fail together, which is the honest arrangement — the token
+        is not optional, so a failure is now reported instead of half-applied.
+        """
+        query = (
+            '{video(id:"%s"){title lengthSeconds owner{displayName} '
+            'previewThumbnailURL} '
+            'videoPlaybackAccessToken(id:"%s",params:{platform:"web",'
+            'playerBackend:"mediaplayer",playerType:"site"})'
+            "{value signature}}" % (video_id, video_id)
+        )
+        data = (self._gql({"query": query}).get("data") or {})
+        token = data.get("videoPlaybackAccessToken") or {}
+        value, signature = token.get("value", ""), token.get("signature", "")
+        if not (value and signature):
+            # The plain query is refused or has changed shape. Fall back to the
+            # persisted operation, which is a different code path on Twitch's
+            # side and has been known to answer when this one does not.
+            value, signature = self._access_token(video_id)
+
+        video = data.get("video") or {}
+        thumbnail = (video.get("previewThumbnailURL") or "")
+        # The URL is a template; a viewer wants a picture, not `{width}`.
+        thumbnail = thumbnail.replace("{width}", "1280").replace("{height}", "720")
+        return (
+            video.get("title") or "",
+            float(video.get("lengthSeconds") or 0),
+            thumbnail,
+            ((video.get("owner") or {}).get("displayName") or ""),
+            value,
+            signature,
+        )
+
     def _access_token(self, video_id: str) -> tuple[str, str]:
         """The playback token and its signature, for a signed-out viewer.
 
@@ -382,7 +423,7 @@ class TwitchExtractor(Extractor):
                               "c129dc2200705b0712",
             }},
         }
-        for body in (plain, persisted):
+        for body in (persisted, plain):
             token = ((self._gql(body).get("data") or {})
                      .get("videoPlaybackAccessToken") or {})
             value, signature = token.get("value", ""), token.get("signature", "")

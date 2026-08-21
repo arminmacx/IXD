@@ -3373,15 +3373,29 @@ def test_a_dead_pooled_connection_costs_seconds_not_a_timeout() -> None:
     check("which is far short of what it used to cost",
           elapsed < 15.0, f"{elapsed:.1f}s against 30.0s before")
 
-    # 3. A POST must never be re-sent on a timeout: the origin may have had it
-    #    and merely been slow, and doing it twice is worse than failing.
+    # 3. A POST never takes a pooled connection at all.
+    #
+    #    It cannot be given the leash — re-sending after a timeout could make it
+    #    happen twice — so on a dead socket it would wait out the whole socket
+    #    timeout. Measured before this: 30,008 ms and then a failure. A Twitch
+    #    VOD made two POSTs, which is why reading its qualities hung and then
+    #    showed no sizes, the second failure having been swallowed as optional.
     posts.clear()
-    try:
-        client.post(url, b"once")
-    except Exception:                                  # noqa: BLE001
-        pass
+    started = time.time()
+    for payload in (b"one", b"two", b"three"):
+        with client.post(url, payload) as answer:
+            answer.read_all()
+    elapsed = time.time() - started
+    check("three POSTs against a deaf socket are not three timeouts",
+          elapsed < 5.0, f"{elapsed:.1f}s")
+    check("each of them was answered", len(posts) == 3, str(len(posts)))
+
+    # And still exactly once each: a fresh connection means no re-send.
+    posts.clear()
+    with client.post(url, b"only") as answer:
+        answer.read_all()
     check("a POST is sent exactly once, whatever the socket did",
-          len(posts) <= 1, f"{len(posts)} POSTs reached the origin")
+          len(posts) == 1, f"{len(posts)} POSTs reached the origin")
     client.close()
     listener.close()
 
