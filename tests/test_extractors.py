@@ -3372,9 +3372,25 @@ def test_a_twitch_clip_is_a_handful_of_plain_files() -> None:
     }}}
 
     class Client:
-        heads = []
+        """Enough of `HttpClient` for the sizing pass.
+
+        `clone()` is part of that contract: the sizes are asked for
+        concurrently and a connection carries one request at a time, so each
+        thread takes a client of its own.
+        """
+
+        heads: list = []
+        lock = __import__("threading").Lock()
+
+        def clone(self):
+            return self
+
+        def close(self):
+            pass
+
         def request(self, method, url, headers=None, **kw):
-            Client.heads.append(url)
+            with Client.lock:
+                Client.heads.append(url)
             raise OSError("no network in this test")
 
     extractor = T(Client())
@@ -3391,8 +3407,8 @@ def test_a_twitch_clip_is_a_handful_of_plain_files() -> None:
     signed = info.formats[0].url
     check("the address carries the signature", "sig=deadbeef" in signed, signed)
     check("and the token, encoded", "token=%7B%22a%22%3A1%7D" in signed, signed)
-    check("a size was asked for on every quality", len(Client.heads) == 2,
-          str(Client.heads))
+    check("a size was asked for on every quality, at the same time",
+          len(Client.heads) == 2, str(Client.heads))
     check("and an origin that refuses one is not fatal",
           all(f.filesize == 0 for f in info.formats))
 

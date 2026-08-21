@@ -3301,8 +3301,15 @@ def test_a_dead_pooled_connection_costs_seconds_not_a_timeout() -> None:
 
     posts = []
 
-    def deaf_server(answer_once: bool):
-        """Answers the first request on each connection, then never again."""
+    def deaf_server(answer_once: bool, keep_alive: bool = False):
+        """A server that answers, then behaves badly in a chosen way.
+
+        `answer_once` keeps the socket open and says nothing more — a flow
+        dropped in the network. Otherwise it closes after each reply, which is
+        the polite close. `keep_alive` is the well-behaved control: it goes on
+        answering on the same connection, which is what a pooled connection
+        needs in order to be worth pooling.
+        """
         listener = socket_module.socket()
         listener.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", 0))
@@ -3318,15 +3325,20 @@ def test_a_dead_pooled_connection_costs_seconds_not_a_timeout() -> None:
 
                 def handle(sock) -> None:
                     try:
-                        request = sock.recv(65536)
-                        if request.startswith(b"POST"):
-                            posts.append(request)
-                        sock.sendall(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
-                        if answer_once:
-                            kept.append(sock)      # deaf from here on
-                        else:
-                            sock.close()
+                        while True:
+                            request = sock.recv(65536)
+                            if not request:
+                                break
+                            if request.startswith(b"POST"):
+                                posts.append(request)
+                            sock.sendall(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+                            if answer_once:
+                                kept.append(sock)  # deaf from here on
+                                return
+                            if not keep_alive:
+                                sock.close()
+                                return
                     except OSError:
                         pass
 
@@ -3396,6 +3408,41 @@ def test_a_dead_pooled_connection_costs_seconds_not_a_timeout() -> None:
         answer.read_all()
     check("a POST is sent exactly once, whatever the socket did",
           len(posts) == 1, f"{len(posts)} POSTs reached the origin")
+    client.close()
+    listener.close()
+
+    # 4. A POST the caller declares *idempotent* is a read wearing a verb: a
+    #    GraphQL query, an InnerTube player request. Refusing those a pooled
+    #    connection cost a handshake apiece, and YouTube asks one per client
+    #    identity — so it must reuse, and still be bounded when the socket is
+    #    dead.
+    listener, _kept = deaf_server(answer_once=False, keep_alive=True)
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/gql"
+    client = HttpClient()
+    with client.post(url, b"one", idempotent=True) as answer:
+        answer.read_all()
+    pooled_key = next(iter(client._pool._idle), None)
+    held = client._pool._idle[pooled_key][0][0] if pooled_key else None
+    with client.post(url, b"two", idempotent=True) as answer:
+        answer.read_all()
+    check("an idempotent POST reuses a pooled connection",
+          held is not None and answer._conn is held)
+    client.close()
+    listener.close()
+
+    listener, _kept = deaf_server(answer_once=True)
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/gql"
+    client = HttpClient()
+    client.profile.timeout = 30.0
+    with client.post(url, b"one", idempotent=True) as answer:
+        answer.read_all()
+    started = time.time()
+    with client.post(url, b"two", idempotent=True) as answer:
+        body = answer.read_all()
+    elapsed = time.time() - started
+    check("and is still bounded by the leash on a dead one",
+          elapsed < _REUSE_HEADER_TIMEOUT + 3.0 and body == b"hi",
+          f"{elapsed:.1f}s, {body!r}")
     client.close()
     listener.close()
 

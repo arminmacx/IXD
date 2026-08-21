@@ -419,6 +419,33 @@ function loadCaptureRule() {
 // worked everywhere except the one path the identifier existed for. This is a
 // source assertion, not a behavioural one: it pins the shape that broke.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// "There is nothing on this page" is a fact about the page. Remembering it for
+// only fifteen seconds meant re-deriving it every time somebody navigated back:
+// of 93.2 s spent extracting in one user's log, 40.2 s went on seven pages that
+// can never yield media, four of them repeats inside a minute.
+// ---------------------------------------------------------------------------
+console.log("\n[a verdict is remembered, a failure to connect is not]");
+{
+  const worker = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "background.js"), "utf8");
+
+  check("the application's own 'no' is marked as a verdict",
+    /error\.verdict = true/.test(worker));
+  check("and the cache keeps verdicts for as long as successes",
+    /const VERDICT_TTL_MS = CACHE_TTL_MS/.test(worker));
+  check("while an unreachable application still clears quickly",
+    /const FAILURE_TTL_MS = 15 \* 1000/.test(worker));
+
+  // The choice itself: verdict -> long, transport failure -> short.
+  const from = worker.indexOf("const hit = extractionCache.get(key);");
+  const decision = worker.slice(from, from + 260);
+  check("the two are told apart when the cache is read",
+    /hit\.verdict \? VERDICT_TTL_MS : FAILURE_TTL_MS/.test(decision), decision);
+  check("and the flag is stored with the failure",
+    /verdict: Boolean\(error && error\.verdict\)/.test(worker));
+}
+
 console.log("\n[the menu is headed by something a person recognises]");
 {
   const text = fs.readFileSync(

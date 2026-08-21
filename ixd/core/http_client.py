@@ -599,8 +599,20 @@ class HttpClient:
     def request(self, method: str, url: str, headers: dict[str, str] | None = None,
                 body: bytes | str | None = None, *, decode: bool = False,
                 follow_redirects: bool = True, max_redirects: int = MAX_REDIRECTS,
-                had_prior_success: bool = False) -> Response:
-        """Perform a request, following redirects, and return an open response."""
+                had_prior_success: bool = False,
+                idempotent: bool = False) -> Response:
+        """Perform a request, following redirects, and return an open response.
+
+        ``idempotent`` says that repeating this request changes nothing, which
+        only the caller can know. It is how a POST earns the treatment a GET
+        gets by default: a pooled connection, the short header leash, and a
+        re-send on a fresh connection if that leash runs out.
+
+        It exists because "POST" describes a shape, not an effect. A GraphQL
+        *query* and an InnerTube player request are reads that happen to be
+        posted, and refusing them a pooled connection cost a handshake apiece
+        on every extraction — YouTube asks one per client identity.
+        """
         current = url
         seen: set[str] = set()
 
@@ -610,7 +622,7 @@ class HttpClient:
                 raise NetworkError(f"unsupported URL scheme: {parsed.scheme!r}")
 
             key = self._pool_key(parsed)
-            repeatable = method.upper() in _REPEATABLE
+            repeatable = idempotent or method.upper() in _REPEATABLE
             pooled = self._pool.take(key) if repeatable else None
             connection, target, extra = self._build_connection(parsed, pooled)
             request_headers = self._default_headers(parsed, headers)
@@ -704,6 +716,7 @@ class HttpClient:
 
     def post(self, url: str, body: bytes | str, headers: dict[str, str] | None = None,
              **kwargs: Any) -> Response:
+        """POST ``body``. Pass ``idempotent=True`` for a read — see `request`."""
         return self.request("POST", url, headers, body=body, **kwargs)
 
     def get_text(self, url: str, headers: dict[str, str] | None = None,

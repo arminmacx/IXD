@@ -732,8 +732,11 @@ class YouTubeExtractor(Extractor):
         # asked concurrently, and one HTTP client reuses its connections — two
         # threads posting through the same one interleave on the wire.
         http = getattr(self._local, "client", None) or self.client
-        with http.request("POST", url, headers,
-                          body=json.dumps(payload), decode=True) as response:
+        # A player request is a read: the same identity asked twice returns the
+        # same streams. Saying so lets it reuse a pooled connection instead of
+        # handshaking afresh for every client identity in the rotation.
+        with http.request("POST", url, headers, body=json.dumps(payload),
+                          decode=True, idempotent=True) as response:
             text = response.text()
         try:
             return json.loads(text)

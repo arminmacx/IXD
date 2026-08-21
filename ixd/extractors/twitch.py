@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import urllib.parse
 
 from ..core.errors import ExtractionError
@@ -231,18 +232,7 @@ class TwitchExtractor(Extractor):
         if not formats:
             raise ExtractionError(f"Twitch clip {slug!r} publishes no video")
 
-        # A clip is a plain file, so its exact length is a header away — no
-        # bandwidth × duration estimate needed, and no "size not published" in
-        # the file-info window. All three qualities live on one host and
-        # connections are reused (§3.84), so this is one handshake and three
-        # round trips. Best-effort: a refused HEAD costs a number, not a
-        # download.
-        for media in formats:
-            try:
-                with self.client.request("HEAD", media.url) as answer:
-                    media.filesize = answer.content_length
-            except Exception:  # noqa: BLE001
-                continue
+        self._measure(formats)
 
         channel = ((clip.get("broadcaster") or {}).get("displayName") or "").strip()
         title = (clip.get("title") or "").strip() or slug
@@ -255,6 +245,38 @@ class TwitchExtractor(Extractor):
             extractor=self.name,
             http_headers={"Referer": "https://www.twitch.tv/"},
         )
+
+    def _measure(self, formats: list[MediaFormat]) -> None:
+        """Fill in each clip rendition's exact size, all at once.
+
+        A clip is a plain file, so its length is a header away — no
+        `bandwidth × duration` estimate, and no "size not published" in the
+        file-info window. Asked one after another they cost three round trips
+        on the critical path of a menu somebody is waiting for; asked together
+        they cost one.
+
+        A connection carries one request at a time, so each thread gets its own
+        client — `clone()` shares the cookie jar and keeps a pool of its own.
+        Best-effort: a refused HEAD costs a number, not a download.
+        """
+        def measure(media: MediaFormat) -> None:
+            client = self.client.clone()
+            try:
+                with client.request("HEAD", media.url) as answer:
+                    media.filesize = answer.content_length
+            except Exception:  # noqa: BLE001 - a size is never worth a failure
+                pass
+            finally:
+                client.close()
+
+        workers = [threading.Thread(target=measure, args=(media,),
+                                    name=f"ixd-clip-size-{index}", daemon=True)
+                   for index, media in enumerate(formats)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            # Bounded: a clip's menu must not wait on a CDN that has gone quiet.
+            worker.join(timeout=10.0)
 
     # -- the captured-playlist route ------------------------------------
     def _from_storage(self, match: re.Match) -> MediaInfo:
@@ -347,6 +369,8 @@ class TwitchExtractor(Extractor):
             GQL_ENDPOINT,
             json.dumps(body),
             {"Client-ID": CLIENT_ID, "Content-Type": "application/json"},
+            # A GraphQL query is a read, whatever the verb says.
+            idempotent=True,
         )
         try:
             payload = json.loads(raw.text() if hasattr(raw, "text") else raw)

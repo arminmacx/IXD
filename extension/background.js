@@ -179,7 +179,14 @@ function call(command, params = {}) {
 async function callChecked(command, params) {
   const response = await call(command, params);
   if (!response || response.ok !== true) {
-    throw new Error((response && response.error) || "the download manager reported an error");
+    const error = new Error(
+      (response && response.error) || "the download manager reported an error");
+    // The application answered, and its answer was "no". That is a verdict
+    // about the request — a page with nothing on it stays a page with nothing
+    // on it — as opposed to not having been reachable at all, which changes
+    // the moment it is. Callers cache the two for very different lengths.
+    error.verdict = true;
+    throw error;
   }
   return response.result;
 }
@@ -1872,6 +1879,16 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 // would mean that starting the desktop application, or reconnecting, appeared
 // to change nothing for minutes afterwards.
 const FAILURE_TTL_MS = 15 * 1000;
+// Except when the application answered and the answer was "there is nothing
+// here". That is a fact about the page, not about whether anything was
+// reachable, and re-deriving it costs seconds every time.
+//
+// Measured from a user's log: of 93.2 s spent extracting, **40.2 s went on
+// seven pages that can never yield media** — a channel page twice, /videos
+// twice, /clips, and /directory — every one of them ending in "no embedded
+// media found". Four of the seven were repeats inside a minute, which the
+// fifteen-second ceiling guaranteed.
+const VERDICT_TTL_MS = CACHE_TTL_MS;
 const extractionCache = new Map();
 const extractionInflight = new Map();
 
@@ -1902,7 +1919,9 @@ async function extractCached(url, options = {}) {
   const wantsToken = Boolean(options.poToken);
   if (!force) {
     const hit = extractionCache.get(key);
-    const ttl = hit && hit.error ? FAILURE_TTL_MS : CACHE_TTL_MS;
+    const ttl = !hit || !hit.error
+      ? CACHE_TTL_MS
+      : (hit.verdict ? VERDICT_TTL_MS : FAILURE_TTL_MS);
     const stale = hit && wantsToken && !hit.hadToken;
     if (hit && !stale && Date.now() - hit.at < ttl) {
       if (hit.error) throw new Error(hit.error);
@@ -1934,7 +1953,10 @@ async function extractCached(url, options = {}) {
       return info;
     } catch (error) {
       const message = String(error.message || error);
-      extractionCache.set(key, { error: message, at: Date.now(), hadToken: wantsToken });
+      extractionCache.set(key, {
+        error: message, at: Date.now(), hadToken: wantsToken,
+        verdict: Boolean(error && error.verdict),
+      });
       report(`extract failed after ${Date.now() - started} ms: ${url} — ${message}`,
              "error");
       throw error;
