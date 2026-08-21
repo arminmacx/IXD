@@ -1262,6 +1262,11 @@
     // not of anything anybody wants to download. So the captures are shown
     // only while the extracted menu has nothing better: a single row, or rows
     // that name no resolution at all.
+    // Also needed further down, where a menu of one row that *is* the capture
+    // listed above would say nothing new. `capturesWorthShowing` works this
+    // out for itself; this is the same question asked in this scope, and
+    // leaving it to that function's local left an undeclared identifier here.
+    const fromCapture = captured.some((entry) => entry.url === menuSource);
     let listedCaptures = false;
     if (capturesWorthShowing(captured, (info || {}).formats || [], menuSource)) {
       listedCaptures = true;
@@ -1329,8 +1334,9 @@
 
     const title = document.createElement("div");
     title.className = "menu-title";
-    title.textContent = info.title || "Available streams";
-    title.title = info.title || "";
+    const heading = menuHeading(info.title);
+    title.textContent = heading;
+    title.title = heading;
     menu.appendChild(title);
 
     const best = document.createElement("button");
@@ -1449,6 +1455,21 @@
   //: put the two playlists the player had fetched, twice each, above a
   //: six-quality menu, each labelled "2.9 KB" — the size of the playlist text,
   //: not of any video. Same media, described worse, with a misleading size.
+  //: What to call this menu.
+  //:
+  //: An extraction read out of a manifest address has no page to take a name
+  //: from, so it falls back to the address's last path segment — and the menu
+  //: was headed `1909970769.M3U8`, which names a file nobody asked for and
+  //: tells a person nothing about what they are about to download. The page's
+  //: own title is what they recognise it by, and the panel has it.
+  function menuHeading(extracted) {
+    const name = String(extracted || "").trim();
+    const looksLikeAFile = /\.(m3u8|mpd|ts|mp4|m4a|webm)$/i.test(name);
+    if (name && !looksLikeAFile) return name;
+    const page = String(tabTitle || document.title || "").trim();
+    return page || name || "Available streams";
+  }
+
   function capturesWorthShowing(captured, formats, source) {
     if (!captured || !captured.length) return false;
     if (!formats || !formats.length) return true;

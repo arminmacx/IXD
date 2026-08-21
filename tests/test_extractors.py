@@ -3269,11 +3269,141 @@ def test_a_twitch_recording_knows_its_own_length_and_channel() -> None:
           T._total_seconds("#EXTM3U\n") == 0.0)
 
 
+def test_every_hls_site_can_state_a_size() -> None:
+    """A master playlist has bandwidths and no duration, so nothing sized it.
+
+    That is why a quality menu on an ordinary HLS site showed no sizes beside
+    the resolutions, and why the file-info window said "size not published"
+    while a Twitch VOD — whose duration Twitch states outright — showed both.
+    The renditions of one film all run the same length, so one extra request
+    for the cheapest playlist settles it for every rendition at once.
+    """
+    print("\n[every HLS site can state a size]")
+    master = (
+        "#EXTM3U\n"
+        '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\n'
+        "https://cdn.example/1080/index.m3u8\n"
+        '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n'
+        "https://cdn.example/360/index.m3u8\n"
+    )
+    recording = ("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\na.ts\n"
+                 "#EXTINF:10.0,\nb.ts\n#EXTINF:5.0,\nc.ts\n#EXT-X-ENDLIST\n")
+    live = ("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:912\n"
+            "#EXTINF:10.0,\na.ts\n#EXTINF:10.0,\nb.ts\n")
+
+    class Client:
+        def __init__(self, body): self.body, self.asked = body, []
+        def get_text(self, url, headers=None, **kw):
+            self.asked.append(url); return self.body
+
+    formats = hls.parse_master(master, "https://cdn.example/master.m3u8")
+    client = Client(recording)
+    duration = hls.estimate_sizes(client, formats)
+    check("the duration is read from the playlist", duration == 25.0, str(duration))
+    check("and only one extra request was made", len(client.asked) == 1,
+          str(client.asked))
+    check("which was the cheapest rendition, not the largest",
+          client.asked[0].endswith("/360/index.m3u8"), client.asked[0])
+    sizes = {f.height: f.filesize for f in formats}
+    # 6,000,000 bit/s over 25 s = 18,750,000 bytes.
+    check("the tall rendition is sized from its own bandwidth",
+          sizes[1080] == 18_750_000, str(sizes[1080]))
+    check("and the small one from its own",
+          sizes[360] == 2_500_000, str(sizes[360]))
+
+    # A live stream must not be given the size of its own sliding window.
+    live_formats = hls.parse_master(master, "https://cdn.example/master.m3u8")
+    check("a live playlist yields no duration",
+          hls.estimate_sizes(Client(live), live_formats) == 0.0)
+    check("and so no rendition is given a made-up size",
+          all(f.filesize == 0 for f in live_formats),
+          str([f.filesize for f in live_formats]))
+
+    # An origin that will not answer leaves the menu as it was.
+    class Refusing:
+        def get_text(self, url, headers=None, **kw): raise OSError("refused")
+    refused = hls.parse_master(master, "https://cdn.example/master.m3u8")
+    check("an unreadable playlist is not an error",
+          hls.estimate_sizes(Refusing(), refused) == 0.0)
+    check("it simply leaves the sizes unstated",
+          all(f.filesize == 0 for f in refused))
+
+    check("a recording is recognised by EXT-X-ENDLIST",
+          hls.playlist_duration(recording) == 25.0)
+    check("and by an explicit VOD playlist type",
+          hls.playlist_duration("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                                "#EXTINF:4.0,\na.ts\n") == 4.0)
+    check("a live one is not, however many segments it lists",
+          hls.playlist_duration(live) == 0.0)
+
+
+def test_a_twitch_clip_is_a_handful_of_plain_files() -> None:
+    """Clips are the easy case, and they failed hardest.
+
+    Nothing claimed the address, so the panel fell back to the captured
+    resources and listed the same `index.mp4` three times over. One query
+    returns every quality, its direct address and the token that signs them —
+    no usher, no playlist, and the size is a header rather than an estimate.
+    """
+    print("\n[a Twitch clip is a handful of plain files]")
+    from ixd.extractors.twitch import TwitchExtractor as T
+
+    for url in ("https://clips.twitch.tv/HelpfulPuzzledCrocodileTinyFace",
+                "https://www.twitch.tv/waolol1/clip/HelpfulPuzzledCrocodileTinyFace",
+                "https://www.twitch.tv/clip/SomeSlug-123"):
+        check(f"claims {url.rsplit('/', 1)[-1][:28]}", T.matches(url), url)
+    check("the slug is read off the clip host",
+          T.clip_slug("https://clips.twitch.tv/AbcDef") == "AbcDef")
+    check("and off the channel form",
+          T.clip_slug("https://www.twitch.tv/chan/clip/AbcDef") == "AbcDef")
+    check("a recording is not mistaken for a clip",
+          T.clip_slug("https://www.twitch.tv/videos/2851508926") == "")
+    check("nor is a live channel",
+          T.clip_slug("https://www.twitch.tv/otplol_") == "")
+
+    reply = {"data": {"clip": {
+        "title": "GANK DE LA DARONNE MDRRR", "durationSeconds": 31,
+        "broadcaster": {"displayName": "Waolol1"},
+        "videoQualities": [
+            {"quality": "648", "frameRate": 0, "sourceURL": "https://cdn/648/index.mp4"},
+            {"quality": "360", "frameRate": 0, "sourceURL": "https://cdn/360/index.mp4"},
+        ],
+        "playbackAccessToken": {"value": '{"a":1}', "signature": "deadbeef"},
+    }}}
+
+    class Client:
+        heads = []
+        def request(self, method, url, headers=None, **kw):
+            Client.heads.append(url)
+            raise OSError("no network in this test")
+
+    extractor = T(Client())
+    extractor._gql = lambda body: reply
+    info = extractor._from_clip("https://clips.twitch.tv/x", "x")
+
+    check("the clip is named after itself and its channel",
+          info.title == "GANK DE LA DARONNE MDRRR - Waolol1", info.title)
+    check("its length comes across", info.duration == 31.0, str(info.duration))
+    check("every quality is offered", len(info.formats) == 2, str(len(info.formats)))
+    check("tallest first", info.formats[0].height == 648, str(info.formats[0].height))
+    check("as plain files, not a playlist",
+          all(f.protocol == "https" for f in info.formats))
+    signed = info.formats[0].url
+    check("the address carries the signature", "sig=deadbeef" in signed, signed)
+    check("and the token, encoded", "token=%7B%22a%22%3A1%7D" in signed, signed)
+    check("a size was asked for on every quality", len(Client.heads) == 2,
+          str(Client.heads))
+    check("and an origin that refuses one is not fatal",
+          all(f.filesize == 0 for f in info.formats))
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — extractor test suite")
     print("=" * 68)
-    for test in (test_a_twitch_vod_is_a_quality_menu_not_one_rendition,
+    for test in (test_a_twitch_clip_is_a_handful_of_plain_files,
+                 test_every_hls_site_can_state_a_size,
+                 test_a_twitch_vod_is_a_quality_menu_not_one_rendition,
                  test_twitch_claims_recordings_and_leaves_live_alone,
                  test_a_twitch_recording_knows_its_own_length_and_channel,
                  test_hls, test_dash, test_generic, test_analysis_does_not_download,

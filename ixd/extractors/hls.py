@@ -142,6 +142,77 @@ def parse_master(text: str, base_url: str) -> list[MediaFormat]:
     return formats
 
 
+def playlist_duration(text: str) -> float:
+    """How long the media described by a media playlist runs, in seconds.
+
+    Zero for a **live** playlist, and that is the point rather than a
+    limitation: a live playlist is a sliding window of the last few segments,
+    so adding its `EXTINF` values up describes thirty seconds of an ongoing
+    broadcast. Reporting that as the size of a download would be worse than
+    reporting nothing. A recording says so — `EXT-X-ENDLIST`, or a
+    `PLAYLIST-TYPE` of `VOD`/`EVENT` — and only then is the total meaningful.
+    """
+    if "#EXT-X-ENDLIST" not in text:
+        kind = re.search(r"#EXT-X-PLAYLIST-TYPE:\s*(\w+)", text, re.I)
+        if not kind or kind.group(1).upper() not in ("VOD", "EVENT"):
+            return 0.0
+    # Some origins state it outright and save the arithmetic.
+    stated = re.search(r"#EXT-X-TWITCH-TOTAL-SECS:\s*([\d.]+)", text)
+    if stated:
+        try:
+            return float(stated.group(1))
+        except ValueError:
+            pass
+    total = 0.0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("#EXTINF:"):
+            continue
+        try:
+            total += float(line[len("#EXTINF:"):].split(",", 1)[0].strip())
+        except ValueError:
+            continue
+    return total
+
+
+def estimate_sizes(client: "HttpClient", formats: list[MediaFormat],
+                   headers: dict[str, str] | None = None) -> float:
+    """Give every variant of a master playlist a size, and return the duration.
+
+    A master playlist states each rendition's `BANDWIDTH` but never how long
+    the media runs, so nothing in it is enough to size a download — which is
+    why every HLS site showed a quality menu with no sizes beside it and a
+    file-info window reading "size not published", while a Twitch VOD (whose
+    duration Twitch states) showed both.
+
+    The length is the same for every rendition of one film, so exactly one
+    extra request settles it: the *lowest*-bandwidth playlist, because it is
+    the cheapest to read and its `EXTINF` list is the same length as any
+    other's. Cheap in a second sense too, since connections are reused now
+    (context.md §3.84) — it is usually the same origin as the master.
+
+    Best-effort throughout: an origin that refuses, a live stream, or a
+    playlist with no durations leaves the sizes alone rather than inventing
+    one. The figure is an estimate — bandwidth is an average — and callers
+    present it as such.
+    """
+    candidates = [media for media in formats if media.url and media.tbr > 0]
+    if not candidates or all(media.filesize for media in candidates):
+        return 0.0
+    cheapest = min(candidates, key=lambda media: media.tbr)
+    try:
+        text = client.get_text(cheapest.url, headers)
+    except Exception:  # noqa: BLE001 - a size is a nicety, never a blocker
+        return 0.0
+    duration = playlist_duration(text)
+    if duration <= 0:
+        return 0.0
+    for media in formats:
+        if not media.filesize and media.tbr > 0:
+            media.filesize = int(media.tbr * 1000 / 8 * duration)
+    return duration
+
+
 def parse_media_playlist(text: str, base_url: str) -> list[MediaSegment]:
     """Turn a media playlist into the engine's segment list."""
     segments: list[MediaSegment] = []

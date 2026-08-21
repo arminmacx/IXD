@@ -3233,6 +3233,20 @@ def test_connections_are_reused_and_never_reused_unsafely() -> None:
         check("the bytes are still right after a reuse",
               second.url == origin.url())
 
+        # A HEAD has no body to read, so `isclosed()` stays False for ever on
+        # it. Judging reuse by that alone threw away a good connection every
+        # time — and probing sizes is all HEADs, three per Twitch clip.
+        client._pool.clear()
+        sockets = []
+        for _ in range(3):
+            with client.request("HEAD", origin.url()) as head:
+                sockets.append(id(head._conn))
+                check_size = head.content_length
+        check("three HEADs share one connection", len(set(sockets)) == 1,
+              str(len(set(sockets))))
+        check("and a HEAD still reports the size", check_size == len(payload),
+              str(check_size))
+
         # Abandoned mid-body: the socket still has the rest of the file on it.
         client._pool.clear()
         third = client.request("GET", origin.url())

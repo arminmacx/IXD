@@ -412,6 +412,61 @@ function loadCaptureRule() {
   return new Function(text.slice(from, to) + "; return capturesWorthShowing;")();
 }
 
+// ---------------------------------------------------------------------------
+// A local moved into a helper and left an undeclared identifier behind.
+// `node --check` cannot see it — the syntax is perfect — and the expression it
+// sits in short-circuits before reaching it in the common case, so the panel
+// worked everywhere except the one path the identifier existed for. This is a
+// source assertion, not a behavioural one: it pins the shape that broke.
+// ---------------------------------------------------------------------------
+console.log("\n[the menu is headed by something a person recognises]");
+{
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "content", "video_inject.js"), "utf8");
+  const from = text.indexOf("function menuHeading");
+  const to = text.indexOf("function capturesWorthShowing", from);
+  const heading = new Function(
+    "tabTitle", "document",
+    text.slice(from, to) + "; return menuHeading;");
+
+  const onPage = heading("A Chess Stream", { title: "ignored" });
+  check("a manifest filename is replaced by the page's name",
+    onPage("1909970769.M3U8") === "A Chess Stream", onPage("1909970769.M3U8"));
+  check("and so is any other bare media filename",
+    onPage("index-dvr.ts") === "A Chess Stream");
+  check("a real title is kept as it is",
+    onPage("wao vs koba stream") === "wao vs koba stream");
+  check("a title with a dot in it is still a title",
+    onPage("Episode 1. The Beginning") === "Episode 1. The Beginning");
+
+  const bare = heading("", { title: "" });
+  check("with no page name either, the filename beats nothing",
+    bare("1909970769.M3U8") === "1909970769.M3U8");
+  check("and with nothing at all there is still a heading",
+    bare("") === "Available streams");
+}
+
+console.log("\n[every local openMenu reads is declared in openMenu]");
+{
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "content", "video_inject.js"), "utf8");
+  const start = text.indexOf("function openMenu(");
+  // Bounded by the next top-level function in the same scope.
+  const end = text.indexOf("\n  function ", start + 1);
+  const body = text.slice(start, end);
+  check("openMenu was found", start > 0 && end > start);
+
+  // Names that exist only as locals of some *other* function must not be read
+  // here. `fromCapture` was exactly this, for two releases.
+  for (const name of ["fromCapture", "listedCaptures", "choices", "captured"]) {
+    const used = new RegExp(`\\b${name}\\b`).test(body);
+    const declared = new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(body)
+      || new RegExp(`\\(\\s*${name}\\b`).test(body);
+    check(`${name} is declared where it is read`, !used || declared,
+      `used=${used} declared=${declared}`);
+  }
+}
+
 console.log("\n[captures are shown only when the menu needs them]");
 {
   const worthShowing = loadCaptureRule();

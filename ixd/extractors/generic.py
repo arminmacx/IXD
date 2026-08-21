@@ -375,6 +375,16 @@ class GenericExtractor(Extractor):
         # carries the note the page gave it.
         if len(found) < 2:
             return []
+        if protocol == "m3u8":
+            # A master playlist gives each rendition a bandwidth and never a
+            # duration, so nothing in it can size a download — every HLS site
+            # showed a quality menu with no sizes and a file-info window
+            # reading "size not published". One extra request settles it for
+            # all of them (context.md §3.85).
+            try:
+                hls.estimate_sizes(self.client, found)
+            except Exception:  # noqa: BLE001 - a size is never worth a failure
+                pass
         for fmt in found:
             fmt.manifest_url = fmt.manifest_url or url
             if note and note not in (fmt.note or ""):

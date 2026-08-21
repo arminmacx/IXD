@@ -280,7 +280,16 @@ class Response:
         if self._truncated or self._aborted or self._pool is None:
             return False
         try:
-            if self.raw.will_close or not self.raw.isclosed():
+            if self.raw.will_close:
+                return False
+            # `isclosed()` reports whether the body has been *read* to its end,
+            # and a HEAD has no body to read — `http.client` leaves it False
+            # for ever, so every HEAD was throwing away a good connection. What
+            # actually matters is whether bytes are still outstanding on the
+            # socket, which is `length`: 0 means none, and reuse is safe. A
+            # `None` there means the body ends when the connection does, and
+            # `will_close` has already refused that above.
+            if not self.raw.isclosed() and getattr(self.raw, "length", None) != 0:
                 return False
         except Exception:  # noqa: BLE001 - an unreadable response is not reusable
             return False

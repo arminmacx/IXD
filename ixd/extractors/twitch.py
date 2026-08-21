@@ -75,6 +75,9 @@ class TwitchExtractor(Extractor):
     url_patterns = (
         r"^https?://(?:www\.|m\.)?twitch\.tv/videos/\d+",
         r"^https?://(?:www\.|m\.)?twitch\.tv/[\w.-]+/v(?:ideo)?/\d+",
+        # Clips: their own host, and the two forms on the main one.
+        r"^https?://clips\.twitch\.tv/[\w-]+",
+        r"^https?://(?:www\.|m\.)?twitch\.tv/(?:[\w.-]+/)?clip/[\w-]+",
         # A storage playlist the browser captured, on Twitch's VOD CDNs.
         r"^https?://[\w.-]*(?:cloudfront\.net|jtvnw\.net)/.+/"
         r"(?:index-dvr|index-muted-\w+|highlight-\d+)\.m3u8",
@@ -82,6 +85,10 @@ class TwitchExtractor(Extractor):
 
     # ------------------------------------------------------------------
     def extract(self, url: str) -> MediaInfo:
+        slug = self.clip_slug(url)
+        if slug:
+            return self._from_clip(url, slug)
+
         video_id = self.video_id(url)
         if video_id:
             return self._from_page(url, video_id)
@@ -99,6 +106,23 @@ class TwitchExtractor(Extractor):
             return self._from_storage(match)
 
         raise ExtractionError(f"not a Twitch video address: {url}")
+
+    @staticmethod
+    def clip_slug(url: str) -> str:
+        """The clip's slug, or empty for anything that is not a clip.
+
+        `/videos/<id>` must never look like one, so the channel form requires
+        the literal `clip` segment rather than treating any trailing word as a
+        slug.
+        """
+        match = re.search(
+            r"(?:clips\.twitch\.tv/|twitch\.tv/(?:[\w.-]+/)?clip/)([\w-]+)",
+            url, re.I,
+        )
+        if not match:
+            return ""
+        slug = match.group(1)
+        return "" if slug.lower() in ("edit", "create") else slug
 
     @staticmethod
     def video_id(url: str) -> str:
@@ -146,6 +170,88 @@ class TwitchExtractor(Extractor):
                          else f"https://www.twitch.tv/videos/{video_id}"),
             thumbnail=thumbnail,
             duration=duration,
+            extractor=self.name,
+            http_headers={"Referer": "https://www.twitch.tv/"},
+        )
+
+    # -- clips ------------------------------------------------------------
+    def _from_clip(self, url: str, slug: str) -> MediaInfo:
+        """A clip is a handful of plain MP4s, not a playlist.
+
+        Which makes it the easy case and it was the one that failed hardest:
+        with nothing claiming the address, the panel fell back to the captures
+        and listed the same `index.mp4` three times over (§3.85). One query
+        returns every quality, its direct address, and the token that signs
+        them — no `usher`, no manifest, nothing to parse.
+        """
+        body = {"query": '{clip(slug:"%s"){title durationSeconds '
+                         "broadcaster{displayName} thumbnailURL "
+                         "videoQualities{quality frameRate sourceURL} "
+                         'playbackAccessToken(params:{platform:"web",'
+                         'playerBackend:"mediaplayer",playerType:"site"})'
+                         "{value signature}}}" % slug}
+        clip = ((self._gql(body).get("data") or {}).get("clip") or {})
+        if not clip:
+            raise ExtractionError(
+                f"Twitch does not know a clip called {slug!r} — it may have "
+                "been deleted, or the address may name something else"
+            )
+        token = clip.get("playbackAccessToken") or {}
+        signature, value = token.get("signature", ""), token.get("value", "")
+
+        formats: list[MediaFormat] = []
+        for entry in clip.get("videoQualities") or []:
+            source = entry.get("sourceURL") or ""
+            if not source:
+                continue
+            # The token signs the address; without it the CDN answers 403.
+            signed = source
+            if signature and value:
+                signed = (f"{source}?sig={signature}"
+                          f"&token={urllib.parse.quote(value)}")
+            height = 0
+            try:
+                height = int(str(entry.get("quality") or "0"))
+            except ValueError:
+                height = 0
+            formats.append(MediaFormat(
+                format_id=f"twitch-clip-{entry.get('quality') or len(formats)}",
+                url=signed,
+                ext="mp4",
+                # A plain file, so the engine ranges over it and learns its
+                # exact length from the response — no estimate anywhere here.
+                protocol="https",
+                height=height,
+                fps=float(entry.get("frameRate") or 0),
+                vcodec="h264",
+                acodec="aac",
+                quality_label=f"{height}p" if height else "Source",
+                manifest_url="",
+            ))
+        if not formats:
+            raise ExtractionError(f"Twitch clip {slug!r} publishes no video")
+
+        # A clip is a plain file, so its exact length is a header away — no
+        # bandwidth × duration estimate needed, and no "size not published" in
+        # the file-info window. All three qualities live on one host and
+        # connections are reused (§3.84), so this is one handshake and three
+        # round trips. Best-effort: a refused HEAD costs a number, not a
+        # download.
+        for media in formats:
+            try:
+                with self.client.request("HEAD", media.url) as answer:
+                    media.filesize = answer.content_length
+            except Exception:  # noqa: BLE001
+                continue
+
+        channel = ((clip.get("broadcaster") or {}).get("displayName") or "").strip()
+        title = (clip.get("title") or "").strip() or slug
+        return MediaInfo(
+            title=f"{title} - {channel}" if channel else title,
+            formats=sorted(formats, key=lambda f: f.height, reverse=True),
+            webpage_url=url,
+            thumbnail=clip.get("thumbnailURL") or "",
+            duration=float(clip.get("durationSeconds") or 0),
             extractor=self.name,
             http_headers={"Referer": "https://www.twitch.tv/"},
         )
