@@ -767,6 +767,17 @@ class HttpClient:
         try:
             with self.request("GET", url, probe_headers) as response:
                 ranged = self._info_from_response(response)
+                # Drain the one byte a `206` carries, so the connection can be
+                # handed back. Unread, it looks like an abandoned stream and is
+                # closed — which meant every probe threw its connection away
+                # and the request after it paid a fresh handshake, on the very
+                # path a person is watching for a file size.
+                #
+                # Only when it really is tiny: a server that ignores the range
+                # answers `200` with the whole file behind it (§3.81), and
+                # reading *that* to keep a socket would be a poor trade.
+                if 0 < response.content_length <= 1024:
+                    response.read_all(2048)
         except (HttpError, NetworkError):
             if head is None:
                 raise

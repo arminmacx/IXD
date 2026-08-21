@@ -292,14 +292,36 @@ class TwitchExtractor(Extractor):
         duration = 0.0
         formats: list[MediaFormat] = []
 
+        # Asked all at once. One after another this was **eight** requests on
+        # the critical path of a menu somebody is watching — measured at
+        # 13,104 ms in a user's Log, against 3,808 ms for the same recording's
+        # page, which is what made recordings feel slow long after the page
+        # route was quick (§3.89).
+        found: dict[str, str] = {}
+
+        def probe(quality: str) -> None:
+            client = self.client.clone()
+            try:
+                text = self._playlist_text(
+                    f"{base}/{quality}/{name}.m3u8", quiet=True, client=client)
+                if text:
+                    found[quality] = text
+            finally:
+                client.close()
+
+        probes = [threading.Thread(target=probe, args=(quality,),
+                                   name=f"ixd-twitch-{quality}", daemon=True)
+                  for quality in _LADDER]
+        for worker in probes:
+            worker.start()
+        for worker in probes:
+            worker.join(timeout=10.0)
+
         for quality in _LADDER:
-            candidate = f"{base}/{quality}/{name}.m3u8"
-            if quality == captured:
-                text = self._playlist_text(candidate)
-            else:
-                text = self._playlist_text(candidate, quiet=True)
+            text = found.get(quality)
             if not text:
                 continue
+            candidate = f"{base}/{quality}/{name}.m3u8"
             duration = duration or self._total_seconds(text)
             width, height, fps = _LADDER[quality]
             formats.append(MediaFormat(
@@ -348,9 +370,10 @@ class TwitchExtractor(Extractor):
             return f"{channel} - Twitch"
         return f"twitch-{name}"
 
-    def _playlist_text(self, url: str, quiet: bool = False) -> str:
+    def _playlist_text(self, url: str, quiet: bool = False,
+                       client: "object | None" = None) -> str:
         try:
-            text = self.client.get_text(url)
+            text = (client or self.client).get_text(url)
         except Exception:  # noqa: BLE001
             if quiet:
                 return ""

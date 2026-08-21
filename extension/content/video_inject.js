@@ -1213,6 +1213,27 @@
 
     const captured = (state && state.captured) || [];
 
+    // Still reading: say so, and nothing else.
+    //
+    // The captures used to be listed *above* the "Reading…" note, on the
+    // reasoning that something clickable beats an empty box. In practice they
+    // are what the menu is about to replace, so every quality menu on every
+    // site opened as a wall of near-identical rows — the same title six times
+    // over, two of them labelled with the size of a playlist file — which then
+    // vanished. The user, on seeing it once more: "its what i dont want to see
+    // which still exist everywhere even on youtube."
+    //
+    // They are not lost: extraction that ends with nothing calls back here
+    // without `waiting`, and then they are the menu.
+    if (state && state.waiting) {
+      const note = document.createElement("div");
+      note.className = "note";
+      note.textContent = "Reading the available qualities…";
+      menu.appendChild(note);
+      position();
+      return;
+    }
+
     if (state && state.error && !captured.length) {
       const heading = document.createElement("div");
       heading.className = "menu-title";
@@ -1301,14 +1322,6 @@
         explain.className = "note";
         explain.textContent = state.note;
         menu.appendChild(explain);
-      }
-      if (state && state.waiting) {
-        const note = document.createElement("div");
-        note.className = "note";
-        note.textContent = "Reading the available qualities…";
-        menu.appendChild(note);
-        position();
-        return;
       }
       if (!info) {
         position();

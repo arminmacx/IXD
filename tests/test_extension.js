@@ -425,6 +425,27 @@ function loadCaptureRule() {
 // of 93.2 s spent extracting in one user's log, 40.2 s went on seven pages that
 // can never yield media, four of them repeats inside a minute.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// While the qualities are being read, the menu says so and shows nothing else.
+// The captures used to be listed above the note — the same title six times,
+// two of them labelled with the size of a playlist file — and then replaced.
+// ---------------------------------------------------------------------------
+console.log("\n[nothing but the note while the qualities are read]");
+{
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "content", "video_inject.js"), "utf8");
+  const start = text.indexOf("function openMenu(");
+  const body = text.slice(start, text.indexOf("\n  function ", start + 1));
+  const waiting = body.indexOf("state.waiting");
+  const capturesDrawn = body.indexOf("capturesWorthShowing(");
+  check("openMenu still handles the waiting state", waiting > 0);
+  check("and it returns before any capture is drawn",
+    waiting > 0 && capturesDrawn > waiting,
+    `waiting at ${waiting}, captures at ${capturesDrawn}`);
+  check("there is only one waiting branch left",
+    (body.match(/state\.waiting/g) || []).length === 1);
+}
+
 console.log("\n[a verdict is remembered, a failure to connect is not]");
 {
   const worker = fs.readFileSync(

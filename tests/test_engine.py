@@ -3277,6 +3277,27 @@ def test_connections_are_reused_and_never_reused_unsafely() -> None:
               after_stale.status == 200 and len(body) == len(payload),
               f"{after_stale.status}, {len(body)} bytes")
 
+        # A probe asks HEAD then a one-byte ranged GET. That single byte was
+        # never read, so the response looked like an abandoned stream and its
+        # connection was thrown away — on the very path a person is watching
+        # for a file size, and leaving the next request a fresh handshake.
+        client._pool.clear()
+        info = client.probe(origin.url())
+        check("a probe still reports the size",
+              info.size == len(payload), str(info.size))
+        check("and leaves its connection behind rather than dropping it",
+              sum(len(v) for v in client._pool._idle.values()) == 1,
+              str(sum(len(v) for v in client._pool._idle.values())))
+
+        # But an origin that ignores the range answers with the whole file.
+        # Reading *that* to keep a socket would be a very poor trade.
+        client._pool.clear()
+        origin.state.ignore_ranges = True
+        origin.state.bytes_served = 0
+        lying = client.probe(origin.url())
+        check("a lying origin is still caught", lying.supports_ranges is False)
+        origin.state.ignore_ranges = False
+
         client.close()
         check("closing the client lets go of every idle socket",
               sum(len(v) for v in client._pool._idle.values()) == 0)
