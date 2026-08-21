@@ -3197,6 +3197,77 @@ def test_a_range_lie_found_mid_transfer_restarts_as_one_stream() -> None:
         harness.close()
 
 
+def test_connections_are_reused_and_never_reused_unsafely() -> None:
+    """One TLS handshake per origin, not one per request — and no crossed wires.
+
+    `Connection: close` was a hardcoded default header, so every request opened
+    a new TCP connection and a new TLS session. An extraction is a token, a
+    manifest and a playlist or two; at the better part of a second per
+    handshake that was most of what a person waited through, on every site.
+    Measured against a real origin: five sequential requests, 20.6 s closing
+    each time against 1.9 s reusing one.
+
+    The dangerous half is what must *not* be pooled. A socket handed back with
+    bytes still on it delivers them to whoever picks it up next — someone
+    else's reply to this request — which is far worse than a slow handshake.
+    """
+    print("\n[connections are reused, and never reused unsafely]")
+    from ixd.core.http_client import HttpClient
+
+    payload = make_payload(256 << 10)
+    with TestOrigin(payload) as origin:
+        client = HttpClient()
+
+        # Two whole responses, read to the end: the second must not handshake.
+        with client.request("GET", origin.url()) as first:
+            first.read_all()
+        pooled_after_first = sum(len(v) for v in client._pool._idle.values())
+        check("a fully-read response hands its connection back",
+              pooled_after_first == 1, str(pooled_after_first))
+
+        held = client._pool._idle[next(iter(client._pool._idle))][0][0]
+        with client.request("GET", origin.url()) as second:
+            second.read_all()
+        check("and the next request to the same origin takes it",
+              second._conn is held)
+        check("the bytes are still right after a reuse",
+              second.url == origin.url())
+
+        # Abandoned mid-body: the socket still has the rest of the file on it.
+        client._pool.clear()
+        third = client.request("GET", origin.url())
+        third.read(1024)
+        third.close()
+        check("a response abandoned mid-body is not pooled",
+              sum(len(v) for v in client._pool._idle.values()) == 0)
+
+        # Aborted from another thread — pausing a stalled transfer does this.
+        fourth = client.request("GET", origin.url())
+        fourth.read(1024)
+        fourth.abort()
+        check("and an aborted one is not pooled either",
+              sum(len(v) for v in client._pool._idle.values()) == 0)
+
+        # A pooled connection the origin hung up on while it sat idle. Nothing
+        # reveals that until the next write fails, so it must be retried rather
+        # than reported — otherwise pooling turns every idle timeout into a
+        # failed download.
+        with client.request("GET", origin.url()) as warm:
+            warm.read_all()
+        key = next(iter(client._pool._idle))
+        stale = client._pool._idle[key][0][0]
+        stale.close()                    # exactly what an origin's timeout does
+        with client.request("GET", origin.url()) as after_stale:
+            body = after_stale.read_all()
+        check("a stale pooled connection is retried, not reported",
+              after_stale.status == 200 and len(body) == len(payload),
+              f"{after_stale.status}, {len(body)} bytes")
+
+        client.close()
+        check("closing the client lets go of every idle socket",
+              sum(len(v) for v in client._pool._idle.values()) == 0)
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — engine test suite")
@@ -3237,6 +3308,7 @@ def main() -> int:
         test_a_queue_left_by_a_previous_session_does_not_start_itself,
         test_a_server_that_advertises_ranges_and_ignores_them,
         test_a_range_lie_found_mid_transfer_restarts_as_one_stream,
+        test_connections_are_reused_and_never_reused_unsafely,
     ):
         try:
             test()

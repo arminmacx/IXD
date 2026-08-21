@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import functools
 import socket
 import ssl
 import struct
@@ -407,7 +408,21 @@ class NetworkProfile:
         return " ".join(bits)
 
 
+@functools.lru_cache(maxsize=4)
 def build_ssl_context(verify: bool = True) -> ssl.SSLContext:
+    """The TLS policy, built once per verification mode and shared after.
+
+    `ssl.create_default_context()` reads and parses the system trust store —
+    on this machine some hundreds of certificates — and it was being called
+    for *every single connection*: once per playlist, once per segment, once
+    per chunk. Measured at 5 ms each, which is nothing beside a handshake and
+    everything beside nothing.
+
+    Sharing one context across threads is what it is designed for: `wrap_socket`
+    does not mutate it, and the session cache inside it is the point — a second
+    connection to a host already visited can resume rather than repeat the full
+    handshake.
+    """
     context = ssl.create_default_context()
     if not verify:
         context.check_hostname = False

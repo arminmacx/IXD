@@ -16,6 +16,7 @@ import io
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.parse
 import zlib
@@ -121,13 +122,84 @@ class RemoteFileInfo:
     headers: CaseInsensitiveDict = field(default_factory=CaseInsensitiveDict)
 
 
+#: How long an idle connection may sit unused before it is assumed dead. Most
+#: origins hang up on an idle keep-alive somewhere between 5 and 75 seconds and
+#: none of them announce it, so this is deliberately short: a connection worth
+#: reusing is one being reused *now*, in the middle of an extraction.
+_IDLE_TIMEOUT = 20.0
+#: Idle connections kept per origin. Extraction is sequential per client, so
+#: one is usually enough; the rest are headroom for redirects between hosts.
+_POOL_PER_HOST = 4
+
+
+def _quietly_close(connection: "http.client.HTTPConnection") -> None:
+    try:
+        connection.close()
+    except Exception:  # noqa: BLE001 - a connection being discarded anyway
+        pass
+
+
+class _ConnectionPool:
+    """Idle keep-alive connections, keyed by origin.
+
+    Every request used to open a new TCP connection and a new TLS session,
+    because `Connection: close` was a hardcoded default header. An extraction
+    is not one request — it is a token, a manifest and a playlist or two, each
+    to be handshaken from scratch — and at the better part of a second per
+    handshake that was most of the time a person spent watching "Reading the
+    available qualities…". It was the same cost on every site, which is why it
+    read as "the whole application is slow" rather than as any one site's fault.
+
+    A pooled connection can still have been closed by the origin while it sat
+    here, and nothing tells us until the next write fails. That is not an error
+    to report: `HttpClient.request` retries such a send once on a fresh
+    connection, which is the whole reason this is safe to switch on.
+    """
+
+    def __init__(self) -> None:
+        self._idle: dict[tuple, list[tuple[http.client.HTTPConnection, float]]] = {}
+        self._lock = threading.Lock()
+
+    def take(self, key: tuple) -> "http.client.HTTPConnection | None":
+        now = time.monotonic()
+        with self._lock:
+            entries = self._idle.get(key)
+            while entries:
+                connection, parked_at = entries.pop()
+                if now - parked_at > _IDLE_TIMEOUT:
+                    _quietly_close(connection)
+                    continue
+                return connection
+        return None
+
+    def give(self, key: tuple, connection: "http.client.HTTPConnection") -> None:
+        with self._lock:
+            entries = self._idle.setdefault(key, [])
+            if len(entries) >= _POOL_PER_HOST:
+                _quietly_close(connection)
+                return
+            entries.append((connection, time.monotonic()))
+
+    def clear(self) -> None:
+        with self._lock:
+            parked = [entry for entries in self._idle.values() for entry in entries]
+            self._idle.clear()
+        for connection, _parked_at in parked:
+            _quietly_close(connection)
+
+
 class Response:
     """A live response body plus its metadata."""
 
     def __init__(self, raw: http.client.HTTPResponse, conn: http.client.HTTPConnection,
-                 url: str, decode: bool = False) -> None:
+                 url: str, decode: bool = False,
+                 pool: "_ConnectionPool | None" = None,
+                 pool_key: tuple | None = None) -> None:
         self.raw = raw
         self._conn = conn
+        self._pool = pool
+        self._pool_key = pool_key
+        self._aborted = False
         self.url = url
         self.status = raw.status
         self.reason = raw.reason
@@ -196,14 +268,36 @@ class Response:
             charset = match.group(1)
         return data.decode(charset, "replace")
 
+    def _may_reuse(self) -> bool:
+        """Is this connection safe to hand back for the next request?
+
+        Only when the body was read to its end. A socket with bytes still on it
+        would deliver them to whoever picked it up next — the reply to somebody
+        else's request, which is far worse than a slow handshake. So a
+        streaming response the engine abandoned mid-chunk, a truncated one, and
+        anything aborted are all closed rather than pooled.
+        """
+        if self._truncated or self._aborted or self._pool is None:
+            return False
+        try:
+            if self.raw.will_close or not self.raw.isclosed():
+                return False
+        except Exception:  # noqa: BLE001 - an unreadable response is not reusable
+            return False
+        return "close" not in (self.headers.get("connection") or "").lower()
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        reusable = self._may_reuse()
         try:
             self.raw.close()
         except Exception:
             pass
+        if reusable and self._pool is not None:
+            self._pool.give(self._pool_key, self._conn)
+            return
         try:
             self._conn.close()
         except Exception:
@@ -221,6 +315,7 @@ class Response:
         This is what makes Pause immediate on a stalled origin. Measured: 27
         seconds with `close()`, under one with this.
         """
+        self._aborted = True
         try:
             sock = getattr(self._conn, "sock", None)
             if sock is not None:
@@ -245,6 +340,10 @@ class HttpClient:
                  site_host: str = "") -> None:
         self.profile = profile or NetworkProfile()
         self.factory = SocketFactory(self.profile)
+        #: Idle connections, per client rather than global: an `http.client`
+        #: connection carries one request at a time, and `clone()` exists
+        #: precisely so that threads do not share one.
+        self._pool = _ConnectionPool()
         self.cookies = cookies or CookieJar()
         self.referer = referer
         self.site_headers = dict(site_headers or {})
@@ -275,19 +374,41 @@ class HttpClient:
         the extractor made carried one.
         """
 
+    def close(self) -> None:
+        """Drop every idle connection this client is holding open."""
+        self._pool.clear()
+
     def clone(self) -> "HttpClient":
         """Another client on the same policy, **sharing the cookie jar**.
 
-        For work that runs on several threads at once. A client reuses its
-        connections, so two threads issuing requests through one interleave on
-        the same socket; the jar is deliberately shared, because a session
-        warmed on one thread is the session the others need to present.
+        For work that runs on several threads at once. A client keeps a pool of
+        idle connections and an `http.client` connection carries one request at
+        a time, so a clone gets a pool of its own rather than interleaving two
+        threads on one socket. The cookie jar is deliberately shared, because a
+        session warmed on one thread is the session the others need to present.
         """
         return HttpClient(self.profile, self.cookies, self.referer,
                           self.site_headers, self.site_host)
 
     # ------------------------------------------------------------------
-    def _build_connection(self, parsed: urllib.parse.ParseResult) -> tuple[
+    def _pool_key(self, parsed: urllib.parse.ParseResult) -> tuple:
+        """What makes two connections interchangeable.
+
+        The proxy is part of it: the same host reached directly and through a
+        tunnel are two different sockets to two different peers, and handing
+        one back for the other would send the request somewhere it was never
+        addressed.
+        """
+        host = parsed.hostname or ""
+        proxy = self.profile.proxy_for(host)
+        return (
+            parsed.scheme, host, parsed.port or (443 if parsed.scheme == "https" else 80),
+            (proxy.scheme, proxy.host, proxy.port) if proxy else None,
+            self.profile.interface or "",
+        )
+
+    def _build_connection(self, parsed: urllib.parse.ParseResult,
+                          reuse: "http.client.HTTPConnection | None" = None) -> tuple[
             http.client.HTTPConnection, str, dict[str, str]]:
         """Return ``(connection, request_target, extra_headers)``."""
         use_tls = parsed.scheme == "https"
@@ -302,6 +423,14 @@ class HttpClient:
             and not use_tls
             and proxy.scheme in (ProxyScheme.HTTP, ProxyScheme.HTTPS)
         )
+        if reuse is not None:
+            connection = reuse
+            if forward_plain:
+                target = urllib.parse.urlunsplit(
+                    (parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query, "")
+                )
+                extra.update(self.factory.proxy_auth_header())
+            return connection, target, extra
         if forward_plain:
             # Absolute-form request straight to the proxy.
             connection = _ProxiedHTTPConnection(
@@ -330,7 +459,10 @@ class HttpClient:
             "User-Agent": self.profile.user_agent,
             "Accept": DEFAULT_ACCEPT,
             "Accept-Language": "en-US,en;q=0.9",
-            "Connection": "close",
+            # Reuse the connection. Every request opening its own TCP and TLS
+            # session is the better part of a second each, on every site, and
+            # an extraction is several requests — see `_ConnectionPool`.
+            "Connection": "keep-alive",
         })
         if self.site_headers and self._same_site(parsed.hostname or ""):
             for key, value in self.site_headers.items():
@@ -397,7 +529,9 @@ class HttpClient:
             if parsed.scheme not in ("http", "https"):
                 raise NetworkError(f"unsupported URL scheme: {parsed.scheme!r}")
 
-            connection, target, extra = self._build_connection(parsed)
+            key = self._pool_key(parsed)
+            pooled = self._pool.take(key)
+            connection, target, extra = self._build_connection(parsed, pooled)
             request_headers = self._default_headers(parsed, headers)
             request_headers.update(extra)
             if decode and "accept-encoding" not in CaseInsensitiveDict(request_headers):
@@ -411,9 +545,27 @@ class HttpClient:
                 raw = connection.getresponse()
             except (http.client.HTTPException, ssl.SSLError, socket.error, OSError) as exc:
                 connection.close()
-                raise NetworkError(f"{method} {current} failed: {exc}") from exc
+                # A connection out of the pool can have been closed by the
+                # origin while it sat idle, and nothing says so until the write
+                # fails. That is not a failed request — it is a stale socket —
+                # so it is retried once, on a new connection. Without this,
+                # pooling would turn every idle-timeout into a download error.
+                if pooled is None:
+                    raise NetworkError(f"{method} {current} failed: {exc}") from exc
+                connection, target, extra = self._build_connection(parsed)
+                request_headers.update(extra)
+                try:
+                    connection.request(method, target, body=payload,
+                                       headers=request_headers)
+                    raw = connection.getresponse()
+                except (http.client.HTTPException, ssl.SSLError, socket.error,
+                        OSError) as retry_exc:
+                    connection.close()
+                    raise NetworkError(
+                        f"{method} {current} failed: {retry_exc}") from retry_exc
 
-            response = Response(raw, connection, current, decode=decode)
+            response = Response(raw, connection, current, decode=decode,
+                                pool=self._pool, pool_key=key)
 
             set_cookies = raw.msg.get_all("Set-Cookie") or []
             if set_cookies:
