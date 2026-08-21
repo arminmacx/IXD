@@ -7217,6 +7217,7 @@ def main() -> int:
         check_page_two_is_not_clipped_against_its_siblings,
         check_page_two_draws_its_round_things,
         check_a_second_install_is_offered_the_first_ones_uninstall,
+        check_the_installer_text_survives_a_windows_codepage,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8173,6 +8174,98 @@ def check_a_second_install_is_offered_the_first_ones_uninstall() -> None:
     check("and the answer is whether the copy is gone, not what it returned",
           "IfFileExists" in remover and "$OtherDir\\ixd.exe" in remover,
           repr(remover[-260:]))
+
+
+
+def check_the_installer_text_survives_a_windows_codepage() -> None:
+    """The words on the installer, read by a `makensis` that assumes CP1252.
+
+    `Unicode true` sets the installer's *output* encoding and says nothing
+    about how `makensis` reads the script. It reads a source file in the
+    system codepage unless a BOM or `-INPUTCHARSET` says otherwise — and on
+    the Windows runner that is CP1252, while on this machine it is UTF-8. So
+    the installer built here was right and the one the release published was
+    not, which is why four screenshots of it never showed this.
+
+    Reported against 1.0.33 (`b1.png`, `b2.png`): `No administrator needed Â·
+    %APPDATA%\\IXD`, and `Yes â€" remove that one`. Those are `·` (C2 B7) and
+    `—` (E2 80 94) read as CP1252.
+
+    Forcing `-INPUTCHARSET CP1252` reproduces the Windows runner from here,
+    which is the whole point of the check (§3.62): the platform is an argument
+    rather than something only the other machine has.
+    """
+    print("\n[the installer text survives a windows codepage]")
+    import re as _re
+    import subprocess
+    import sys
+
+    if not shutil.which("makensis"):
+        print("  SKIP  makensis is not installed here (apt install nsis)")
+        return
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import build as build_module  # noqa: PLC0415
+    import installer_custom  # noqa: PLC0415
+
+    # The command names the charset, so the call site says what it means even
+    # where the BOM is not looked at.
+    source = inspect_source(build_module.build_windows_installer)
+    check("the compile names its input charset",
+          '"-INPUTCHARSET", "UTF8"' in source,
+          "makensis is called without -INPUTCHARSET")
+
+    with tempfile.TemporaryDirectory(prefix="ixd-charset-") as home:
+        home = Path(home)
+        payload = home / "ixd"
+        payload.mkdir()
+        (payload / "ixd.exe").write_bytes(b"MZ" + b"\0" * 64)
+
+        was, build_module.DIST = build_module.DIST, home / "dist"
+        build_module.DIST.mkdir()
+        try:
+            build_module.build_windows_installer(payload)
+            script = build_module.DIST / "installer.nsi"
+            raw = script.read_bytes()
+            check("the script it writes starts with a UTF-8 BOM",
+                  raw[:3] == b"\xef\xbb\xbf", str(raw[:6]))
+
+            # **The measurement.** Read it the way the Windows runner would.
+            # The BOM has to win, or every non-ASCII character on page one and
+            # in the conflict dialog comes out as two.
+            try:
+                done = subprocess.run(
+                    ["makensis", "-PPO", "-INPUTCHARSET", "CP1252", str(script)],
+                    capture_output=True, timeout=240)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                check("it preprocesses under CP1252", False, str(exc))
+                return
+            check("it preprocesses under CP1252", done.returncode == 0,
+                  done.stderr[-200:].decode(errors="replace"))
+            read_back = done.stdout.decode("utf-8", "replace")
+        finally:
+            build_module.DIST = was
+
+    # Every non-ASCII character the script puts on screen, gathered from the
+    # template rather than listed here — a new one is covered the day it is
+    # added.
+    template = Path(installer_custom.__file__).read_text(encoding="utf-8")
+    shown = sorted({letter for line in _re.findall(r'"([^"\n]*)"', template)
+                    for letter in line if ord(letter) > 127})
+    check("the installer does put non-ASCII on screen", shown, str(shown))
+
+    missing = [letter for letter in shown if letter not in read_back]
+    check("and every one of them survives being read as CP1252",
+          not missing, str(missing))
+
+    # The specific corruption, named: each of these is one character read as
+    # two, and each is what the user photographed.
+    mojibake = sorted({letter.encode("utf-8").decode("cp1252", "replace")
+                       for letter in shown})
+    found = [bad for bad in mojibake if bad in read_back]
+    check("and none of them arrives as two characters instead of one",
+          not found, str(found))
 
 
 if __name__ == "__main__":

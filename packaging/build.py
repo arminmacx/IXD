@@ -633,12 +633,22 @@ def build_windows_installer(binary_dir: Path) -> Path | None:
         art=str(ROOT / "packaging" / "installer-art"),
         uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
                        r"\Uninstall\IXD"),
-    ), encoding="utf-8")
+    # **A BOM, and it is not decoration.** `makensis` reads a source file in
+    # the system codepage unless something tells it otherwise, and on the
+    # Windows runner that is CP1252 — which turned `·` into `Â·` and `—` into
+    # `â€”` on the user's page one (§3.80). `Unicode true` sets the *output*
+    # encoding and has nothing to say about this. The BOM travels with the
+    # file, so `dist/installer.nsi` compiled by hand is right too.
+    ), encoding="utf-8-sig")
     log(f"wrote {script_path.name}")
     if not have("makensis"):
         log("makensis is not installed here, so the installer is not compiled")
         return None
-    if run(["makensis", "-V2", str(script_path)]) != 0:
+    # `-INPUTCHARSET UTF8` says the same thing at the call site. Either alone
+    # is enough; both cost nothing and the BOM is the one that survives being
+    # compiled by somebody else.
+    if run(["makensis", "-V2", "-INPUTCHARSET", "UTF8",
+            str(script_path)]) != 0:
         log("makensis refused the script; no installer was produced")
         return None
     log(f"wrote {output.name} ({output.stat().st_size / 1048576:.1f} MB)")
@@ -676,12 +686,22 @@ def build_windows_custom_installer(payload: Path) -> Path | None:
         art=str(ROOT / "packaging" / "installer-art"),
         uninstall_key=(r"Software\Microsoft\Windows\CurrentVersion"
                        r"\Uninstall\IXD"),
-    ), encoding="utf-8")
+    # **A BOM, and it is not decoration.** `makensis` reads a source file in
+    # the system codepage unless something tells it otherwise, and on the
+    # Windows runner that is CP1252 — which turned `·` into `Â·` and `—` into
+    # `â€”` on the user's page one (§3.80). `Unicode true` sets the *output*
+    # encoding and has nothing to say about this. The BOM travels with the
+    # file, so `dist/installer.nsi` compiled by hand is right too.
+    ), encoding="utf-8-sig")
     log(f"wrote {script_path.name}")
     if not have("makensis"):
         log("makensis is not installed here, so it is not compiled")
         return None
-    if run(["makensis", "-V2", str(script_path)]) != 0:
+    # `-INPUTCHARSET UTF8` says the same thing at the call site. Either alone
+    # is enough; both cost nothing and the BOM is the one that survives being
+    # compiled by somebody else.
+    if run(["makensis", "-V2", "-INPUTCHARSET", "UTF8",
+            str(script_path)]) != 0:
         log("makensis refused the custom script; nothing was produced")
         return None
     log(f"wrote {output.name} ({output.stat().st_size / 1048576:.1f} MB)")
