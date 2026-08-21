@@ -1253,10 +1253,17 @@
     // YouTube is untouched by this: there the extraction comes from the watch
     // page, not from a capture, so its captured `videoplayback` address — 403
     // to everyone, §271 — still stays out of the menu.
-    const fromCapture = captured.some((entry) => entry.url === menuSource);
-    const extracted = ((info || {}).formats || []).length > 0;
+    //
+    // And that second clause is *narrow*: it is for a menu that cannot stand
+    // on its own. Once a site has a real extractor the same captures become
+    // pure noise — on a Twitch VOD the panel listed the two playlists the
+    // player had fetched, twice each, above a perfectly good six-quality menu,
+    // and labelled them "2.9 KB", which is the size of the playlist *text* and
+    // not of anything anybody wants to download. So the captures are shown
+    // only while the extracted menu has nothing better: a single row, or rows
+    // that name no resolution at all.
     let listedCaptures = false;
-    if (captured.length && (!extracted || fromCapture)) {
+    if (capturesWorthShowing(captured, (info || {}).formats || [], menuSource)) {
       listedCaptures = true;
       const heading = document.createElement("div");
       heading.className = "menu-title";
@@ -1362,7 +1369,14 @@
         item.title = "The site will only serve an opening portion of this one.";
       }
       item.append(name, size);
-      item.__ixdHandler = () => queue(format.format_id);
+      // The container this row is *advertising* travels with the click. The
+      // row says "160p · mp4"; without this it asked for no container at all,
+      // the engine named the file after the segments it found — MPEG-TS on
+      // Twitch and most HLS sites — and a menu entry marked mp4 produced a
+      // `.ts`. The engine rewraps ts→mp4 when the name asks for it, and
+      // corrects the name when the bytes turn out to be something it cannot
+      // reconcile, so stating the choice is safe as well as honest.
+      item.__ixdHandler = () => queue(format.format_id, shape);
       menu.appendChild(item);
     };
 
@@ -1422,6 +1436,33 @@
     });
   }
 
+  //: Should the "Playing on this page" section be drawn at all?
+  //:
+  //: Captures are the only route on a site with no extractor, so they are
+  //: shown whenever extraction produced nothing. They are also shown when the
+  //: extraction was read *out of* one of them and came back with a menu that
+  //: cannot stand on its own — one nameless row called after a playlist file —
+  //: because those two rows are what give the video its own name and the
+  //: choice between the site's container and an MP4.
+  //:
+  //: They are *not* shown next to a real quality menu. On a Twitch VOD that
+  //: put the two playlists the player had fetched, twice each, above a
+  //: six-quality menu, each labelled "2.9 KB" — the size of the playlist text,
+  //: not of any video. Same media, described worse, with a misleading size.
+  function capturesWorthShowing(captured, formats, source) {
+    if (!captured || !captured.length) return false;
+    if (!formats || !formats.length) return true;
+    const fromCapture = captured.some((entry) => entry.url === source);
+    if (!fromCapture) return false;
+    const namesRealQualities = formats.some(
+      (format) => Number(format.height || 0) > 0
+        // No trailing \b: Twitch names its own renditions "1080p60" and
+        // "720p60", and a word boundary after the `p` never matches those.
+        || /\b\d{3,4}p/i.test(String(format.description || "")));
+    const standsAlone = formats.length > 1 || namesRealQualities;
+    return !standsAlone;
+  }
+
   function describeCaptured(entry, container, original) {
     // A capture from an ordinary site is named by its file, because that is
     // what a person recognises; only YouTube's are identified by an itag, and
@@ -1477,7 +1518,7 @@
     }
   }
 
-  async function queue(formatId) {
+  async function queue(formatId, container) {
     closeMenu();
     // Told at once, not when the engine has finished thinking.
     //
@@ -1504,6 +1545,9 @@
         pageResourceTotal: (pageMediaAddresses().total || 0),
         title: (tabTitle || document.title || "")
           .replace(/\s*[-|·—]\s*YouTube\s*$/, "").trim(),
+        // Empty for "Best available", which is a request to decide everything
+        // including the packaging.
+        container: container || "",
       });
       if (result && result.filename) toast(`Queued ${result.filename}`);
     } catch (error) {

@@ -3712,6 +3712,73 @@ def test_the_audio_queued_beside_a_video_is_the_original() -> None:
         service.db.close()
 
 
+def test_a_stream_says_what_it_weighs_before_it_starts() -> None:
+    """The file-info window opens before a byte is fetched.
+
+    `total_size` is 0 until the first response, so the window had nothing to
+    show but "size not published" — while the hover panel beside it displayed
+    40.0 MB for the very rendition being queued. It was reported on a Twitch
+    VOD, whose length Twitch states outright, so the size was known all along
+    and simply never travelled from the chosen format to the row.
+    """
+    print("\n[a stream says what it weighs before it starts]")
+    import tempfile
+
+    from ixd.config import Settings
+    from ixd.core.db import Database
+    from ixd.core.models import MediaFormat, MediaInfo
+    from ixd.service import DownloadService
+
+    with tempfile.TemporaryDirectory() as home:
+        settings = Settings(Path(home) / "settings.json")
+        settings.set("download_dir", home)
+        service = DownloadService(settings, Database(Path(home) / "state.sqlite3"))
+
+        hls = MediaFormat("twitch-160p30", "https://cdn/160p30/index-dvr.m3u8",
+                          ext="mp4", height=160, vcodec="avc1", acodec="mp4a",
+                          tbr=294.686, filesize=41_961_487,
+                          quality_label="160p")
+        served = MediaFormat("sabr-137", "https://media/137", ext="mp4",
+                             height=1080, vcodec="avc1", acodec="none",
+                             filesize=0,
+                             sabr={"endpoint": "https://e", "itag": 137,
+                                   "size": 123_456_789, "config": ""})
+        info = MediaInfo(title="wao vs koba stream", webpage_url="https://page",
+                         formats=[hls, served])
+        service._analysed = lambda url, client, options: info
+        service._servable_format = lambda chosen, i, c, ua="": (chosen, "")
+        service.engine.start_download = lambda *args, **kwargs: False
+
+        reply = service.handle_command("add_media", {
+            "url": "https://page", "format_id": "twitch-160p30",
+            "cookies": "", "userAgent": "test", "start": False,
+        })
+        check("the command is accepted", reply.get("ok") is True, str(reply))
+        download_id = reply["result"]["id"]
+        row = service.db.get_download(download_id)
+        check("nothing has been fetched, so the row has no size yet",
+              not row.total_size, str(row.total_size))
+        check("but what the site declared travelled with it",
+              (row.sabr_context or {}).get("size") == 41_961_487,
+              str((row.sabr_context or {}).get("size")))
+        check("so the window can answer before the download starts",
+              service.expected_total(download_id) == 41_961_487,
+              str(service.expected_total(download_id)))
+
+        # A server-driven stream carries its own size, and that one is the
+        # authority — overwriting it with the format's `filesize` (0 here)
+        # would have put "size not published" back on every YouTube video.
+        reply = service.handle_command("add_media", {
+            "url": "https://page", "format_id": "sabr-137",
+            "cookies": "", "userAgent": "test", "start": False,
+        })
+        sabr_row = service.db.get_download(reply["result"]["id"])
+        check("a server-driven stream keeps the size it came with",
+              (sabr_row.sabr_context or {}).get("size") == 123_456_789,
+              str((sabr_row.sabr_context or {}).get("size")))
+        service.db.close()
+
+
 def test_the_panel_offers_the_preferred_container() -> None:
     """The container preference has to reach the menu, not just selection.
 
@@ -4498,7 +4565,11 @@ def test_a_quality_is_queued_against_where_it_came_from() -> None:
     source = (Path(__file__).resolve().parents[1]
               / "extension" / "content" / "video_inject.js").read_text()
 
-    queue = source[source.index("async function queue(formatId)"):]
+    # Sliced on the name, not the parameter list: `queue` grew a `container`
+    # argument when a quality row started asking for the container it
+    # advertises, and pinning this to the old signature made an unrelated test
+    # fail with "substring not found" rather than saying anything useful.
+    queue = source[source.index("async function queue(formatId"):]
     queue = queue[:queue.index("\n  }")]
     check("the menu's own source is used, with the page only as a fallback",
           "menuSource || location.href" in queue, queue[:200])
@@ -4740,8 +4811,16 @@ def test_the_container_asked_for_is_the_container_produced() -> None:
         # playlist site extracts to one format called after the playlist, so
         # the menu read "MASTER.M3U8 · Video · m3u8" instead of offering the
         # video's own name twice, as served (`.ts`) and rewrapped (`.mp4`).
-        check("captures are listed when they are the only route or its source",
-              "if (captured.length && (!extracted || fromCapture))" in panel)
+        # The rule now lives in a named function so it can be exercised
+        # directly — `tests/test_extension.js` calls it with real menus rather
+        # than matching this file's text — and it grew a third condition: a
+        # capture is not listed beside a menu that already names resolutions.
+        # On a Twitch VOD the two playlists the player had fetched appeared
+        # twice each above a six-quality menu, labelled with the size of the
+        # playlist text.
+        check("captures are listed only when the menu cannot stand alone",
+              "function capturesWorthShowing" in panel
+              and "capturesWorthShowing(captured," in panel)
         check("…and the container choice is still offered for a playlist",
               'entry.kind === "manifest" ? ["mp4", ""]' in panel)
         check("but the container choice still travels with a request",
@@ -7222,6 +7301,7 @@ def main() -> int:
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
                  test_the_panel_offers_the_preferred_container,
+        test_a_stream_says_what_it_weighs_before_it_starts,
                  test_the_queue_finishes_with_a_choice,
                  test_the_scheduler_is_reachable_and_stoppable,
                  test_cancelling_closes_the_download_window,

@@ -399,6 +399,65 @@ function loadManifestFilter() {
   return new Function(text.slice(from, to) + "; return oneManifestPerHost;")();
 }
 
+// ---------------------------------------------------------------------------
+// The captured playlists belong under a menu that has nothing better to show,
+// and nowhere else. On a Twitch VOD they appeared above a six-quality menu,
+// twice each, labelled with the size of the playlist text (2.9 KB).
+// ---------------------------------------------------------------------------
+function loadCaptureRule() {
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "content", "video_inject.js"), "utf8");
+  const from = text.indexOf("function capturesWorthShowing");
+  const to = text.indexOf("function describeCaptured", from);
+  return new Function(text.slice(from, to) + "; return capturesWorthShowing;")();
+}
+
+console.log("\n[captures are shown only when the menu needs them]");
+{
+  const worthShowing = loadCaptureRule();
+  const playlist = "https://cdn.example/v/360p30/index-dvr.m3u8";
+  const captured = [{ kind: "manifest", url: playlist, size: 2986 }];
+
+  check("nothing extracted — the captures are the only route",
+    worthShowing(captured, [], playlist) === true);
+  check("no captures at all — nothing to show",
+    worthShowing([], [], playlist) === false);
+
+  const realMenu = [
+    { height: 1080, description: "1080p60" }, { height: 720, description: "720p60" },
+    { height: 360, description: "360p" }, { height: 0, description: "Audio only" },
+  ];
+  check("a real quality menu stands on its own",
+    worthShowing(captured, realMenu, playlist) === false);
+
+  // The case the second clause was written for: a site whose media is only a
+  // playlist extracts to one row named after the playlist file.
+  const poorMenu = [{ height: 0, description: "master.m3u8" }];
+  check("one nameless row still needs the captures beside it",
+    worthShowing(captured, poorMenu, playlist) === true);
+  check("but only when the menu was read out of a capture",
+    worthShowing(captured, poorMenu, "https://example.com/watch") === false);
+
+  check("a single row that does name a resolution stands alone",
+    worthShowing(captured, [{ height: 720, description: "720p" }], playlist) === false);
+  check("and a resolution stated only in words is still a resolution",
+    worthShowing(captured, [{ height: 0, description: "1080p60" }], playlist) === false);
+}
+
+console.log("\n[a quality row asks for the container it advertises]");
+{
+  const text = fs.readFileSync(
+    path.join(__dirname, "..", "extension", "content", "video_inject.js"), "utf8");
+  // The row is labelled "160p · mp4" from `shape`; without passing `shape` on
+  // the click the engine named the file after the segments it found and a row
+  // marked mp4 produced a `.ts`.
+  check("the row hands its container to queue()",
+    /__ixdHandler = \(\) => queue\(format\.format_id, shape\)/.test(text));
+  check("and queue() forwards it to the application",
+    /async function queue\(formatId, container\)/.test(text)
+      && /container: container \|\| ""/.test(text));
+}
+
 console.log("\n[one playlist per host]");
 {
   const oneManifestPerHost = loadManifestFilter();

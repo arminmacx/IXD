@@ -1889,6 +1889,17 @@ class DownloadService:
                 # window was showing it as though it were a fact. A 144p video
                 # announced itself as 1080p.
                 "quality": self._quality_label(chosen),
+                # What the site said this weighs, kept for the same reason the
+                # quality is: the file-info window opens before a byte is
+                # fetched, so `total_size` is 0 and it had nothing to show but
+                # "size not published" — for a Twitch VOD whose length Twitch
+                # states outright and whose size the panel beside it was
+                # already displaying. A server-driven stream carries its own
+                # size in `chosen.sabr` and that one is authoritative, so it is
+                # never overwritten here.
+                **({"size": int(chosen.filesize)}
+                   if chosen.filesize and not (chosen.sabr or {}).get("size")
+                   else {}),
                 # Where this session came from. A streaming endpoint is signed
                 # and expires within hours, so a download paused overnight
                 # resumes against a link the origin no longer honours — and
