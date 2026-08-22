@@ -87,24 +87,58 @@ jobs:
         shell: bash
         run: echo "IXD_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
 
-      # The manylinux image carries several CPythons under /opt/python. The
-      # newest this project supports is taken, and *which* one is printed: a
-      # build that quietly fell back to an older interpreter is not something
-      # to discover from a bug report.
+      # The image carries several CPythons under /opt/python, and being present
+      # is not enough: manylinux builds them *without* --enable-shared, and
+      # PyInstaller refuses those outright —
+      #
+      #   ERROR: Python was built without a shared library, which is required
+      #
+      # which is what the first run in this container died of. So each
+      # candidate is asked whether it has a shared libpython, the newest one
+      # that does wins, and every rejection is printed. A build that quietly
+      # fell back to an older interpreter is not something to learn from a bug
+      # report.
       - name: The interpreter to build with (container)
         if: matrix.container != ''
         run: |
-          for tag in cp314-cp314 cp313-cp313 cp312-cp312 cp311-cp311; do
-            candidate="/opt/python/$tag/bin/python3"
-            if [ -x "$candidate" ]; then
-              echo "IXD_PYTHON=$candidate" >> "$GITHUB_ENV"
-              echo "building with $candidate — $("$candidate" --version)"
-              exit 0
+          set -uo pipefail
+          shared() {
+            "$1" -c 'import sysconfig, sys; sys.exit(
+                0 if sysconfig.get_config_var("Py_ENABLE_SHARED") else 1)' \
+              2>/dev/null
+          }
+          echo "what this image offers:"
+          ls -1 /opt/python 2>/dev/null || echo "  (no /opt/python)"
+          pick=""
+          for candidate in /opt/python/cp314-cp314/bin/python3 \
+                           /opt/python/cp313-cp313/bin/python3 \
+                           /opt/python/cp312-cp312/bin/python3 \
+                           /opt/python/cp311-cp311/bin/python3 \
+                           python3.14 python3.13 python3.12 python3.11; do
+            resolved="$(command -v "$candidate" 2>/dev/null || true)"
+            if [ -z "$resolved" ]; then
+              echo "  absent          $candidate"
+              continue
             fi
+            if shared "$resolved"; then
+              echo "  USING           $resolved ($("$resolved" --version 2>&1))"
+              pick="$resolved"
+              break
+            fi
+            echo "  static libpython, PyInstaller cannot use it: $resolved"
           done
-          echo "no usable interpreter under /opt/python:"
-          ls -1 /opt/python 2>/dev/null || echo "  (the directory is not there)"
-          exit 1
+          if [ -z "$pick" ]; then
+            echo "nothing here has a shared libpython; installing one"
+            dnf install -y python3.12 python3.12-devel python3.12-pip
+            pick="$(command -v python3.12 || true)"
+            if [ -z "$pick" ] || ! shared "$pick"; then
+              echo "the installed interpreter is static too; this image cannot"
+              echo "build a PyInstaller binary."
+              exit 1
+            fi
+            echo "  USING           $pick ($("$pick" --version 2>&1))"
+          fi
+          echo "IXD_PYTHON=$pick" >> "$GITHUB_ENV"
 
       # Qt has to be importable for PyInstaller to analyse it, and whatever is
       # installed here is what PyInstaller can bundle — anything missing ends

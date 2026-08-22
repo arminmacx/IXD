@@ -8476,6 +8476,15 @@ def check_the_build_holds_the_glibc_floor_down() -> None:
 
     check("the floor is asserted, not merely printed",
           "floor > (2, 34)" in source)
+
+    # manylinux builds its CPythons *without* --enable-shared and PyInstaller
+    # refuses those outright: "Python was built without a shared library".
+    # Being present on disk is not the same as being usable, and the first run
+    # in this container died of exactly that.
+    check("the interpreter is checked for a shared libpython, not just found",
+          "Py_ENABLE_SHARED" in source)
+    check("and there is a way out when none of them has one",
+          "python3.12-devel" in source)
     check("and the step cannot report a failure and still exit 0",
           "set -euo pipefail" in source)
 
