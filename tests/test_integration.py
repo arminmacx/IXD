@@ -7384,6 +7384,7 @@ def main() -> int:
         check_an_appimage_is_actually_produced,
         check_the_hand_over_window_gets_in_front,
         check_every_older_build_still_finds_its_update,
+        check_a_setting_the_code_honours_can_be_reached,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8755,6 +8756,53 @@ def check_every_older_build_still_finds_its_update() -> None:
           release.asset("windows", ".zip") is not None
           and "source" not in str(release.asset("windows", ".zip")["name"]),
           str(release.asset("windows", ".zip")))
+
+
+def check_a_setting_the_code_honours_can_be_reached() -> None:
+    """`show_download_window` worked from the day it was written and had no
+    control anywhere.
+
+    Both places that open a download's own progress window read it, and the
+    default is on — so the only way to turn it off was to edit settings.json by
+    hand. Asked for on GitHub by somebody who had already found the "ask
+    before each one" tick and discovered it only stops the *question*, not the
+    window that follows it. Two windows, one switch between them.
+
+    A setting honoured by the code and absent from Settings is invisible from
+    both sides: nothing fails, nothing is logged, and the person concludes the
+    feature does not exist.
+    """
+    print("\n[a setting the code honours can be reached]")
+    root = Path(__file__).resolve().parents[1]
+    window = (root / "ixd" / "ui" / "main_window.py").read_text(encoding="utf-8")
+    dialog = (root / "ixd" / "ui" / "widgets"
+              / "settings_dialog.py").read_text(encoding="utf-8")
+
+    check("both automatic openings still ask the setting first",
+          window.count('"show_download_window"') == 2,
+          str(window.count('"show_download_window"')))
+    check("the double-click route does not ask it, so a window is always "
+          "available on request",
+          "activated_download.connect(self.open_download_window)" in window)
+
+    check("Settings offers a control for it", "QCheckBox(" in dialog.split(
+          "self.show_download_window = ")[1][:40], "no checkbox")
+    check("and writes it back when the dialog is accepted",
+          '"show_download_window": self.show_download_window.isChecked()' in dialog)
+
+    # The pair of switches the report was actually about: one stops the
+    # question, the other stops the window that follows it.
+    for key in ("confirm_browser_downloads", "show_download_window"):
+        check(f"{key} has both a control and a save",
+              f'"{key}"' in dialog and dialog.count(f'"{key}"') >= 2,
+              str(dialog.count(f'"{key}"')))
+
+    from ixd import config
+    for key in ("show_download_window", "confirm_browser_downloads"):
+        check(f"{key} defaults to on, so nothing changes for anyone who "
+              f"never opens Settings",
+              config.DEFAULT_SETTINGS.get(key) is True,
+              repr(config.DEFAULT_SETTINGS.get(key)))
 
 
 if __name__ == "__main__":

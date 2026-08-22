@@ -782,6 +782,21 @@ class SettingsDialog(QDialog):
         self.close_tray.setChecked(self.settings.get_bool("close_to_tray", False))
         behaviour_form.addRow("", self.close_tray)
 
+        # `show_download_window` was honoured by the code from the day it was
+        # written and had **no control anywhere** — the only way to turn it off
+        # was to edit settings.json by hand. Asked for on GitHub by somebody
+        # who had already found the "ask first" tick and discovered that it
+        # only stops the question, not the window that follows it.
+        self.show_download_window = QCheckBox(
+            "Open a progress window for each download as it starts")
+        self.show_download_window.setChecked(
+            self.settings.get_bool("show_download_window", True))
+        self.show_download_window.setToolTip(
+            "Unticked, a download goes straight into the list on the main "
+            "window and begins, with no window of its own. Double-click its "
+            "row to open one whenever you want it.")
+        behaviour_form.addRow("", self.show_download_window)
+
         self.notify = QCheckBox("Show a notification when a download finishes")
         self.notify.setChecked(self.settings.get_bool("notify_on_complete", True))
         behaviour_form.addRow("", self.notify)
@@ -1757,6 +1772,7 @@ class SettingsDialog(QDialog):
             "launch_at_startup": self.launch_at_startup.isChecked(),
             "minimize_to_tray": self.minimize_tray.isChecked(),
             "close_to_tray": self.close_tray.isChecked(),
+            "show_download_window": self.show_download_window.isChecked(),
             "notify_on_complete": self.notify.isChecked(),
             "keep_log": self.keep_log.isChecked(),
             "clear_log_on_launch": self.clear_log_on_launch.isChecked(),
