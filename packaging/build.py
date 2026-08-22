@@ -347,6 +347,23 @@ SONAME_OPTIONAL: dict[str, str] = {
     "libwebp.so.7": "libwebp7", "libwebp.so.6": "libwebp6",
     "libwebpdemux.so.2": "libwebpdemux2", "libwebpmux.so.3": "libwebpmux3",
     "libjasper.so.4": "libjasper4", "libmng.so.2": "libmng2",
+    # Qt's GTK platform theme plugin. Without it Qt draws with its own style,
+    # so none of this may be allowed to block an install. It is bundled when
+    # the build image happens to carry GTK and declared when it does not,
+    # which is the difference between building on a desktop and in a container.
+    "libgtk-3.so.0": "libgtk-3-0t64 | libgtk-3-0",
+    "libgdk-3.so.0": "libgtk-3-0t64 | libgtk-3-0",
+    "libatk-1.0.so.0": "libatk1.0-0t64 | libatk1.0-0",
+    "libatk-bridge-2.0.so.0": "libatk-bridge2.0-0t64 | libatk-bridge2.0-0",
+    "libatspi.so.0": "libatspi2.0-0t64 | libatspi2.0-0",
+    "libcairo.so.2": "libcairo2",
+    "libcairo-gobject.so.2": "libcairo-gobject2",
+    "libgdk_pixbuf-2.0.so.0": "libgdk-pixbuf-2.0-0",
+    "libpango-1.0.so.0": "libpango-1.0-0",
+    "libpangocairo-1.0.so.0": "libpangocairo-1.0-0",
+    "libpangoft2-1.0.so.0": "libpangoft2-1.0-0",
+    "libepoxy.so.0": "libepoxy0",
+    "libharfbuzz-gobject.so.0": "libharfbuzz-gobject0",
 }
 
 
@@ -476,6 +493,23 @@ def dependency_survey(
         elif package not in packages:
             packages.append(package)
     return sorted(packages), sorted(optional), floor, unmapped
+
+
+def floor_contributors(binary_dir: Path, floor: tuple[int, ...]) -> list[str]:
+    """The files that ask for `floor` — the ones holding the package back.
+
+    A version on its own says a problem exists and not where it is. Three
+    guesses were spent on a 2.35 that turned out not to be PyInstaller and not
+    to be Qt; naming the files answers it in one run.
+    """
+    named: list[str] = []
+    for path in sorted(binary_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        _, version = _elf_requirements(path)
+        if version and version >= floor:
+            named.append(str(path.relative_to(binary_dir)))
+    return named
 
 
 def _ar_entry(name: str, data: bytes) -> bytes:

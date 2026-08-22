@@ -290,6 +290,10 @@ jobs:
           for soname in unmapped:
               print(f"! no package is mapped to {soname}")
           if floor > (2, 34):
+              blame = build.floor_contributors(Path("dist/ixd"), floor)
+              print(f"what asks for {reads} — {len(blame)} file(s):")
+              for name in blame[:25]:
+                  print(f"    {name}")
               raise SystemExit(
                   f"this build needs glibc {reads}. The floor must stay at "
                   f"2.34 or the package will not start on Ubuntu 22.04, "
