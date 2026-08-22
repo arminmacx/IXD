@@ -134,6 +134,23 @@ a tool it does not ship.
 
 ---
 
+> [!TIP]
+> ### Support IXD
+>
+> IXD is free and always will be — no ads, no account, no paid tier. If it is
+> useful to you and you would like to keep it that way, a tip is very welcome.
+>
+> | | Network | Address |
+> |---|---|---|
+> | ![ETH](https://img.shields.io/badge/ETH-3C3C3D?style=flat-square&logo=ethereum&logoColor=white) | Ethereum | `0xcA72e420586989C876a9702cBF33338F601a8D48` |
+> | ![BNB](https://img.shields.io/badge/BNB-F0B90B?style=flat-square&logo=bnbchain&logoColor=white) | BNB Smart Chain | `0xcA72e420586989C876a9702cBF33338F601a8D48` |
+> | ![TRX](https://img.shields.io/badge/TRX-EF0027?style=flat-square&logo=tron&logoColor=white) | Tron | `TYdBetYQjGvuUPrW6ghPjj7vM3cBidwZGy` |
+>
+> **Check the network before sending.** The first two addresses are the same
+> key on two chains; the Tron one is not interchangeable with either.
+
+---
+
 ## Installation
 
 ### Download a build
@@ -156,6 +173,38 @@ version appears.
 the package names get pulled in with it. **It runs on glibc 2.34 and newer** —
 Ubuntu 22.04 LTS, Debian 12, RHEL/Rocky/Alma 9 and anything more recent. The
 AppImage is the same build with nothing to install.
+
+<details>
+<summary><b>Linux system libraries</b> — only if you use the AppImage or the
+portable archive</summary>
+
+Everything IXD needs is inside the package **except nine libraries that every
+desktop Linux already has**: the C library, the graphics stack and the X/Wayland
+client libraries. Qt cannot open a window without them, and they are far too
+central to sensibly bundle.
+
+The `.deb` names them, so `sudo apt install ./ixd_*.deb` handles this for you
+and you can ignore this section. The AppImage and the portable `.tar.gz` do not
+go through a package manager, so on a minimal or server install you may need:
+
+```bash
+# Debian, Ubuntu, Mint, Pop!_OS
+sudo apt install libdrm2 libegl1 libgcc-s1 libgl1 libxcb1 \
+                 libwayland-client0 libwayland-cursor0 libwayland-egl1
+
+# Fedora, RHEL, Rocky, Alma
+sudo dnf install libdrm mesa-libEGL mesa-libGL libgcc libxcb \
+                 libwayland-client libwayland-cursor libwayland-egl
+
+# Arch, Manjaro
+sudo pacman -S --needed libdrm libglvnd libxcb wayland
+```
+
+If it starts, you do not need any of this. If it exits immediately with
+nothing on screen, run it from a terminal — the missing library is named in
+the error.
+
+</details>
 
 The **Windows installer asks who it is for**: *everyone* needs administrator
 and installs to `Program Files`; *just me* needs nothing and installs to
@@ -243,21 +292,6 @@ the warning is honest: this binary is new and nobody has vouched for it.
 
 Firefox packaging is on hold: release Firefox requires a signed add-on, so the
 extension loads there only as a temporary add-on via `about:debugging`.
-
----
-
-## Donate
-
-IXD is free and always will be. If it is useful to you and you would like to
-support the work, a tip is very welcome.
-
-| | Address |
-|---|---|
-| **ETH** (Ethereum) | `0xcA72e420586989C876a9702cBF33338F601a8D48` |
-| **BNB** (BNB Smart Chain) | `0xcA72e420586989C876a9702cBF33338F601a8D48` |
-| **TRX** (Tron) | `TYdBetYQjGvuUPrW6ghPjj7vM3cBidwZGy` |
-
-Please check the network before sending.
 
 ---
 
