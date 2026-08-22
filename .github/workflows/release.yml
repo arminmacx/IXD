@@ -242,20 +242,6 @@ jobs:
       # build replace its own folder — written at build time on purpose, so an
       # unpacked `.deb` in /opt can never be mistaken for a portable copy. The
       # ordinary archives keep behaving exactly as they always have.
-      - name: Portable archive (Linux)
-        if: runner.os == 'Linux'
-        run: tar -C dist -czf dist/ixd-linux-x86_64.tar.gz ixd
-
-      - name: Portable archive (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          cd dist
-          if [ -d "Internet Xtreme Downloader.app" ]; then
-            ditto -c -k --keepParent "Internet Xtreme Downloader.app" ixd-macos-arm64.zip
-          else
-            tar -czf ixd-macos-arm64.tar.gz ixd
-          fi
-
       - name: Self-updating archive
         shell: bash
         run: |

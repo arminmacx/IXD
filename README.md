@@ -160,14 +160,15 @@ the [Releases](../../releases) page — nothing to compile.
 
 Every platform has both: an **installer**, and a **portable** copy that keeps
 its files wherever you put it and can replace itself in place when a new
-version appears.
+version appears. There is one portable archive per platform — releases up to
+1.0.45 published two that differed by a single file.
 
 | Platform | Installer | Portable |
 |---|---|---|
-| Windows | `ixd-1.0.44-windows-x64-setup.exe` | `ixd-1.0.44-windows-x64.zip` → extract, run `ixd.exe` |
-| macOS (Apple silicon) | `ixd-1.0.44-macos-arm64.pkg`, or the `.dmg` | `ixd-macos-arm64.zip` |
-| Debian / Ubuntu | `ixd_1.0.44_amd64.deb` → `sudo apt install ./ixd_1.0.44_amd64.deb` | `ixd-linux-x86_64.tar.gz` → extract, run `ixd/ixd` |
-| Any other Linux | `ixd-1.0.44-linux-x86_64.AppImage` → `chmod +x`, run it | — |
+| Windows | `ixd-1.0.45-windows-x64-setup.exe` | `ixd-1.0.45-windows-x64-portable.zip` → extract, run `ixd.exe` |
+| macOS (Apple silicon) | `ixd-1.0.45-macos-arm64.pkg`, or the `.dmg` | `ixd-1.0.45-macos-arm64-portable.zip` |
+| Debian / Ubuntu | `ixd_1.0.45_amd64.deb` → `sudo apt install ./ixd_1.0.45_amd64.deb` | `ixd-1.0.45-linux-x86_64-portable.tar.gz` → extract, run `ixd/ixd` |
+| Any other Linux | `ixd-1.0.45-linux-x86_64.AppImage` → `chmod +x`, run it | — |
 
 `apt install ./…` rather than `dpkg -i` so the handful of system libraries
 the package names get pulled in with it. **It runs on glibc 2.34 and newer** —
@@ -203,6 +204,23 @@ sudo pacman -S --needed libdrm libglvnd libxcb wayland
 If it starts, you do not need any of this. If it exits immediately with
 nothing on screen, run it from a terminal — the missing library is named in
 the error.
+
+**AppImage and FUSE.** An AppImage is a compressed image that mounts itself,
+which needs FUSE. A desktop install has it; a container, a minimal server or a
+locked-down machine often does not, and the AppImage then says:
+
+```
+fuse: device not found, try 'modprobe fuse' first
+Cannot mount AppImage, please check your FUSE setup.
+```
+
+Either install it — `sudo apt install libfuse2` on Ubuntu 22.04, `sudo dnf
+install fuse-libs` on Fedora/RHEL — or skip mounting altogether, which needs
+nothing and works anywhere:
+
+```bash
+./ixd-1.0.45-linux-x86_64.AppImage --appimage-extract-and-run
+```
 
 </details>
 
@@ -340,7 +358,7 @@ can also be driven directly:
 
 | Host | Produces |
 |---|---|
-| Linux | `dist/ixd/`, `ixd_1.0.44_amd64.deb`, AppDir, `.AppImage` (needs `appimagetool`) |
+| Linux | `dist/ixd/`, `ixd_1.0.45_amd64.deb`, AppDir, `.AppImage` (needs `appimagetool`) |
 | macOS | `Internet Xtreme Downloader.app`, `.dmg` via `hdiutil` |
 | Windows | `dist/ixd/`, `.zip`, multi-resolution `.ico` |
 
@@ -455,3 +473,23 @@ the name is what keeps that promise meaning something.
 
 The application bundles **Qt** through PySide6 under the **LGPL v3**, which
 carries its own obligations for anyone distributing a build.
+
+---
+
+> [!IMPORTANT]
+> ### Terms of use
+>
+> By downloading, installing or using IXD, you agree to the following.
+>
+> **Use it on content you have a right to** — material you own, bought, made,
+> or have permission to download. Downloading copyrighted material without
+> authorisation may be unlawful where you live.
+>
+> **No warranty.** The software is provided "as is", without warranty of any
+> kind, express or implied.
+>
+> **No liability.** The developer is not liable for any damage, loss or legal
+> consequence arising from use or misuse. You accept all risk.
+>
+> **Piracy is not the point.** IXD is a download manager. Use it responsibly
+> and lawfully.

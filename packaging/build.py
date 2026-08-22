@@ -1013,9 +1013,9 @@ def build_windows_custom_installer(payload: Path) -> Path | None:
 #: build writes it into its own marker so a running copy asks for exactly the
 #: file it came from rather than guessing from the platform at run time.
 SELF_UPDATE_ASSETS = {
-    "linux": "ixd-linux-x86_64-selfupdate.tar.gz",
-    "darwin": "ixd-macos-arm64-selfupdate.zip",
-    "win32": f"ixd-{VERSION}-windows-x64-selfupdate.zip",
+    "linux": f"ixd-{VERSION}-linux-x86_64-portable.tar.gz",
+    "darwin": f"ixd-{VERSION}-macos-arm64-portable.zip",
+    "win32": f"ixd-{VERSION}-windows-x64-portable.zip",
 }
 
 #: What the build records in its own marker — the same file, with the version
@@ -1024,9 +1024,9 @@ SELF_UPDATE_ASSETS = {
 #: searched the 1.0.9 release for that exact string, and reported that nothing
 #: it could use had been published while listing the file it wanted.
 SELF_UPDATE_PATTERNS = {
-    "linux": "ixd-linux-x86_64-selfupdate.tar.gz",
-    "darwin": "ixd-macos-arm64-selfupdate.zip",
-    "win32": "windows-x64-selfupdate.zip",
+    "linux": "linux-x86_64-portable.tar.gz",
+    "darwin": "macos-arm64-portable.zip",
+    "win32": "windows-x64-portable.zip",
 }
 
 
@@ -1046,8 +1046,11 @@ def build_self_updating(binary_dir: Path) -> Path | None:
     an unpacked `.deb` in `/opt` looks exactly like a portable folder and
     replacing that one leaves a machine whose next package upgrade fails.
 
-    Published beside the ordinary archives, never instead of them: somebody
-    who wants a build that touches nothing by itself keeps having one.
+    Published *instead of* a second plain archive, since 1.0.45. Every release
+    up to 1.0.44 shipped two portable copies per platform that differed by that
+    one file, and nobody could tell from the names which one to take — so there
+    is one now, it is called `portable`, and it is the one that can update
+    itself.
     """
     section("Self-updating build")
     asset = SELF_UPDATE_ASSETS[_platform_key()]
@@ -1176,7 +1179,6 @@ def main() -> int:
             build_dmg(binary)
             build_macos_pkg(binary)
         elif IS_WINDOWS:
-            build_windows_zip(binary)
             build_windows_installer(binary)
         # Built everywhere, because the machine that can build for Windows is
         # never the machine asking for it.

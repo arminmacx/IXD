@@ -711,8 +711,28 @@ class MainWindow(QMainWindow):
 
         Each one is offset from the last, and the taskbar button is flashed,
         which is the one attention-getting mechanism Windows does allow.
+
+        **That was still not enough**, reported 2026-08-22: a download handed
+        over from ubuntu.com opened this window *behind* the browser with no
+        flash at all. Placing and flashing both depend on the window manager
+        agreeing, and every modern one — Windows, GNOME, KDE — refuses focus to
+        a process that is not already in the foreground, which is precisely
+        what this process is not.
+
+        So it no longer asks for focus. `WindowStaysOnTopHint` is a *stacking*
+        request, not an activation one: the window manager honours it without
+        the window ever taking focus, which is the only way a background
+        application can put something in front of a browser. The flash is asked
+        to continue until the window is attended to rather than blinking once.
         """
+        from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
+
+        # Stacking, not activation. A raise the window manager may refuse is
+        # replaced by a hint it does not: this window is a question the person
+        # has to answer before anything downloads, so it belongs in front of
+        # whatever they were reading.
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
 
         # **No Qt parent**, which is why the constructors above pass None.
         # A parented dialog is an *owned* window: Windows gives it no taskbar
@@ -742,7 +762,9 @@ class MainWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        QApplication.alert(dialog)
+        # 0 means "keep flashing until this window is attended to". The default
+        # is a single blink, which is easy to miss and was reported missed.
+        QApplication.alert(dialog, 0)
 
     def confirm_browser_download(self, payload: dict) -> None:
         """Ask about a download the browser handed over, IDM-style.

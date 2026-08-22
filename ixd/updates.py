@@ -289,11 +289,22 @@ def platform_patterns() -> list[tuple[str, ...]]:
         # shortcuts correct, and it is the only route that works when the
         # install directory needs administrator to write to.
         return [("windows", "setup", ".exe")]
+    # `portable` since 1.0.45; `selfupdate` was its name up to 1.0.44 and is
+    # still tried, because a build that has not been updated yet is exactly the
+    # one that needs to find its update. The last pattern is the safety net,
+    # and on Windows it names `x64` so that it cannot match the source bundle,
+    # which also contains "windows" and ".zip".
     if sys.platform.startswith("win"):
-        return [("windows", "selfupdate", ".zip"), ("windows", ".zip")]
+        return [("windows", "portable", ".zip"),
+                ("windows", "selfupdate", ".zip"),
+                ("windows", "x64", ".zip")]
     if sys.platform == "darwin":
-        return [("macos", "selfupdate", ".zip"), ("macos", ".zip")]
-    return [("linux", "selfupdate", ".tar.gz"), ("linux", ".tar.gz")]
+        return [("macos", "portable", ".zip"),
+                ("macos", "selfupdate", ".zip"),
+                ("macos", ".zip")]
+    return [("linux", "portable", ".tar.gz"),
+            ("linux", "selfupdate", ".tar.gz"),
+            ("linux", ".tar.gz")]
 
 
 def download_patterns() -> list[tuple[str, ...]]:

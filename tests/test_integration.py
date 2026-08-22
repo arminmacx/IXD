@@ -2469,11 +2469,28 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
         # build writes into its own marker may carry a version number.
         build_source = (Path(__file__).resolve().parents[1]
                         / "packaging" / "build.py").read_text(encoding="utf-8")
-        table = re.search(r"SELF_UPDATE_PATTERNS = \{(.*?)\}", build_source, re.S)
-        patterns = re.findall(r'"([^"]*selfupdate[^"]*)"', table.group(1) if table else "")
+        # Matched by shape, not by the archive's current name: this check read
+        # `selfupdate` out of the table and went red the day the asset was
+        # renamed to `portable`, while the rule it exists to protect — no
+        # version numbers in a marker — was never in question.
+        table = re.search(r"SELF_UPDATE_PATTERNS = \{(.*?)\n\}", build_source, re.S)
+        patterns = re.findall(r':\s*"([^"]+)"', table.group(1) if table else "")
         check("every platform records a version-free pattern",
               bool(patterns) and not any(re.search(r"\d+\.\d+", p) for p in patterns),
               str(patterns))
+
+        # And the stronger form of the same rule, which the version check only
+        # approximates: what a build writes into its marker has to be a piece
+        # of the name the release actually publishes, or it will search for a
+        # file that is not there.
+        published = re.search(r"SELF_UPDATE_ASSETS = \{(.*?)\n\}", build_source, re.S)
+        assets = re.findall(r':\s*f?"([^"]+)"', published.group(1) if published else "")
+        stripped = [name.replace("{VERSION}", "1.0.9").replace("ixd-", "")
+                    for name in assets]
+        check("and every recorded pattern is part of the name published",
+              len(patterns) == len(assets) and all(
+                  pattern in name for pattern, name in zip(patterns, stripped)),
+              f"{patterns} against {stripped}")
 
         # A build that was not marked self-updating refuses to install.
         started, detail = service.install_update(release)
@@ -7365,6 +7382,7 @@ def main() -> int:
         check_the_package_declares_what_it_needs,
         check_the_build_holds_the_glibc_floor_down,
         check_an_appimage_is_actually_produced,
+        check_the_hand_over_window_gets_in_front,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8621,6 +8639,44 @@ def check_an_appimage_is_actually_produced() -> None:
     check("named so it cannot be mistaken for the update archive",
           built[-1].name.endswith("-linux-x86_64.AppImage")
           and ".tar.gz" not in built[-1].name, built[-1].name)
+
+
+def check_the_hand_over_window_gets_in_front() -> None:
+    """Reported 2026-08-22: a download handed over from ubuntu.com opened its
+    window *behind* the browser, with no taskbar flash at all.
+
+    The code was already placing the window itself and calling
+    `QApplication.alert`, having been through this once before. What neither
+    survives is that placing and raising both need the window manager to agree,
+    and every modern one — Windows, GNOME, KDE — refuses focus to a process
+    that is not already in the foreground, which is exactly what this one is.
+
+    `WindowStaysOnTopHint` is the way out because it is a *stacking* request
+    rather than an activation one, and stacking needs no permission.
+    """
+    print("\n[the hand-over window gets in front]")
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "ixd" / "ui" / "main_window.py").read_text(encoding="utf-8")
+    hand_over = source.split("_present_browser_dialog")[1].split("\n    def ")[0]
+
+    check("it stacks on top instead of asking for focus",
+          "WindowStaysOnTopHint" in hand_over)
+    check("and keeps flashing until it is attended to, rather than blinking "
+          "once and being missed", "alert(dialog, 0)" in hand_over)
+    check("the window is still parentless, so it keeps its own taskbar button",
+          "No Qt parent" in hand_over)
+
+    # The archive people are handed is one file per platform now, and what a
+    # build looks for has to include the name it used to have — a copy that has
+    # not been updated yet is precisely the one that must still find its update.
+    from ixd import updates
+    for shape in updates.platform_patterns():
+        check(f"a pattern with no empty pieces: {shape}", all(shape))
+    flattened = str(updates.platform_patterns())
+    check("the portable archive is looked for by its new name",
+          "portable" in flattened, flattened)
+    check("and by the name it had up to 1.0.44",
+          "selfupdate" in flattened, flattened)
 
 
 if __name__ == "__main__":
