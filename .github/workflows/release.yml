@@ -39,12 +39,13 @@ jobs:
           all='[
             {"key":"linux","os":"ubuntu-latest","label":"Linux",
              "container":"quay.io/pypa/manylinux_2_34_x86_64",
+             "flags":"--with-tests",
              "script":"./packaging/linux/build.sh"},
             {"key":"macos","os":"macos-latest","label":"macOS (Apple silicon)",
-             "container":"",
+             "container":"","flags":"",
              "script":"./packaging/macos/build.sh"},
             {"key":"windows","os":"windows-latest","label":"Windows",
-             "container":"",
+             "container":"","flags":"",
              "script":"packaging\\windows\\build.bat"}
           ]'
           if [ "$ONLY" = "all" ]; then
@@ -114,6 +115,8 @@ jobs:
                            /opt/python/cp313-cp313/bin/python3 \
                            /opt/python/cp312-cp312/bin/python3 \
                            /opt/python/cp311-cp311/bin/python3 \
+                           /usr/bin/python3.14 /usr/bin/python3.13 \
+                           /usr/bin/python3.12 /usr/bin/python3.11 \
                            python3.14 python3.13 python3.12 python3.11; do
             resolved="$(command -v "$candidate" 2>/dev/null || true)"
             if [ -z "$resolved" ]; then
@@ -130,7 +133,10 @@ jobs:
           if [ -z "$pick" ]; then
             echo "nothing here has a shared libpython; installing one"
             dnf install -y python3.12 python3.12-devel python3.12-pip
-            pick="$(command -v python3.12 || true)"
+            # Named absolutely on purpose: the image's own static python3.12
+            # sits in /usr/local/bin, which comes first on PATH, so
+            # `command -v` hands back the one that was just rejected.
+            pick="/usr/bin/python3.12"
             if [ -z "$pick" ] || ! shared "$pick"; then
               echo "the installed interpreter is static too; this image cannot"
               echo "build a PyInstaller binary."
@@ -187,9 +193,13 @@ jobs:
       # rather than only when somebody reports that one is broken. `IXD_PYTHON`
       # pins the interpreter set up above instead of leaving the script to
       # search a runner image that has several.
+      # --with-tests on Linux: the container settles on whichever interpreter
+      # has a shared libpython, which may not be the 3.14 this is developed on.
+      # The offline suites run against it before anything is built, so a
+      # version difference is caught here rather than by a user.
       - name: Build (Unix)
         if: runner.os != 'Windows'
-        run: ${{ matrix.script }} --no-install
+        run: ${{ matrix.script }} --no-install ${{ matrix.flags }}
 
       - name: Build (Windows)
         if: runner.os == 'Windows'

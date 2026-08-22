@@ -8485,6 +8485,12 @@ def check_the_build_holds_the_glibc_floor_down() -> None:
           "Py_ENABLE_SHARED" in source)
     check("and there is a way out when none of them has one",
           "python3.12-devel" in source)
+    # /usr/local/bin comes before /usr/bin, so `command -v python3.12` handed
+    # back the image's own static copy — the one the loop had just rejected.
+    check("the installed interpreter is named absolutely, not looked up",
+          'pick="/usr/bin/python3.12"' in source)
+    check("and an interpreter this project has not run is tested before it "
+          "builds anything", '"flags":"--with-tests"' in source)
     check("and the step cannot report a failure and still exit 0",
           "set -euo pipefail" in source)
 
