@@ -235,18 +235,26 @@ jobs:
           Write-Host "installer: $($setup.Name) $([math]::Round($setup.Length/1MB,1)) MB"
 
       # A folder of files is not something to hand somebody. Each platform's
-      # portable build is collapsed into one archive next to its installer.
+      # portable build is collapsed into one archive beside its installer.
       #
-      # Two of them, and the difference is one file. The `-selfupdate` archive
-      # carries `update-channel.json`, which is the only thing that lets a
-      # build replace its own folder — written at build time on purpose, so an
-      # unpacked `.deb` in /opt can never be mistaken for a portable copy. The
-      # ordinary archives keep behaving exactly as they always have.
-      - name: Self-updating archive
+      # **One archive, since 1.0.45.** There used to be two per platform
+      # differing by a single file — `update-channel.json`, which is what lets
+      # a build replace its own folder, written at build time on purpose so an
+      # unpacked `.deb` in /opt can never be mistaken for a portable copy.
+      # Nothing in the names said which to take, so there is one and it is the
+      # one that can update itself.
+      #
+      # It is **not** `continue-on-error` any more. That was survivable while a
+      # plain archive existed to fall back on; now this step is the only thing
+      # that produces a portable download at all, and a release with none of
+      # those — green, with a polite note in the log — is the same defect as
+      # the AppImage that was never built.
+      - name: Portable archive
         shell: bash
         run: |
+          set -euo pipefail
           "${IXD_PYTHON:-python3}" packaging/build.py --self-update --no-clean
-        continue-on-error: true
+          ls -1 dist/*-portable.* >/dev/null
 
       # The floor is asserted, not merely printed. This is the one number that
       # decides whether the package can start on the distributions it installs

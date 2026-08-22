@@ -2435,7 +2435,7 @@ def test_it_can_tell_you_there_is_a_newer_version() -> None:
         # The build had recorded `ixd-1.0.8-windows-x64-selfupdate.zip` and
         # searched a 1.0.9 release for that exact string.
         published_names = [
-            "Internet-Xtreme-Downloader-1.0.9.dmg", "ixd-1.0.9-windows-source.zip",
+            "Internet-Xtreme-Downloader-1.0.9.dmg", "ixd-1.0.9-source.zip",
             "ixd-1.0.9-windows-x64-selfupdate.zip", "ixd-1.0.9-windows-x64.zip",
             "ixd-extension-chrome-1.0.9.zip", "ixd-linux-x86_64-selfupdate.tar.gz",
             "ixd-linux-x86_64.tar.gz", "ixd-macos-arm64-selfupdate.zip",
@@ -7572,7 +7572,11 @@ def check_batch_files_have_windows_line_endings():
     check("and is written with newline='' so they survive",
           'newline=""' in tail, tail[:200])
 
-    bundle = sorted((root / "dist").glob("ixd-*-windows-source.zip"))
+    # `ixd-*-source.zip` since 1.0.45. This glob still said `windows-source`
+    # after the rename and matched nothing, so it printed "skipping" and the
+    # packaged .bat files stopped being checked at all — the rename made a
+    # test quietly stop testing, which is the defect it exists to catch.
+    bundle = sorted((root / "dist").glob("ixd-*-source.zip"))
     if not bundle:
         print("  (no source bundle built; skipping the packaged copy)")
         return
