@@ -784,7 +784,12 @@ def build_windows_source() -> Path:
     held was a day out of date the moment anything changed.
     """
     section("Windows source bundle")
-    target = DIST / f"{APP_NAME}-{VERSION}-windows-source.zip"
+    # Deliberately *not* "windows-source": a portable Windows copy published
+    # before 1.0.45 falls back to looking for ("windows", ".zip"), and this
+    # bundle answered to that — so an update would have handed somebody 2 MB
+    # of Python source instead of the application. Taking the word "windows"
+    # out of the name is what makes that fallback unambiguous.
+    target = DIST / f"{APP_NAME}-{VERSION}-source.zip"
     count = 0
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(ROOT.rglob("*")):

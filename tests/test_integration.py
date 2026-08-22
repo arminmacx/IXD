@@ -7383,6 +7383,7 @@ def main() -> int:
         check_the_build_holds_the_glibc_floor_down,
         check_an_appimage_is_actually_produced,
         check_the_hand_over_window_gets_in_front,
+        check_every_older_build_still_finds_its_update,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8677,6 +8678,83 @@ def check_the_hand_over_window_gets_in_front() -> None:
           "portable" in flattened, flattened)
     check("and by the name it had up to 1.0.44",
           "selfupdate" in flattened, flattened)
+
+
+def check_every_older_build_still_finds_its_update() -> None:
+    """Renaming a published asset breaks every copy already installed.
+
+    A running build asks for the file it knows about, using *its own* code —
+    which cannot be changed by the release it is asking about. So the only
+    honest test of a rename is to take the pattern lists out of the builds
+    already in the field and run them against the names the next release will
+    publish.
+
+    Done that way, the merge to one `portable` archive was fine everywhere
+    except Windows portable, which fell back to ("windows", ".zip") and matched
+    `ixd-<version>-windows-source.zip` — an update that would have handed
+    somebody 2 MB of Python source. That is why the source bundle no longer has
+    "windows" in its name.
+    """
+    print("\n[every older build still finds its update]")
+    from ixd.updates import Release
+
+    root = Path(__file__).resolve().parents[1]
+    version = ixd_version()
+    published = [
+        f"Internet-Xtreme-Downloader-{version}.dmg",
+        f"ixd-{version}-linux-x86_64.AppImage",
+        f"ixd-{version}-linux-x86_64-portable.tar.gz",
+        f"ixd-{version}-macos-arm64.pkg",
+        f"ixd-{version}-macos-arm64-portable.zip",
+        f"ixd-{version}-source.zip",
+        f"ixd-{version}-windows-x64-portable.zip",
+        f"ixd-{version}-windows-x64-setup.exe",
+        f"ixd-extension-chrome-{version}.zip",
+        f"ixd-extension-firefox-{version}.zip",
+        f"ixd_{version}_amd64.deb",
+    ]
+    # The names really are what the build writes, not a list kept by hand here.
+    source = (root / "packaging" / "build.py").read_text(encoding="utf-8")
+    for shape in ("-portable.tar.gz", "-portable.zip", "-source.zip"):
+        check(f"the build still publishes something ending {shape}",
+              shape in source, shape)
+
+    release = Release(version=version,
+                      assets=[{"name": n, "browser_download_url": "x"}
+                              for n in published])
+
+    # Taken from the shipped 1.0.43/1.0.44 code, which is what is in the field.
+    fielded = [
+        ("Windows, installed", "windows-x64-setup.exe",
+         [("windows", "setup", ".exe")]),
+        ("Windows, portable", "windows-x64-selfupdate.zip",
+         [("windows", "selfupdate", ".zip"), ("windows", ".zip")]),
+        ("macOS, portable", "ixd-macos-arm64-selfupdate.zip",
+         [("macos", "selfupdate", ".zip"), ("macos", ".zip")]),
+        ("Linux, portable", "ixd-linux-x86_64-selfupdate.tar.gz",
+         [("linux", "selfupdate", ".tar.gz"), ("linux", ".tar.gz")]),
+        ("Linux, from .deb", "", [("amd64", ".deb")]),
+        ("macOS, from .pkg", "", [("macos", ".pkg")]),
+    ]
+    for label, marker_asset, patterns in fielded:
+        got = ""
+        for pattern in ([(marker_asset,)] if marker_asset else []) + patterns:
+            found = release.asset(*pattern)
+            if found:
+                got = str(found["name"])
+                break
+        check(f"{label} finds a build, not the source bundle",
+              got.startswith((f"ixd-{version}", f"ixd_{version}",
+                              "Internet-Xtreme-Downloader"))
+              and "source" not in got,
+              got or "nothing at all")
+
+    # And this release's own code, which is what the *next* rename will meet.
+    from ixd import updates
+    check("and the source bundle cannot answer a Windows archive lookup",
+          release.asset("windows", ".zip") is not None
+          and "source" not in str(release.asset("windows", ".zip")["name"]),
+          str(release.asset("windows", ".zip")))
 
 
 if __name__ == "__main__":
