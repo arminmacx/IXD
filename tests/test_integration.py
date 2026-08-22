@@ -42,6 +42,47 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"  FAIL  {name} {detail}")
 
 
+def skip(name: str, why: str) -> None:
+    """Neither a pass nor a failure: a check this machine cannot run.
+
+    Printed loudly and counted as neither, because a check that quietly
+    passed without running is the defect this suite exists to catch.
+    """
+    print(f"  SKIP  {name} — {why}")
+
+
+_BITS_ENFORCED: bool | None = None
+
+
+def permission_bits_are_enforced() -> bool:
+    """Whether chmod actually stops *this* account from writing.
+
+    root ignores permission bits, so every check built on `chmod(0o500)`
+    tests nothing at all when the suite runs as root — which is what a build
+    container does by default. Four of them failed that way the first time CI
+    ran the suites inside one.
+
+    Measured, not inferred from `geteuid()`: capabilities can be dropped, and
+    some filesystems do not enforce the bits at all.
+    """
+    global _BITS_ENFORCED
+    if _BITS_ENFORCED is None:
+        probe = Path(tempfile.mkdtemp(prefix="ixd-perm-"))
+        try:
+            (probe / "sub").mkdir()
+            (probe / "sub").chmod(0o500)
+            try:
+                (probe / "sub" / "written").write_text("x", encoding="utf-8")
+                _BITS_ENFORCED = False
+            except OSError:
+                _BITS_ENFORCED = True
+            finally:
+                (probe / "sub").chmod(0o700)
+        finally:
+            shutil.rmtree(probe, ignore_errors=True)
+    return _BITS_ENFORCED
+
+
 def test_service_over_ipc() -> None:
     print("\n[1] control socket: add, poll, pause, resume, complete")
     from ixd.ipc.server import IPCClient, IPCServer
@@ -1611,10 +1652,17 @@ print("INDETERMINATE_NOT_REPEATED", len(calls) == 3, len(calls))
     output = process.stdout
     detail = (output.strip()[-500:] or "") + (process.stderr[-500:] or "")
     if "BUS True" not in output:
-        # A build machine with no session bus cannot be asked this. Say so
-        # rather than passing a check that never ran.
-        check("a session bus is available to test against", False,
-              "no session bus; the launcher signal could not be verified here")
+        # Never a silent pass. But there are two different situations here and
+        # only one of them is a defect: a machine with no session bus at all
+        # (a build container) cannot be asked the question, while a machine
+        # that has one and did not carry the signal has failed.
+        if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            check("the launcher signal reaches the bus", False,
+                  "a session bus is configured and the signal did not arrive: "
+                  + detail)
+        else:
+            skip("the launcher signal reaches the bus",
+                 "there is no session bus on this machine to send it to")
         return
     check("the launcher signal reaches the bus", "SENT 1" in output, detail)
     check("addressed to this application", "URI_OK True" in output, detail)
@@ -3167,9 +3215,14 @@ def test_the_extension_sits_where_an_update_leaves_it() -> None:
         readonly.chmod(0o500)
         sys.executable = str(readonly / "ixd")
         try:
-            check("an installation it cannot write to falls back to the data dir",
-                  integration.extension_root() == config.DATA_DIR,
-                  str(integration.extension_root()))
+            if permission_bits_are_enforced():
+                check("an installation it cannot write to falls back to the "
+                      "data dir",
+                      integration.extension_root() == config.DATA_DIR,
+                      str(integration.extension_root()))
+            else:
+                skip("an installation it cannot write to falls back",
+                     "this account writes into a read-only folder anyway")
         finally:
             readonly.chmod(0o700)
 
@@ -6816,9 +6869,13 @@ def test_an_installed_build_can_update_itself() -> None:
         # because there it really would fail half way through a swap.
         portable.chmod(0o500)
         try:
-            check("a portable build in a read-only folder still refuses",
-                  updates.self_update_kind() == "",
-                  repr(updates.self_update_kind()))
+            if permission_bits_are_enforced():
+                check("a portable build in a read-only folder still refuses",
+                      updates.self_update_kind() == "",
+                      repr(updates.self_update_kind()))
+            else:
+                skip("a portable build in a read-only folder still refuses",
+                     "this account writes into a read-only folder anyway")
         finally:
             portable.chmod(0o700)
 
@@ -7055,13 +7112,19 @@ def test_the_guide_names_the_folder_this_install_actually_uses() -> None:
         # …unless the account running it cannot write there.
         elsewhere.chmod(0o500)
         try:
-            paths = extension_paths()
-            check("an all-users install falls back to the data directory",
-                  paths["chrome"] == str(config.DATA_DIR / "extension"),
-                  paths["chrome"])
-            check("and the guide says why, instead of printing a strange path",
-                  "read-only" in paths["note"] and str(elsewhere) in paths["note"],
-                  paths["note"])
+            if permission_bits_are_enforced():
+                paths = extension_paths()
+                check("an all-users install falls back to the data directory",
+                      paths["chrome"] == str(config.DATA_DIR / "extension"),
+                      paths["chrome"])
+                check("and the guide says why, instead of printing a strange "
+                      "path",
+                      "read-only" in paths["note"]
+                      and str(elsewhere) in paths["note"],
+                      paths["note"])
+            else:
+                skip("an all-users install falls back to the data directory",
+                     "this account writes into a read-only folder anyway")
         finally:
             elsewhere.chmod(0o700)
     finally:
