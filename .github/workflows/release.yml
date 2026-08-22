@@ -38,10 +38,13 @@ jobs:
         run: |
           all='[
             {"key":"linux","os":"ubuntu-latest","label":"Linux",
+             "container":"quay.io/pypa/manylinux_2_34_x86_64",
              "script":"./packaging/linux/build.sh"},
             {"key":"macos","os":"macos-latest","label":"macOS (Apple silicon)",
+             "container":"",
              "script":"./packaging/macos/build.sh"},
             {"key":"windows","os":"windows-latest","label":"Windows",
+             "container":"",
              "script":"packaging\\windows\\build.bat"}
           ]'
           if [ "$ONLY" = "all" ]; then
@@ -56,6 +59,14 @@ jobs:
     name: ${{ matrix.label }}
     needs: plan
     runs-on: ${{ matrix.os }}
+    # PyInstaller bundles the system libraries of the machine it builds on, so
+    # the *build* machine decides the oldest Linux this can run on. Built on
+    # ubuntu-latest it demanded glibc 2.38, which is newer than Ubuntu 22.04
+    # LTS, Debian 12 and RHEL 9 — it installed there and would not start.
+    # AlmaLinux 9 holds the floor at 2.34, which is also exactly where
+    # PySide6's own wheels sit, so it is as low as this can go without
+    # changing Qt. Empty for macOS and Windows, which means no container.
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false     # one platform failing must not hide the other two
       matrix:
@@ -65,15 +76,78 @@ jobs:
 
       - uses: actions/setup-python@v6
         id: python
+        if: matrix.container == ''
         with:
           python-version: '3.14'
 
-      - name: Qt's runtime libraries
+      # Every later step reads IXD_PYTHON rather than a step output, because
+      # the two ways of getting an interpreter now differ per platform.
+      - name: The interpreter to build with
+        if: matrix.container == ''
+        shell: bash
+        run: echo "IXD_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+
+      # The manylinux image carries several CPythons under /opt/python. The
+      # newest this project supports is taken, and *which* one is printed: a
+      # build that quietly fell back to an older interpreter is not something
+      # to discover from a bug report.
+      - name: The interpreter to build with (container)
+        if: matrix.container != ''
+        run: |
+          for tag in cp314-cp314 cp313-cp313 cp312-cp312 cp311-cp311; do
+            candidate="/opt/python/$tag/bin/python3"
+            if [ -x "$candidate" ]; then
+              echo "IXD_PYTHON=$candidate" >> "$GITHUB_ENV"
+              echo "building with $candidate — $("$candidate" --version)"
+              exit 0
+            fi
+          done
+          echo "no usable interpreter under /opt/python:"
+          ls -1 /opt/python 2>/dev/null || echo "  (the directory is not there)"
+          exit 1
+
+      # Qt has to be importable for PyInstaller to analyse it, and whatever is
+      # installed here is what PyInstaller can bundle — anything missing ends
+      # up declared as a dependency of the .deb instead, which is correct but
+      # is one more thing the user's machine has to have. The second list is
+      # tried a package at a time and each outcome is printed: a package that
+      # quietly did not install is how the TIFF plugin came to ship broken.
+      - name: Qt's runtime libraries (container)
+        if: matrix.container != ''
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            mesa-libGL mesa-libEGL libdrm libX11 libX11-xcb libxcb \
+            libxkbcommon libxkbcommon-x11 fontconfig freetype dbus-libs \
+            zlib openssl-libs
+          for optional in xcb-util xcb-util-image xcb-util-keysyms \
+                          xcb-util-renderutil xcb-util-wm xcb-util-cursor \
+                          libXext libXrender libXi libXfixes libXrandr \
+                          libXcursor libXcomposite libXdamage libXinerama \
+                          libXtst mesa-libgbm libwayland-client \
+                          libwayland-cursor libwayland-egl libwayland-server \
+                          libtiff libjpeg-turbo libwebp; do
+            if dnf install -y --setopt=install_weak_deps=False "$optional" \
+                 >/dev/null 2>&1; then
+              echo "  installed     $optional"
+            else
+              echo "  NOT available $optional — it will be declared as a "\
+                   "dependency instead"
+            fi
+          done
+
+      # AppImage is the answer to "will it run on my distribution", and this
+      # project has never published one: the AppDir was assembled, the tool was
+      # never installed, and the job stayed green. It is fetched *before* the
+      # build so that the ordinary --package run produces it, and the asset is
+      # checked for afterwards.
+      - name: appimagetool
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1
+          curl -sSL --retry 3 -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          echo "IXD_APPIMAGETOOL=/tmp/appimagetool" >> "$GITHUB_ENV"
+          ls -lh /tmp/appimagetool
 
       # The same scripts a user runs, so they are exercised on every release
       # rather than only when somebody reports that one is broken. `IXD_PYTHON`
@@ -82,15 +156,12 @@ jobs:
       - name: Build (Unix)
         if: runner.os != 'Windows'
         run: ${{ matrix.script }} --no-install
-        env:
-          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: ${{ matrix.script }}
         env:
-          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
           CI: 'true'          # the script skips its final `pause` when set
 
       # NSIS ships on the runner image but is not on PATH, so `build.py` wrote
@@ -101,8 +172,6 @@ jobs:
       - name: Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           $nsis = "C:\Program Files (x86)\NSIS"
           if (Test-Path "$nsis\makensis.exe") {
@@ -147,9 +216,47 @@ jobs:
         shell: bash
         run: |
           "${IXD_PYTHON:-python3}" packaging/build.py --self-update --no-clean
-        env:
-          IXD_PYTHON: ${{ steps.python.outputs.python-path }}
         continue-on-error: true
+
+      # The floor is asserted, not merely printed. This is the one number that
+      # decides whether the package can start on the distributions it installs
+      # on, it is invisible from the outside, and it moves whenever the build
+      # image changes underneath us — so the build fails rather than quietly
+      # shipping something Ubuntu 22.04 cannot run. The .AppImage is checked
+      # for in the same breath: for five releases it was skipped in silence.
+      - name: The oldest Linux this will run on
+        if: runner.os == 'Linux'
+        run: |
+          # Explicit, not inherited: a runner's default shell happens to be
+          # `bash -e`, and this check reported its own failure and exited 0
+          # under a plain `bash` — green, with the message right there.
+          set -euo pipefail
+          "$IXD_PYTHON" - <<'CHECK'
+          import sys
+          sys.path.insert(0, "packaging")
+          from pathlib import Path
+          import build
+
+          required, recommended, floor, unmapped = build.dependency_survey(
+              Path("dist/ixd"))
+          reads = ".".join(str(part) for part in floor)
+          print(f"glibc floor : {reads}")
+          print(f"Depends     : {', '.join(required)}")
+          print(f"Recommends  : {', '.join(recommended) or '(none)'}")
+          for soname in unmapped:
+              print(f"! no package is mapped to {soname}")
+          if floor > (2, 34):
+              raise SystemExit(
+                  f"this build needs glibc {reads}. The floor must stay at "
+                  f"2.34 or the package will not start on Ubuntu 22.04, "
+                  f"Debian 12 or RHEL 9 — check the build container.")
+          print("ok — runs on glibc 2.34 and newer")
+          CHECK
+          appimage=$(ls -1 dist/*.AppImage 2>/dev/null | head -1)
+          if [ -z "$appimage" ]; then
+            echo "no .AppImage was produced"; exit 1
+          fi
+          echo "AppImage    : $(basename "$appimage")"
 
       - name: What was produced
         shell: bash

@@ -9,8 +9,10 @@ Run with:  python -m tests.test_integration
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -7297,6 +7299,9 @@ def main() -> int:
         check_page_two_draws_its_round_things,
         check_a_second_install_is_offered_the_first_ones_uninstall,
         check_the_installer_text_survives_a_windows_codepage,
+        check_the_package_declares_what_it_needs,
+        check_the_build_holds_the_glibc_floor_down,
+        check_an_appimage_is_actually_produced,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8346,6 +8351,191 @@ def check_the_installer_text_survives_a_windows_codepage() -> None:
     found = [bad for bad in mojibake if bad in read_back]
     check("and none of them arrives as two characters instead of one",
           not found, str(found))
+
+
+# ----------------------------------------------------------------------
+#  Linux packaging: what the package needs, and what it will run on
+# ----------------------------------------------------------------------
+def _workflow_source() -> str:
+    """The release workflow with its comments removed.
+
+    A check that greps the file otherwise reads its own explanation and
+    passes on the prose — §3.62, which cost a day.
+    """
+    root = Path(__file__).resolve().parents[1]
+    raw = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    kept = []
+    for line in raw.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        kept.append(line.split(" #", 1)[0] if " #" in line else line)
+    return "\n".join(kept)
+
+
+def check_the_package_declares_what_it_needs() -> None:
+    """A .deb with no Depends: installs anywhere and may then not start.
+
+    Read from the released 1.0.43 control file: no libc6, none of the Qt
+    runtime libraries — `dpkg -i` succeeded on any Debian machine and the
+    application could fail at launch with nothing to explain it. The list is
+    measured from the built tree's own ELF headers rather than written down,
+    because PyInstaller bundles most of Qt's world and what it leaves behind
+    changes with the build image.
+    """
+    print("\n[the package declares what it needs]")
+    if not sys.platform.startswith("linux"):
+        print("  (not Linux; skipping)")
+        return
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import build as packaging_build
+
+    # A real ELF, read with nothing but the standard library.
+    needed, floor = packaging_build._elf_requirements(Path(sys.executable))
+    check("DT_NEEDED is read from a real binary", "libc.so.6" in needed,
+          str(sorted(needed))[:120])
+    check("and the glibc floor comes out of .gnu.version_r",
+          floor >= (2, 17), str(floor))
+
+    # Anything that is not a 64-bit ELF is declined rather than misread.
+    check("a non-ELF file is not mistaken for one",
+          packaging_build._elf_sections(b"#!/bin/sh\nexit 0\n") is None)
+    check("and neither is an empty one",
+          packaging_build._elf_sections(b"") is None)
+
+    # Every soname the survey can meet must map to a package. One that does
+    # not is reported by the build, but a test is what stops it shipping.
+    binary = root / "dist" / "ixd"
+    if binary.exists():
+        required, recommended, floor, unmapped = \
+            packaging_build.dependency_survey(binary)
+        check("nothing the built tree needs is left unmapped",
+              not unmapped, str(unmapped))
+        check("libc6 is among the declared dependencies",
+              any(p.startswith("libc6") for p in required), str(required))
+        check("so is the OpenGL library Qt's platform plugin opens",
+              "libgl1" in required, str(required))
+        check("the floor is a real version", bool(floor), str(floor))
+    else:
+        print("  (no dist/ixd; the survey is exercised on the interpreter only)")
+
+    # And the control file the build writes actually carries it. Parsed here
+    # out of the ar archive, by code that did not write it.
+    packages = sorted((root / "dist").glob("ixd_*_amd64.deb"))
+    if not packages:
+        print("  (no .deb built; the control file is not checked)")
+        return
+    raw = packages[-1].read_bytes()
+    check("the .deb is an ar archive", raw[:8] == b"!<arch>\n")
+    at, control = 8, b""
+    while at + 60 <= len(raw):
+        name = raw[at:at + 16].decode("ascii", "replace").strip()
+        size = int(raw[at + 48:at + 58].decode("ascii", "replace").strip())
+        body = raw[at + 60:at + 60 + size]
+        if name.startswith("control.tar"):
+            control = body
+            break
+        at += 60 + size + (size % 2)
+    check("with a control member in it", bool(control))
+    if not control:
+        return
+    import tarfile as _tarfile
+    with _tarfile.open(fileobj=io.BytesIO(control), mode="r:gz") as archive:
+        member = archive.extractfile("./control")
+        fields = member.read().decode("utf-8") if member else ""
+    check("Depends: is present at all", "\nDepends: " in fields, fields[:200])
+    check("and names a minimum glibc, so an old system is refused by dpkg "
+          "rather than by a window that never appears",
+          re.search(r"\nDepends: libc6 \(>= \d+\.\d+\)", fields) is not None,
+          fields[:300])
+    check("the optional image codec is a Recommends, not a Depends — its "
+          "soname differs between the distributions this targets",
+          "libtiff" not in fields.split("Recommends:")[0], fields[:300])
+
+
+def check_the_build_holds_the_glibc_floor_down() -> None:
+    """PyInstaller bundles the build machine's libraries, so the build machine
+    decides the oldest Linux this runs on.
+
+    Built on ubuntu-latest it demanded glibc 2.38 — newer than Ubuntu 22.04
+    LTS, Debian 12 and RHEL 9, all of which it installs on and none of which
+    it starts on. PySide6's own wheels stop at 2.34, so that is the floor, and
+    the build asserts it rather than printing it: the number is invisible from
+    outside and moves whenever the base image does.
+    """
+    print("\n[the build holds the glibc floor down]")
+    source = _workflow_source()
+
+    check("the Linux build runs in a container", "container:" in source)
+    check("and it is the one whose glibc matches PySide6's own wheels",
+          "manylinux_2_34_x86_64" in source, source[:0])
+    check("macOS and Windows get no container",
+          source.count('"container":""') == 2, str(source.count('"container":""')))
+
+    check("the floor is asserted, not merely printed",
+          "floor > (2, 34)" in source)
+    check("and the step cannot report a failure and still exit 0",
+          "set -euo pipefail" in source)
+
+    # An empty step-level env: overrides the job environment. Leaving the old
+    # `IXD_PYTHON: ${{ steps.python.outputs.python-path }}` on the build step
+    # would blank the interpreter the container just resolved.
+    check("no step blanks the interpreter the container resolved",
+          "steps.python.outputs.python-path" not in
+          source.split("The interpreter to build with")[-1]
+          .split("- name: What was produced")[0]
+          .replace('echo "IXD_PYTHON=${{ steps.python.outputs.python-path }}"', ""),
+          "a step still overrides IXD_PYTHON")
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import build as packaging_build
+    check("the survey the assertion calls is importable and public",
+          callable(getattr(packaging_build, "dependency_survey", None)))
+
+
+def check_an_appimage_is_actually_produced() -> None:
+    """No AppImage has ever been published.
+
+    The AppDir was assembled, the workflow uploaded `dist/*.AppImage`, and
+    nothing ever installed appimagetool — so `have()` was false, a polite note
+    went into the log and the job stayed green. Confirmed against every
+    release: zero AppImage assets. That is §3.42's shape a third time, a step
+    that quietly produces nothing being indistinguishable from one that
+    worked.
+    """
+    print("\n[an AppImage is actually produced]")
+    source = _workflow_source()
+
+    check("the tool is fetched by the workflow", "appimagetool" in source)
+    check("before the build, so the ordinary --package run makes one",
+          source.index("appimagetool") < source.index("Build (Unix)"))
+    check("and the asset is checked for afterwards",
+          "no .AppImage was produced" in source)
+
+    root = Path(__file__).resolve().parents[1]
+    builder = (root / "packaging" / "build.py").read_text(encoding="utf-8")
+    tail = builder.split("def build_appimage")[1].split("\ndef ")[0]
+    check("the builder can be pointed at a copy that is not on PATH",
+          "IXD_APPIMAGETOOL" in tail)
+    check("it does not need FUSE to run the tool",
+          "APPIMAGE_EXTRACT_AND_RUN" in tail)
+    check("and it says loudly when no AppImage came out",
+          tail.count("NO .AppImage") >= 2, str(tail.count("NO .AppImage")))
+
+    built = sorted((root / "dist").glob("*.AppImage"))
+    if not built:
+        print("  (none built here; appimagetool is a CI-installed tool)")
+        return
+    raw = built[-1].read_bytes()
+    check("what was built is an ELF", raw[:4] == b"\x7fELF")
+    check("carrying the AppImage type-2 magic", raw[8:11] == b"AI\x02",
+          raw[8:11].hex())
+    check("named so it cannot be mistaken for the update archive",
+          built[-1].name.endswith("-linux-x86_64.AppImage")
+          and ".tar.gz" not in built[-1].name, built[-1].name)
 
 
 if __name__ == "__main__":

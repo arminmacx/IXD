@@ -248,6 +248,236 @@ def _desktop_entry() -> str:
     )
 
 
+# ----------------------------------------------------------------------
+# What the built tree actually needs from the system
+#
+# A .deb that declares no dependencies installs anywhere and may then refuse to
+# start, which is rule 4 in packaging form: it looks finished and does nothing.
+# The list is *measured* rather than written down, because PyInstaller bundles
+# most of Qt's world into ``_internal`` and which libraries it leaves behind
+# differs between build machines — a hand-kept list would be wrong the first
+# time the base image changed, and wrong silently.
+#
+# ELF is read here with the standard library, for the same reason every other
+# format in this project is: the Linux build runs inside whatever container
+# holds the glibc floor down, and ``objdump`` is not guaranteed to be in it.
+
+_ELF_MAGIC = b"\x7fELF"
+_DT_NEEDED = 1
+
+# soname → the Debian package that provides it.  Deliberately a superset of
+# what is measured today: if a different base image bundles less, the extra
+# entries are what keeps the answer right.  ``a | b`` is Debian's "either of
+# these" and covers the 64-bit time_t renames, which hit some of these names
+# in Ubuntu 24.04 and none of them in Debian 12.
+SONAME_PACKAGES: dict[str, str] = {
+    # the C library, and what used to be split out of it
+    "libc.so.6": "libc6", "libm.so.6": "libc6", "libdl.so.2": "libc6",
+    "ld-linux-x86-64.so.2": "libc6", "ld-linux-aarch64.so.1": "libc6",
+    "libpthread.so.0": "libc6", "libresolv.so.2": "libc6",
+    "librt.so.1": "libc6", "libutil.so.1": "libc6",
+    "libcrypt.so.1": "libcrypt1",
+    # the compiler runtime
+    "libstdc++.so.6": "libstdc++6", "libgcc_s.so.1": "libgcc-s1",
+    "libatomic.so.1": "libatomic1",
+    # graphics: what Qt's platform plugins open at start-up
+    "libGL.so.1": "libgl1", "libGLX.so.0": "libgl1",
+    "libGLdispatch.so.0": "libgl1", "libOpenGL.so.0": "libopengl0",
+    "libEGL.so.1": "libegl1", "libgbm.so.1": "libgbm1",
+    "libdrm.so.2": "libdrm2",
+    "libwayland-client.so.0": "libwayland-client0",
+    "libwayland-cursor.so.0": "libwayland-cursor0",
+    "libwayland-egl.so.1": "libwayland-egl1",
+    "libwayland-server.so.0": "libwayland-server0",
+    # X11 and xcb
+    "libX11.so.6": "libx11-6", "libX11-xcb.so.1": "libx11-xcb1",
+    "libxcb.so.1": "libxcb1", "libXau.so.6": "libxau6",
+    "libXdmcp.so.6": "libxdmcp6", "libXext.so.6": "libxext6",
+    "libXi.so.6": "libxi6", "libXfixes.so.3": "libxfixes3",
+    "libXrender.so.1": "libxrender1", "libXrandr.so.2": "libxrandr2",
+    "libXcursor.so.1": "libxcursor1", "libXcomposite.so.1": "libxcomposite1",
+    "libXdamage.so.1": "libxdamage1", "libXinerama.so.1": "libxinerama1",
+    "libXtst.so.6": "libxtst6", "libXRes.so.1": "libxres1",
+    "libxcb-cursor.so.0": "libxcb-cursor0", "libxcb-glx.so.0": "libxcb-glx0",
+    "libxcb-icccm.so.4": "libxcb-icccm4", "libxcb-image.so.0": "libxcb-image0",
+    "libxcb-keysyms.so.1": "libxcb-keysyms1",
+    "libxcb-randr.so.0": "libxcb-randr0", "libxcb-render.so.0": "libxcb-render0",
+    "libxcb-render-util.so.0": "libxcb-render-util0",
+    "libxcb-shape.so.0": "libxcb-shape0", "libxcb-shm.so.0": "libxcb-shm0",
+    "libxcb-sync.so.1": "libxcb-sync1", "libxcb-util.so.1": "libxcb-util1",
+    "libxcb-xfixes.so.0": "libxcb-xfixes0", "libxcb-xkb.so.1": "libxcb-xkb1",
+    "libxkbcommon.so.0": "libxkbcommon0",
+    "libxkbcommon-x11.so.0": "libxkbcommon-x11-0",
+    # the rest of the desktop, for whatever a base image declines to bundle
+    "libglib-2.0.so.0": "libglib2.0-0t64 | libglib2.0-0",
+    "libgobject-2.0.so.0": "libglib2.0-0t64 | libglib2.0-0",
+    "libgio-2.0.so.0": "libglib2.0-0t64 | libglib2.0-0",
+    "libgmodule-2.0.so.0": "libglib2.0-0t64 | libglib2.0-0",
+    "libgthread-2.0.so.0": "libglib2.0-0t64 | libglib2.0-0",
+    "libdbus-1.so.3": "libdbus-1-3",
+    "libfontconfig.so.1": "libfontconfig1",
+    "libfreetype.so.6": "libfreetype6",
+    "libexpat.so.1": "libexpat1",
+    "libz.so.1": "zlib1g", "libzstd.so.1": "libzstd1",
+    "libbz2.so.1.0": "libbz2-1.0", "liblzma.so.5": "liblzma5",
+    "libpng16.so.16": "libpng16-16t64 | libpng16-16",
+    "libharfbuzz.so.0": "libharfbuzz0b",
+    "libssl.so.3": "libssl3t64 | libssl3",
+    "libcrypto.so.3": "libssl3t64 | libssl3",
+    "libsqlite3.so.0": "libsqlite3-0",
+    "libffi.so.8": "libffi8",
+    "libsystemd.so.0": "libsystemd0",
+    "libselinux.so.1": "libselinux1", "libseccomp.so.2": "libseccomp2",
+    "libblkid.so.1": "libblkid1", "libmount.so.1": "libmount1",
+    "libpcre2-8.so.0": "libpcre2-8-0",
+    "libtinfo.so.6": "libtinfo6", "libreadline.so.8": "libreadline8t64 | libreadline8",
+}
+
+
+# Qt's image-format plugins each link their own codec, and the soname differs
+# between the distributions this package targets — Ubuntu 22.04 has
+# libtiff.so.5 where Debian 12 has libtiff.so.6.  Demanding either would make
+# the package refuse to install on half of them over a plugin nothing needs to
+# start, so these are Recommends: apt fetches them, dpkg does not insist.
+SONAME_OPTIONAL: dict[str, str] = {
+    "libtiff.so.5": "libtiff5 | libtiff6",
+    "libtiff.so.6": "libtiff6 | libtiff5",
+    "libjpeg.so.8": "libjpeg8 | libjpeg-turbo8",
+    "libjpeg.so.62": "libjpeg62-turbo | libjpeg62",
+    "libwebp.so.7": "libwebp7", "libwebp.so.6": "libwebp6",
+    "libwebpdemux.so.2": "libwebpdemux2", "libwebpmux.so.3": "libwebpmux3",
+    "libjasper.so.4": "libjasper4", "libmng.so.2": "libmng2",
+}
+
+
+def _elf_sections(data: bytes) -> dict[str, bytes] | None:
+    """Section name → bytes, for a 64-bit little-endian ELF; None otherwise."""
+    if len(data) < 64 or data[:4] != _ELF_MAGIC:
+        return None
+    if data[4] != 2 or data[5] != 1:          # ELFCLASS64, ELFDATA2LSB
+        return None
+
+    shoff = int.from_bytes(data[40:48], "little")
+    shentsize = int.from_bytes(data[58:60], "little")
+    shnum = int.from_bytes(data[60:62], "little")
+    shstrndx = int.from_bytes(data[62:64], "little")
+    if not shoff or not shnum or shentsize < 40 or shstrndx >= shnum:
+        return None
+    if shoff + shnum * shentsize > len(data):
+        return None
+
+    def header(index: int) -> tuple[int, int, int]:
+        base = shoff + index * shentsize
+        return (int.from_bytes(data[base:base + 4], "little"),        # sh_name
+                int.from_bytes(data[base + 24:base + 32], "little"),  # sh_offset
+                int.from_bytes(data[base + 32:base + 40], "little"))  # sh_size
+
+    _, names_offset, names_size = header(shstrndx)
+    names = data[names_offset:names_offset + names_size]
+
+    sections: dict[str, bytes] = {}
+    for index in range(shnum):
+        name_offset, offset, size = header(index)
+        end = names.find(b"\0", name_offset)
+        name = names[name_offset:end if end >= 0 else None].decode("ascii", "replace")
+        sections[name] = data[offset:offset + size]
+    return sections
+
+
+def _elf_requirements(path: Path) -> tuple[set[str], tuple[int, ...]]:
+    """The sonames this file needs, and the newest glibc it asks for."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return set(), ()
+    sections = _elf_sections(data)
+    if not sections:
+        return set(), ()
+    strings = sections.get(".dynstr", b"")
+
+    def text(offset: int) -> str:
+        end = strings.find(b"\0", offset)
+        return strings[offset:end if end >= 0 else None].decode("utf-8", "replace")
+
+    # DT_NEEDED entries in .dynamic name the libraries the loader must find.
+    needed: set[str] = set()
+    dynamic = sections.get(".dynamic", b"")
+    for base in range(0, len(dynamic) - 15, 16):
+        tag = int.from_bytes(dynamic[base:base + 8], "little")
+        if tag == 0:                                   # DT_NULL ends the table
+            break
+        if tag == _DT_NEEDED:
+            needed.add(text(int.from_bytes(dynamic[base + 8:base + 16], "little")))
+
+    # .gnu.version_r is where "this binary calls a glibc 2.38 symbol" is
+    # written down, and it is the only honest source for the floor: the
+    # loader refuses the file on anything older, whatever the package says.
+    floor: tuple[int, ...] = ()
+    verneed = sections.get(".gnu.version_r", b"")
+    cursor = 0
+    while cursor + 16 <= len(verneed):
+        count = int.from_bytes(verneed[cursor + 2:cursor + 4], "little")
+        aux = cursor + int.from_bytes(verneed[cursor + 8:cursor + 12], "little")
+        following = int.from_bytes(verneed[cursor + 12:cursor + 16], "little")
+        for _ in range(count):
+            if aux + 16 > len(verneed):
+                break
+            name = text(int.from_bytes(verneed[aux + 8:aux + 12], "little"))
+            if name.startswith("GLIBC_"):
+                try:
+                    version = tuple(int(part) for part in name[6:].split("."))
+                except ValueError:
+                    version = ()                       # GLIBC_PRIVATE and such
+                if version > floor:
+                    floor = version
+            step = int.from_bytes(verneed[aux + 12:aux + 16], "little")
+            if not step:
+                break
+            aux += step
+        if not following:
+            break
+        cursor += following
+    return needed, floor
+
+
+def dependency_survey(
+    binary_dir: Path,
+) -> tuple[list[str], list[str], tuple[int, ...], list[str]]:
+    """(required packages, recommended packages, glibc floor, unmapped sonames)."""
+    bundled: set[str] = set()
+    files: list[Path] = []
+    for path in binary_dir.rglob("*"):
+        if path.is_symlink():
+            bundled.add(path.name)
+        elif path.is_file():
+            bundled.add(path.name)
+            files.append(path)
+
+    needed: set[str] = set()
+    floor: tuple[int, ...] = ()
+    for path in files:
+        sonames, version = _elf_requirements(path)
+        needed |= sonames
+        if version > floor:
+            floor = version
+
+    packages: list[str] = []
+    optional: list[str] = []
+    unmapped: list[str] = []
+    for soname in sorted(needed - bundled):
+        if soname in SONAME_OPTIONAL:
+            package = SONAME_OPTIONAL[soname]
+            if package not in optional:
+                optional.append(package)
+            continue
+        package = SONAME_PACKAGES.get(soname)
+        if package is None:
+            unmapped.append(soname)
+        elif package not in packages:
+            packages.append(package)
+    return sorted(packages), sorted(optional), floor, unmapped
+
+
 def _ar_entry(name: str, data: bytes) -> bytes:
     """One member of a Unix ``ar`` archive (the container a .deb uses)."""
     header = (
@@ -273,6 +503,24 @@ def build_deb(binary_dir: Path) -> Path | None:
         f.stat().st_size for f in binary_dir.rglob("*") if f.is_file()
     ) // 1024
 
+    # Measured from the tree that was just built, not written down here: see
+    # dependency_survey().  Both outcomes are logged — a survey that found
+    # nothing and one that was never asked look identical otherwise.
+    required, recommended, floor, unmapped = dependency_survey(binary_dir)
+    if floor:
+        glibc = ".".join(str(part) for part in floor)
+        required = [f"libc6 (>= {glibc})"] + [p for p in required if p != "libc6"]
+        log(f"needs glibc {glibc} or newer — that is the oldest system this "
+            f"package will install on")
+    else:
+        log("no glibc version requirement could be read from the binaries")
+    log(f"Depends: {', '.join(required)}")
+    if recommended:
+        log(f"Recommends: {', '.join(recommended)}")
+    for soname in unmapped:
+        log(f"! {soname} is needed and no package is mapped to it — "
+            f"NOT declared; add it to SONAME_PACKAGES")
+
     control = (
         f"Package: {APP_NAME}\n"
         f"Version: {VERSION}\n"
@@ -281,7 +529,9 @@ def build_deb(binary_dir: Path) -> Path | None:
         f"Architecture: {architecture}\n"
         f"Installed-Size: {installed_size}\n"
         f"Maintainer: {MAINTAINER}\n"
-        f"Description: {DESCRIPTION}\n"
+        + (f"Depends: {', '.join(required)}\n" if required else "")
+        + (f"Recommends: {', '.join(recommended)}\n" if recommended else "")
+        + f"Description: {DESCRIPTION}\n"
         "  Multi-threaded, resumable download manager with dynamic chunking,\n"
         "  native media extraction, proxy rotation and browser integration.\n"
     )
@@ -391,16 +641,30 @@ def build_appimage(binary_dir: Path) -> Path | None:
     apprun.chmod(apprun.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     log(f"assembled {appdir.name}")
 
-    if not have("appimagetool"):
-        log("appimagetool not found — the AppDir is ready; install appimagetool "
-            "to produce a single-file .AppImage")
+    # appimagetool takes the icon from .DirIcon and only guesses without it.
+    if icon.exists():
+        shutil.copy(icon, appdir / ".DirIcon")
+
+    # appimagetool ships as an AppImage itself and so wants FUSE, which a CI
+    # runner and a build container generally do not have;
+    # APPIMAGE_EXTRACT_AND_RUN makes it unpack itself and run from a temporary
+    # directory instead.  IXD_APPIMAGETOOL names a copy that is not on PATH.
+    tool = os.environ.get("IXD_APPIMAGETOOL") or shutil.which("appimagetool")
+    if not tool:
+        log("appimagetool was NOT found, so NO .AppImage was produced — the "
+            "AppDir is ready. Install appimagetool, or point "
+            "IXD_APPIMAGETOOL at a copy.")
         return None
 
-    target = DIST / f"{BUNDLE_NAME.replace(' ', '_')}-{VERSION}-x86_64.AppImage"
-    if run(["appimagetool", str(appdir), str(target)]) != 0:
-        log("appimagetool failed — the AppDir is still usable")
+    target = DIST / f"{APP_NAME}-{VERSION}-linux-x86_64.AppImage"
+    target.unlink(missing_ok=True)
+    log(f"appimagetool: {tool}")
+    environment = dict(os.environ, APPIMAGE_EXTRACT_AND_RUN="1", ARCH="x86_64")
+    if run([str(tool), str(appdir), str(target)], env=environment) != 0:
+        log("appimagetool FAILED, so NO .AppImage was produced — the AppDir is "
+            "still usable")
         return None
-    log(f"wrote {target.name}")
+    log(f"wrote {target.name} ({target.stat().st_size / 1048576:.1f} MB)")
     return target
 
 
