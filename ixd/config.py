@@ -179,7 +179,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # fifty lines that describe the fault.
     "clear_log_on_launch": True,
     # How much of the log to keep across restarts, when the above is off.
-    "log_lines_kept": 2000,
+    # Kept by size rather than by row count: "2000 lines" means nothing to
+    # anyone deciding how much disk to give it, and one captured Instagram
+    # address is longer than fifty ordinary lines.
+    "log_size_limited": True,
+    "log_megabytes_kept": 5.0,
     # Rewrite an assembled MPEG transport stream as an MP4. Every frame is
     # copied; only the packaging changes. Off means keeping the `.ts` the site
     # actually served.

@@ -579,7 +579,16 @@ class DownloadService:
         elif self.settings.get_bool("clear_log_on_launch", True):
             self.db.clear_events()
         else:
-            self.db.prune_events(self.settings.get_int("log_lines_kept", 2000))
+            # Unticked means unlimited, deliberately: somebody keeping a log
+            # to catch something intermittent does not want it thrown away
+            # halfway through the night.
+            if self.settings.get_bool("log_size_limited", True):
+                budget = self.settings.get_float("log_megabytes_kept", 5.0)
+                if self.db.rotate_events_at_size(budget):
+                    self.db.log_event(
+                        f"The log reached {budget:g} MB, so it was emptied and "
+                        f"started again. Settings → General changes the limit, "
+                        f"or turns it off for an unlimited log.")
         # What a finished update left behind. Age-gated, so an installer still
         # running is never swept out from under itself; reported either way,
         # because a sweep that only speaks when it finds something looks

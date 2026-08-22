@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QDoubleSpinBox,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -762,20 +763,41 @@ class SettingsDialog(QDialog):
         # a window that opens by itself at every login is why this gets turned
         # off again.
         self.launch_at_startup = QCheckBox(
-            "Launch when I sign in, minimised to the tray"
+            "Launch when I sign in"
         )
         self.launch_at_startup.setChecked(
             self.settings.get_bool("launch_at_startup", False)
         )
         self.launch_at_startup.setToolTip(
-            "The engine is up and the tray icon is there, with no window "
-            "until you ask for one — so a download started from the browser "
+            "Starts with the machine, so a download clicked in the browser "
             "does not have to wait for the application to be launched."
         )
         behaviour_form.addRow("", self.launch_at_startup)
 
-        self.minimize_tray = QCheckBox("Minimise to the system tray")
+        # Three ticks that all said "tray" and gave no way to tell them apart —
+        # "Launch when I sign in, minimised to the tray" and "Minimise to the
+        # system tray" were reported as two settings for the same thing. They
+        # are three different *moments*: starting up, pressing minimise, and
+        # pressing close. Each label now names its own.
+        #
+        # `start_minimized` was the one doing the work in the first label and
+        # it had no control at all, so the behaviour could not be turned off
+        # without also giving up launching at sign-in.
+        self.start_minimized = QCheckBox("Start with no window, just the tray icon")
+        self.start_minimized.setChecked(
+            self.settings.get_bool("start_minimized", False))
+        self.start_minimized.setToolTip(
+            "The engine is up and the tray icon is there, with no window until "
+            "you ask for one — so a download started from the browser does not "
+            "have to wait for the application to be launched.")
+        behaviour_form.addRow("", self.start_minimized)
+
+        self.minimize_tray = QCheckBox(
+            "Minimise to the tray rather than the taskbar")
         self.minimize_tray.setChecked(self.settings.get_bool("minimize_to_tray", True))
+        self.minimize_tray.setToolTip(
+            "What the minimise button does. Untick it and the window minimises "
+            "to the taskbar like any other.")
         behaviour_form.addRow("", self.minimize_tray)
 
         self.close_tray = QCheckBox("Keep running in the tray when the window is closed")
@@ -818,6 +840,31 @@ class SettingsDialog(QDialog):
             "is already there."
         )
         log_form.addRow("", self.keep_log)
+
+        # Ticked, the log fills to the size below and then starts again from
+        # nothing. Unticked it grows without limit, which is what somebody
+        # chasing an intermittent fault overnight actually wants.
+        self.log_size_limited = QCheckBox("Start a new log once it reaches")
+        self.log_size_limited.setChecked(
+            self.settings.get_bool("log_size_limited", True))
+        self.log_size_limited.setToolTip(
+            "The log fills up to this size, then is emptied and begins again. "
+            "Unticked, it keeps everything and grows without limit.")
+
+        self.log_size = QDoubleSpinBox()
+        self.log_size.setRange(0.5, 500.0)
+        self.log_size.setSingleStep(1.0)
+        self.log_size.setDecimals(1)
+        self.log_size.setSuffix(" MB")
+        self.log_size.setValue(self.settings.get_float("log_megabytes_kept", 5.0))
+        self.log_size.setToolTip(
+            "The oldest entries are dropped once the log passes this. Measured "
+            "in megabytes rather than lines because lines here are not a "
+            "uniform size — one captured address can be longer than fifty "
+            "ordinary entries.")
+        self.log_size.setEnabled(self.log_size_limited.isChecked())
+        self.log_size_limited.toggled.connect(self.log_size.setEnabled)
+        log_form.addRow(self.log_size_limited, self.log_size)
 
         self.clear_log_on_launch = QCheckBox("Start each launch with an empty log")
         self.clear_log_on_launch.setChecked(
@@ -1773,6 +1820,9 @@ class SettingsDialog(QDialog):
             "minimize_to_tray": self.minimize_tray.isChecked(),
             "close_to_tray": self.close_tray.isChecked(),
             "show_download_window": self.show_download_window.isChecked(),
+            "start_minimized": self.start_minimized.isChecked(),
+            "log_size_limited": self.log_size_limited.isChecked(),
+            "log_megabytes_kept": float(self.log_size.value()),
             "notify_on_complete": self.notify.isChecked(),
             "keep_log": self.keep_log.isChecked(),
             "clear_log_on_launch": self.clear_log_on_launch.isChecked(),

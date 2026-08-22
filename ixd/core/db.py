@@ -649,6 +649,31 @@ class Database:
             (keep,),
         )
 
+    def events_size(self) -> int:
+        """Roughly what the log occupies, in bytes."""
+        row = self.conn.execute(
+            "SELECT SUM(LENGTH(message) + LENGTH(level) + 32) FROM events"
+        ).fetchone()
+        return int(row[0] or 0)
+
+    def rotate_events_at_size(self, megabytes: float) -> bool:
+        """Empty the log once it reaches its budget. True when it was emptied.
+
+        **Not a sliding window.** The log fills to the size that was asked for
+        and then starts again from nothing, which is what was asked for: a run
+        of the log is a contiguous record of one stretch of use, and a window
+        that silently drops its own beginning is harder to read a fault out of.
+
+        Size rather than a row count, because lines here are not a uniform
+        length — one captured Instagram address runs past 900 characters,
+        longer than fifty ordinary entries — so "2000 lines" could mean 200 KB
+        or 2 MB and nobody choosing a limit could tell which.
+        """
+        if self.events_size() < max(1, int(megabytes * 1024 * 1024)):
+            return False
+        self._execute("DELETE FROM events")
+        return True
+
     # ------------------------------------------------------------------
     # maintenance
     # ------------------------------------------------------------------

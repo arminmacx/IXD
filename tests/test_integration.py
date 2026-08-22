@@ -7387,6 +7387,7 @@ def main() -> int:
         check_every_older_build_still_finds_its_update,
         check_a_setting_the_code_honours_can_be_reached,
         check_the_deb_is_one_dpkg_will_actually_unpack,
+        check_the_tray_settings_say_which_moment_they_mean,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8905,6 +8906,109 @@ def check_the_deb_is_one_dpkg_will_actually_unpack() -> None:
               and (into / "usr" / "bin" / "ixd").exists())
     finally:
         shutil.rmtree(into, ignore_errors=True)
+
+
+def check_the_tray_settings_say_which_moment_they_mean() -> None:
+    """Three ticks all said "tray" and two of them read as the same setting.
+
+    Reported: *"now we have launch when i signin, minimise to tray and
+    minimise to system tray and im confused why we have 2"*. They govern three
+    different **moments** — starting up, pressing minimise, pressing close —
+    and the first label was doing two jobs at once: it said "minimised to the
+    tray", which is `start_minimized`, a setting that had no control of its own
+    and so could not be turned off without giving up launching at sign-in.
+
+    The log budget moved with them: a row count is the wrong unit when one
+    captured Instagram address is longer than fifty ordinary lines.
+    """
+    print("\n[the tray settings say which moment they mean]")
+    from PySide6.QtWidgets import QApplication
+    from ixd.ui.widgets.settings_dialog import SettingsDialog
+    from ixd.service import DownloadService
+    from ixd import config
+
+    application = QApplication.instance() or QApplication([])
+    home = Path(tempfile.mkdtemp(prefix="ixd-tray-"))
+    previous = os.environ.get("IXD_HOME")
+    os.environ["IXD_HOME"] = str(home)
+    try:
+        dialog = SettingsDialog(DownloadService())
+        labels = [w.text() for w in (dialog.launch_at_startup,
+                                     dialog.start_minimized,
+                                     dialog.minimize_tray,
+                                     dialog.close_tray)]
+        check("there are four of them and no two read the same",
+              len(set(labels)) == 4, str(labels))
+        check("only one mentions starting up",
+              sum("sign in" in t.lower() or "start" in t.lower()
+                  for t in labels) == 2, str(labels))
+        check("the one that used to do two jobs now names only one",
+              "minimis" not in labels[0].lower(), labels[0])
+        check("the log budget is offered in megabytes",
+              dialog.log_size.suffix().strip().lower() == "mb",
+              dialog.log_size.suffix())
+        check("with a tick that turns the limit off altogether",
+              dialog.log_size_limited.isChecked()
+              and dialog.log_size.isEnabled())
+        dialog.log_size_limited.setChecked(False)
+        check("and the size stops applying when it is off",
+              not dialog.log_size.isEnabled())
+        dialog.deleteLater()
+    finally:
+        if previous is None:
+            os.environ.pop("IXD_HOME", None)
+        else:
+            os.environ["IXD_HOME"] = previous
+        shutil.rmtree(home, ignore_errors=True)
+
+    dialog_source = (Path(__file__).resolve().parents[1] / "ixd" / "ui"
+                     / "widgets" / "settings_dialog.py").read_text(encoding="utf-8")
+    for key in ("start_minimized", "log_megabytes_kept", "log_size_limited"):
+        check(f"{key} is written back when the dialog is accepted",
+              f'"{key}": ' in dialog_source, key)
+    check("and QDoubleSpinBox is imported, not merely used",
+          "QDoubleSpinBox,\n" in dialog_source)
+    check("the old line-count setting is gone from the defaults",
+          "log_lines_kept" not in config.DEFAULT_SETTINGS)
+
+    # The rotation itself, against a real database. Fill to the size, then
+    # start again — deliberately not a sliding window, which would silently
+    # drop its own beginning.
+    from ixd.core.db import Database
+    scratch = Path(tempfile.mkdtemp(prefix="ixd-rotate-"))
+    try:
+        db = Database(scratch / "t.db")
+        for index in range(1500):
+            db.log_event("x" * 200 + f" entry {index}")
+        filled = db.events_size()
+        check("the log reports its own size", filled > 0, str(filled))
+
+        check("under the limit, nothing is thrown away",
+              db.rotate_events_at_size(filled / 1048576 * 2) is False
+              and len(db.recent_events(100000)) == 1500,
+              str(len(db.recent_events(100000))))
+
+        check("at the limit, it starts again from nothing",
+              db.rotate_events_at_size(0.1) is True
+              and db.recent_events(100000) == [],
+              str(len(db.recent_events(100000))))
+
+        db.log_event("after the rotation")
+        check("and it keeps logging afterwards",
+              any("after the rotation" in r["message"]
+                  for r in db.recent_events(10)))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    # Unticked is unlimited, and the service must honour that rather than
+    # falling back to a default budget.
+    service_source = (Path(__file__).resolve().parents[1]
+                      / "ixd" / "service.py").read_text(encoding="utf-8")
+    check("nothing is rotated unless the limit is switched on",
+          'get_bool("log_size_limited"' in service_source
+          and service_source.index('get_bool("log_size_limited"')
+              < service_source.index("rotate_events_at_size"),
+          "the size check does not gate the rotation")
 
 
 if __name__ == "__main__":
