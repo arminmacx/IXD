@@ -581,51 +581,104 @@ def build_deb(binary_dir: Path) -> Path | None:
 
     # -- data.tar.gz --------------------------------------------------
     data_buffer = io.BytesIO()
-    with tarfile.open(fileobj=data_buffer, mode="w:gz") as archive:
+    # **GNU format, not Python's default.** `tarfile` writes PAX since 3.8, and
+    # a PAX extended header — type 'x', which is how it carries a path longer
+    # than 100 characters — is something dpkg refuses outright:
+    #
+    #   corrupted filesystem tarfile in package archive:
+    #   unsupported PAX tar header type 'x'
+    #
+    # Our paths (./opt/ixd/_internal/PySide6/Qt/lib/…) are well past 100, so
+    # this is not an edge case. GNU format is what every real .deb uses.
+    with tarfile.open(fileobj=data_buffer, mode="w:gz",
+                      format=tarfile.GNU_FORMAT) as archive:
+        # **Directories have to be declared.** dpkg unpacks the entries in the
+        # order it finds them and will not invent a parent it was never told
+        # about; every .deb this project published up to 1.0.44 contained 369
+        # file entries and not one directory, so `dpkg -i` failed on the very
+        # first file:
+        #
+        #   unable to create '/opt/ixd/_internal/…/libQt6Core.so.6.dpkg-new'
+        #   (while processing './opt/ixd/…'): No such file or directory
+        #
+        # which apt reports only as "Sub-process /usr/bin/dpkg returned an
+        # error code (1)". Reported from a real Ubuntu 22.04 install and a
+        # container, and reproduced here with `dpkg --root` into a temporary
+        # directory — the tool that reads it, not the one that wrote it.
+        stamp = int(time.time())
+        declared: set[str] = set()
+
+        def add_directory(name: str) -> None:
+            """Declare a directory, and every parent above it, exactly once."""
+            name = name.rstrip("/")
+            if not name or name in (".", "./") or name in declared:
+                return
+            parent = name.rsplit("/", 1)[0]
+            if parent and parent != name:
+                add_directory(parent)
+            declared.add(name)
+            info = tarfile.TarInfo(name + "/")
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            info.mtime = stamp
+            archive.addfile(info)
+
+        def add_file(name: str, data: bytes, mode: int) -> None:
+            add_directory(name.rsplit("/", 1)[0])
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = mode
+            info.mtime = stamp
+            archive.addfile(info, io.BytesIO(data))
+
         def add_tree(source: Path, prefix: str) -> None:
+            add_directory(prefix)
             for path in sorted(source.rglob("*")):
-                if not path.is_file():
-                    continue
-                info = tarfile.TarInfo(f"{prefix}/{path.relative_to(source)}")
-                data = path.read_bytes()
-                info.size = len(data)
-                info.mode = 0o755 if (path.stat().st_mode & stat.S_IXUSR) else 0o644
-                info.mtime = int(time.time())
-                archive.addfile(info, io.BytesIO(data))
+                name = f"{prefix}/{path.relative_to(source)}"
+                # A symlink is copied *as a symlink*. `is_file()` follows one,
+                # so a link to a library was being written out as a second
+                # full copy of it, and a link to a directory vanished.
+                if path.is_symlink():
+                    add_directory(name.rsplit("/", 1)[0])
+                    info = tarfile.TarInfo(name)
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = os.readlink(path)
+                    info.mode = 0o777
+                    info.mtime = stamp
+                    archive.addfile(info)
+                elif path.is_dir():
+                    add_directory(name)
+                elif path.is_file():
+                    add_file(name, path.read_bytes(),
+                             0o755 if (path.stat().st_mode & stat.S_IXUSR)
+                             else 0o644)
 
         add_tree(binary_dir, f"./opt/{APP_NAME}")
 
-        desktop = _desktop_entry().encode("utf-8")
-        info = tarfile.TarInfo(f"./usr/share/applications/{APP_NAME}.desktop")
-        info.size = len(desktop)
-        info.mode = 0o644
-        info.mtime = int(time.time())
-        archive.addfile(info, io.BytesIO(desktop))
+        # Through `add_file` like everything else, so /usr/share/applications,
+        # /usr/share/icons/hicolor/<size>/apps and /usr/bin are declared as
+        # well. Written by hand, these three had the same missing-parent
+        # defect as the tree above.
+        add_file(f"./usr/share/applications/{APP_NAME}.desktop",
+                 _desktop_entry().encode("utf-8"), 0o644)
 
         for size in (16, 32, 64, 128, 256):
             icon = ROOT / "packaging" / "icons" / f"ixd-{size}.png"
             if not icon.exists():
                 continue
-            data = icon.read_bytes()
-            info = tarfile.TarInfo(
-                f"./usr/share/icons/hicolor/{size}x{size}/apps/{APP_NAME}.png"
-            )
-            info.size = len(data)
-            info.mode = 0o644
-            info.mtime = int(time.time())
-            archive.addfile(info, io.BytesIO(data))
+            add_file(
+                f"./usr/share/icons/hicolor/{size}x{size}/apps/{APP_NAME}.png",
+                icon.read_bytes(), 0o644)
 
-        # /usr/bin symlink target
-        launcher = f"#!/bin/sh\nexec /opt/{APP_NAME}/{APP_NAME} \"$@\"\n".encode()
-        info = tarfile.TarInfo(f"./usr/bin/{APP_NAME}")
-        info.size = len(launcher)
-        info.mode = 0o755
-        info.mtime = int(time.time())
-        archive.addfile(info, io.BytesIO(launcher))
+        # What puts `ixd` on the PATH.
+        add_file(f"./usr/bin/{APP_NAME}",
+                 f"#!/bin/sh\nexec /opt/{APP_NAME}/{APP_NAME} \"$@\"\n".encode(),
+                 0o755)
 
     # -- control.tar.gz -----------------------------------------------
     control_buffer = io.BytesIO()
-    with tarfile.open(fileobj=control_buffer, mode="w:gz") as archive:
+    with tarfile.open(fileobj=control_buffer, mode="w:gz",
+                      format=tarfile.GNU_FORMAT) as archive:
         for name, text, mode in (
             ("./control", control, 0o644),
             ("./postinst", postinst, 0o755),

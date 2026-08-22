@@ -8,6 +8,7 @@ Run with:  python -m tests.test_integration
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -7385,6 +7386,7 @@ def main() -> int:
         check_the_hand_over_window_gets_in_front,
         check_every_older_build_still_finds_its_update,
         check_a_setting_the_code_honours_can_be_reached,
+        check_the_deb_is_one_dpkg_will_actually_unpack,
                  test_the_icons_are_registered_as_a_theme,
                  test_a_downloads_window_stands_on_its_own,
                  test_a_status_poll_never_starts_the_application,
@@ -8803,6 +8805,102 @@ def check_a_setting_the_code_honours_can_be_reached() -> None:
               f"never opens Settings",
               config.DEFAULT_SETTINGS.get(key) is True,
               repr(config.DEFAULT_SETTINGS.get(key)))
+
+
+def check_the_deb_is_one_dpkg_will_actually_unpack() -> None:
+    """Every .deb published up to 1.0.44 was uninstallable, on any machine.
+
+    Reported from a real Ubuntu 22.04 and from a container as
+    `E: Sub-process /usr/bin/dpkg returned an error code (1)` — which says
+    nothing. Run directly, dpkg says what it means:
+
+        unable to create '/opt/ixd/_internal/…/libQt6Core.so.6.dpkg-new'
+        (while processing './opt/ixd/…'): No such file or directory
+
+    Two defects, and the package's own parser was happy with both — §3.42's
+    rule, that a file generated for another program has to be checked with
+    that program:
+
+    1. **No directory entries.** 369 file entries and not one directory. dpkg
+       unpacks in order and will not invent a parent it was not told about.
+    2. **PAX headers.** `tarfile` writes PAX since Python 3.8, and dpkg
+       refuses `unsupported PAX tar header type 'x'`. Paths here run well past
+       the 100 characters that trigger one.
+
+    Symlinks were being followed and written out as second full copies of what
+    they pointed at, which is why the package lost 36 MB when they became
+    links again.
+    """
+    print("\n[the .deb is one dpkg will actually unpack]")
+    root = Path(__file__).resolve().parents[1]
+    packages = sorted((root / "dist").glob("ixd_*_amd64.deb"))
+    if not packages:
+        print("  (no .deb built here; nothing to check)")
+        return
+    package = packages[-1]
+
+    import tarfile as _tarfile
+    raw = package.read_bytes()
+    at, data = 8, b""
+    while at + 60 <= len(raw):
+        name = raw[at:at + 16].decode("ascii", "replace").strip()
+        size = int(raw[at + 48:at + 58].decode("ascii", "replace").strip())
+        if name.startswith("data.tar"):
+            data = raw[at + 60:at + 60 + size]
+            break
+        at += 60 + size + (size % 2)
+    check("the data member is there", bool(data))
+    if not data:
+        return
+
+    with _tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        members = archive.getmembers()
+    directories = [m for m in members if m.isdir()]
+    links = [m for m in members if m.issym()]
+    files = [m for m in members if m.isfile()]
+    check("it declares directories, not only files", bool(directories),
+          f"{len(files)} files, {len(directories)} directories")
+    check("including the one every other path hangs from",
+          any(m.name.rstrip("/") == "./opt/ixd" for m in directories))
+    check("and the ones the desktop entry and icons need",
+          any(m.name.rstrip("/").endswith("share/applications") for m in directories)
+          and any(m.name.rstrip("/").endswith("256x256/apps") for m in directories))
+    check("a parent is declared before anything inside it",
+          all(any(d.name.rstrip("/") == m.name.rsplit("/", 1)[0]
+                  for d in directories)
+              for m in files if "/" in m.name.strip("./")),
+          "some file has no declared parent")
+    check("symlinks stay symlinks rather than becoming second copies",
+          bool(links), f"{len(links)} symlinks")
+
+    # PAX headers are what dpkg refuses; GNU is what a real .deb uses.
+    check("no PAX extended headers anywhere in it",
+          b"PaxHeader" not in gzip.decompress(data), "a PAX header is present")
+
+    # And the tool that reads it, not the one that wrote it (§3.42, rule 5).
+    if not shutil.which("dpkg"):
+        print("  (dpkg is not installed here; the structure was checked "
+              "without it)")
+        return
+    into = Path(tempfile.mkdtemp(prefix="ixd-dpkg-"))
+    try:
+        for folder in ("info", "updates", "triggers"):
+            (into / "var" / "lib" / "dpkg" / folder).mkdir(parents=True)
+        (into / "var" / "lib" / "dpkg" / "status").touch()
+        (into / "var" / "lib" / "dpkg" / "available").touch()
+        done = subprocess.run(
+            ["dpkg", "--root", str(into), "--force-not-root",
+             "--force-script-chrootless", "--unpack", str(package)],
+            capture_output=True, text=True, timeout=300)
+        noise = (done.stdout + done.stderr).replace("\n", " ")
+        check("dpkg unpacks it without an error",
+              "error processing archive" not in noise
+              and "corrupted" not in noise, noise[-300:])
+        check("and the launcher is on disk afterwards",
+              (into / "opt" / "ixd" / "ixd").exists()
+              and (into / "usr" / "bin" / "ixd").exists())
+    finally:
+        shutil.rmtree(into, ignore_errors=True)
 
 
 if __name__ == "__main__":
