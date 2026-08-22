@@ -8481,6 +8481,13 @@ def check_the_package_declares_what_it_needs() -> None:
         check("so is the OpenGL library Qt's platform plugin opens",
               "libgl1" in required, str(required))
         check("the floor is a real version", bool(floor), str(floor))
+
+        # One bundled file set the whole package's floor to 2.35 on a 2.34
+        # base, locking out Ubuntu 22.04 and RHEL 9. libgcc_s is ABI-stable
+        # and on every Linux, so it is left to the system and declared.
+        check("libgcc_s is not bundled, it is declared",
+              not list((binary / "_internal").glob("libgcc_s.so*"))
+              and "libgcc-s1" in required, str(required))
     else:
         print("  (no dist/ixd; the survey is exercised on the interpreter only)")
 

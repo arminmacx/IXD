@@ -111,6 +111,17 @@ exe = EXE(
     icon=icon_file,
 )
 
+# Some libraries are worse inside the package than out of it. `libgcc_s.so.1`
+# is ABI-stable and present on every Linux ever shipped, so bundling it buys
+# nothing — and the copy that comes with a modern build toolchain references
+# glibc 2.35, which on its own raised the whole package's floor above the
+# 2.34 base it was built on and locked out Ubuntu 22.04 and RHEL 9. One file
+# out of 113, found by asking which ones set the floor.
+if sys.platform.startswith("linux"):
+    _LEAVE_TO_THE_SYSTEM = {"libgcc_s.so.1"}
+    a.binaries = [entry for entry in a.binaries
+                  if Path(entry[0]).name not in _LEAVE_TO_THE_SYSTEM]
+
 coll = COLLECT(
     exe,
     a.binaries,
