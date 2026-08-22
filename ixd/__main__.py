@@ -452,6 +452,13 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
         server.register(
             "add_media",
             lambda params: _ask_before_adding_media(service, window, params))
+        # Two captured halves of one clip. This was registered with **no
+        # wrapper at all**, so choosing a row in the page's panel went straight
+        # to the engine — reported as "even after i have ask before each
+        # download checked it didnt ask and just start the download itself".
+        server.register(
+            "add_pair",
+            lambda params: _ask_before_adding_pair(service, window, params))
 
     for url in urls:
         try:
@@ -591,6 +598,31 @@ def _ask_before_adding_media(service, window, params: dict) -> dict:
         _on_the_window(window, lambda: window.media_download_delegated(token))
         return payload
 
+    _on_the_window(window, lambda: window.media_download_ready(token, dict(payload)))
+    return {**payload, "confirming": True}
+
+
+def _ask_before_adding_pair(service, window, params):
+    """The same question `add` asks, for a pair the browser already fetched.
+
+    The window understands a pair already — it is the one a quality chosen in
+    the page opens — so this adds the two halves **paused**, shows it, and
+    lets the answer start them.
+    """
+    if not service.settings.get_bool("confirm_browser_downloads", True):
+        result = service.handle_command("add_pair", params)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "could not add the download"))
+        return result["result"]
+
+    token = f"pair-{time.time_ns()}"
+    _on_the_window(window, lambda: window.confirm_media_download(token, dict(params)))
+    result = service.handle_command("add_pair", {**params, "start": False})
+    if not result.get("ok"):
+        error = str(result.get("error") or "the download could not be added")
+        _on_the_window(window, lambda: window.media_download_failed(token, error))
+        raise RuntimeError(error)
+    payload = result["result"] or {}
     _on_the_window(window, lambda: window.media_download_ready(token, dict(payload)))
     return {**payload, "confirming": True}
 

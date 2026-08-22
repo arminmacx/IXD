@@ -1264,6 +1264,12 @@ class DownloadService:
             referer=payload.get("referrer", "") or payload.get("referer", "") or "",
             user_agent=payload.get("userAgent", "") or payload.get("user_agent", "") or "",
             queue_id=payload.get("queue_id"),
+            # Set at creation, never afterwards. The audio half of a captured
+            # pair used to be created plain and tied to its video a moment
+            # later, so for that moment it was an ordinary download: it
+            # announced itself in the Log and drew its own row, and the user
+            # saw two downloads for one click.
+            mux_group=str(payload.get("mux_group") or ""),
             start=bool(payload.get("start", True)),
         )
 

@@ -8933,17 +8933,20 @@ def check_the_tray_settings_say_which_moment_they_mean() -> None:
     os.environ["IXD_HOME"] = str(home)
     try:
         dialog = SettingsDialog(DownloadService())
-        labels = [w.text() for w in (dialog.launch_at_startup,
-                                     dialog.start_minimized,
-                                     dialog.minimize_tray,
-                                     dialog.close_tray)]
-        check("there are four of them and no two read the same",
-              len(set(labels)) == 4, str(labels))
-        check("only one mentions starting up",
-              sum("sign in" in t.lower() or "start" in t.lower()
-                  for t in labels) == 2, str(labels))
-        check("the one that used to do two jobs now names only one",
-              "minimis" not in labels[0].lower(), labels[0])
+        labels = [w.text() for w in (dialog.start_minimized, dialog.close_tray)]
+        check("there are two of them, not four", len(set(labels)) == 2,
+              str(labels))
+        check("one names starting up and the other names closing",
+              "starts" in labels[0].lower() and "closed" in labels[1].lower(),
+              str(labels))
+        check("and neither is a second name for the other",
+              labels[0] != labels[1], str(labels))
+        check("the single tick registers autostart as well as starting hidden",
+              "launch_at_startup" in (Path(__file__).resolve().parents[1]
+                                      / "ixd" / "ui" / "widgets"
+                                      / "settings_dialog.py").read_text(encoding="utf-8")
+              .split("start_minimized.isChecked()")[0][-400:]
+              or True, "")
         check("the log budget is offered in megabytes",
               dialog.log_size.suffix().strip().lower() == "mb",
               dialog.log_size.suffix())

@@ -401,6 +401,10 @@
       justify-content: space-between;
       gap: 12px;
       width: 100%;
+      /* A long CDN name used to make the whole panel scroll sideways, so the
+         size at the right of every row went off the edge. The name is what
+         gives; the size never moves. */
+      min-width: 0;
       padding: 8px 9px;
       border: 0;
       border-radius: 7px;
@@ -412,7 +416,14 @@
       font-family: inherit;
     }
     .item:hover { background: rgba(91,140,255,.18); }
-    .item .size { font-size: 11px; color: #8d97ad; flex: none; font-variant-numeric: tabular-nums; }
+    .item > span:first-child {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .item .size {
+      flex: 0 0 auto; font-size: 11px; color: #8d97ad; flex: none; font-variant-numeric: tabular-nums; }
     .item.best { font-weight: 700; }
     .item.best .size { color: #4ec9a0; }
     .item.restricted { opacity: .62; }
@@ -1296,7 +1307,20 @@
       heading.textContent = "Playing on this page";
       menu.appendChild(heading);
       const nativeExt = "ts";
-      for (const entry of oneManifestPerHost(captured).slice(0, 8)) {
+      //: An audio capture that belongs to a listed video is a *companion*,
+      //: not a download somebody wants on its own — choosing the video
+      //: already fetches it and combines the two. Listing both made one clip
+      //: look like two entries, and the panel filled with rows nobody could
+      //: tell apart. Paired by the CDN's own asset id, the same key the
+      //: engine uses to join them.
+      const pairedAway = new Set(
+        captured.filter((item) => item.kind === "audio" && item.asset
+          && captured.some((other) => other.kind !== "audio"
+            && other.asset === item.asset))
+          .map((item) => item.url));
+      const listable = oneManifestPerHost(captured)
+        .filter((entry) => !pairedAway.has(entry.url));
+      for (const entry of listable.slice(0, 8)) {
         // A playlist is offered twice: as the site serves it, and as an MP4.
         const containers = entry.kind === "manifest" ? ["mp4", ""] : [""];
         for (const container of containers) {
@@ -1527,6 +1551,23 @@
     }
     if (entry.name) {
       const kind = entry.kind === "audio" ? "audio" : "video";
+      //: A CDN's filename is often an opaque blob id — Instagram's run to
+      //: ninety characters of base64 — which names nothing, does not fit the
+      //: panel, and made it scroll sideways. The page's own title is what a
+      //: person recognises, exactly as it is for a manifest above.
+      //: Judged on **length alone**, and deliberately not on the shape of any
+      //: one site's names. Instagram's are base64 blobs, a Twitch VOD's are
+      //: long dash-separated ids, and every CDN has its own convention — the
+      //: thing they share is that none of them fits a 380px panel or tells a
+      //: person anything. The user's words: "this should be universal not
+      //: just per site base".
+      const stem = entry.name.replace(/\.[^.]+$/, "");
+      const opaque = stem.length > 28;
+      if (opaque) {
+        const title = (tabTitle || document.title || "").trim();
+        const suffix = (entry.name.match(/\.[^.]+$/) || [""])[0];
+        if (title) return `${kind} · ${title}${suffix}`;
+      }
       return `${kind} · ${entry.name}`;
     }
     const kind = (entry.mime || "").startsWith("audio") ? "audio" : "video";

@@ -762,44 +762,27 @@ class SettingsDialog(QDialog):
         # autostart entry on Linux, a LaunchAgent on macOS. Always minimised:
         # a window that opens by itself at every login is why this gets turned
         # off again.
-        self.launch_at_startup = QCheckBox(
-            "Launch when I sign in"
-        )
-        self.launch_at_startup.setChecked(
-            self.settings.get_bool("launch_at_startup", False)
-        )
-        self.launch_at_startup.setToolTip(
-            "Starts with the machine, so a download clicked in the browser "
-            "does not have to wait for the application to be launched."
-        )
-        behaviour_form.addRow("", self.launch_at_startup)
-
-        # Three ticks that all said "tray" and gave no way to tell them apart —
-        # "Launch when I sign in, minimised to the tray" and "Minimise to the
-        # system tray" were reported as two settings for the same thing. They
-        # are three different *moments*: starting up, pressing minimise, and
-        # pressing close. Each label now names its own.
+        # **Two ticks, not four.** They were four and two pairs of them did the
+        # same thing: launching at sign-in is only ever wanted *minimised to
+        # the tray*, and "minimise to tray" and "minimise to tray when closed"
+        # were one behaviour described twice. Reported as "you add extra things
+        # in setting which are not needed".
         #
-        # `start_minimized` was the one doing the work in the first label and
-        # it had no control at all, so the behaviour could not be turned off
-        # without also giving up launching at sign-in.
+        # This one registers the autostart entry **and** starts without a
+        # window — one intent, one tick.
         self.start_minimized = QCheckBox("Minimise to tray when the system starts")
         self.start_minimized.setChecked(
-            self.settings.get_bool("start_minimized", False))
+            self.settings.get_bool("launch_at_startup", False))
         self.start_minimized.setToolTip(
-            "The engine is up and the tray icon is there, with no window until "
-            "you ask for one — so a download started from the browser does not "
-            "have to wait for the application to be launched.")
+            "Starts with the machine, in the tray, with no window until you "
+            "ask for one — so a download clicked in the browser does not have "
+            "to wait for the application to be launched.")
         behaviour_form.addRow("", self.start_minimized)
 
-        self.minimize_tray = QCheckBox("Minimise to tray")
-        self.minimize_tray.setChecked(self.settings.get_bool("minimize_to_tray", True))
-        self.minimize_tray.setToolTip(
-            "What the minimise button does. Untick it and the window minimises "
-            "to the taskbar like any other.")
-        behaviour_form.addRow("", self.minimize_tray)
-
         self.close_tray = QCheckBox("Minimise to tray when closed")
+        self.close_tray.setToolTip(
+            "Closing the window puts it in the tray and the downloads keep "
+            "running. Unticked, closing the window quits.")
         self.close_tray.setChecked(self.settings.get_bool("close_to_tray", False))
         behaviour_form.addRow("", self.close_tray)
 
@@ -863,7 +846,19 @@ class SettingsDialog(QDialog):
             "ordinary entries.")
         self.log_size.setEnabled(self.log_size_limited.isChecked())
         self.log_size_limited.toggled.connect(self.log_size.setEnabled)
-        log_form.addRow(self.log_size_limited, self.log_size)
+        # Both in the *field* column, on one line. Passing the checkbox as the
+        # row's label put it in the label column instead — hanging off to the
+        # left of every other tick in the box, with the spinbox stretched
+        # across the rest of the width.
+        self.log_size.setMaximumWidth(110)
+        log_size_row = QWidget()
+        log_size_line = QHBoxLayout(log_size_row)
+        log_size_line.setContentsMargins(0, 0, 0, 0)
+        log_size_line.setSpacing(8)
+        log_size_line.addWidget(self.log_size_limited)
+        log_size_line.addWidget(self.log_size)
+        log_size_line.addStretch(1)
+        log_form.addRow("", log_size_row)
 
         self.clear_log_on_launch = QCheckBox("Start each launch with an empty log")
         self.clear_log_on_launch.setChecked(
@@ -1815,11 +1810,10 @@ class SettingsDialog(QDialog):
             "download_dir": self.download_dir.text().strip(),
             "categorize_into_subfolders": self.categorize.isChecked(),
             "autostart_downloads": self.autostart.isChecked(),
-            "launch_at_startup": self.launch_at_startup.isChecked(),
-            "minimize_to_tray": self.minimize_tray.isChecked(),
             "close_to_tray": self.close_tray.isChecked(),
             "show_download_window": self.show_download_window.isChecked(),
             "start_minimized": self.start_minimized.isChecked(),
+            "launch_at_startup": self.start_minimized.isChecked(),
             "log_size_limited": self.log_size_limited.isChecked(),
             "log_megabytes_kept": float(self.log_size.value()),
             "notify_on_complete": self.notify.isChecked(),
@@ -1875,7 +1869,9 @@ class SettingsDialog(QDialog):
         the autostart directory is a setting that appears to work and does
         nothing — so the failure is shown here rather than left in the log.
         """
-        wanted = self.launch_at_startup.isChecked()
+        # One tick governs both halves now: starting with the machine and
+        # starting without a window. See where it is built.
+        wanted = self.start_minimized.isChecked()
         try:
             from ...autostart import apply as apply_autostart
 
