@@ -783,7 +783,7 @@ class SettingsDialog(QDialog):
         # `start_minimized` was the one doing the work in the first label and
         # it had no control at all, so the behaviour could not be turned off
         # without also giving up launching at sign-in.
-        self.start_minimized = QCheckBox("Start with no window, just the tray icon")
+        self.start_minimized = QCheckBox("Minimise to tray when the system starts")
         self.start_minimized.setChecked(
             self.settings.get_bool("start_minimized", False))
         self.start_minimized.setToolTip(
@@ -792,15 +792,14 @@ class SettingsDialog(QDialog):
             "have to wait for the application to be launched.")
         behaviour_form.addRow("", self.start_minimized)
 
-        self.minimize_tray = QCheckBox(
-            "Minimise to the tray rather than the taskbar")
+        self.minimize_tray = QCheckBox("Minimise to tray")
         self.minimize_tray.setChecked(self.settings.get_bool("minimize_to_tray", True))
         self.minimize_tray.setToolTip(
             "What the minimise button does. Untick it and the window minimises "
             "to the taskbar like any other.")
         behaviour_form.addRow("", self.minimize_tray)
 
-        self.close_tray = QCheckBox("Keep running in the tray when the window is closed")
+        self.close_tray = QCheckBox("Minimise to tray when closed")
         self.close_tray.setChecked(self.settings.get_bool("close_to_tray", False))
         behaviour_form.addRow("", self.close_tray)
 

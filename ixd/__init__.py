@@ -4,7 +4,7 @@
 #: PyInstaller spec and both extension manifests read it from here — a release
 #: whose artefacts are named after the previous one is not a release anybody
 #: can reason about.
-__version__ = "1.0.45"
+__version__ = "1.0.46"
 __appname__ = "Internet Xtreme Downloader"
 __appid__ = "com.ixd.downloader"
 

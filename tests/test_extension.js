@@ -538,8 +538,17 @@ console.log("\n[captures are shown only when the menu needs them]");
   const poorMenu = [{ height: 0, description: "master.m3u8" }];
   check("one nameless row still needs the captures beside it",
     worthShowing(captured, poorMenu, playlist) === true);
-  check("but only when the menu was read out of a capture",
-    worthShowing(captured, poorMenu, "https://example.com/watch") === false);
+  // This used to require the menu to have been read out of a capture, and
+  // that is what hid Instagram's clip: the extraction runs against the page,
+  // scrapes one useless format, and both halves of the video sit in the
+  // captures unshown. A poor menu needs them wherever it came from.
+  check("and needs them just as much when the menu came from the page",
+    worthShowing(captured, poorMenu, "https://example.com/watch") === true);
+  // The wall of rows §303 was about is still suppressed, and by the clause
+  // that was always doing that work: a menu naming real qualities stands
+  // alone whether or not its source was captured.
+  check("a real quality menu still suppresses them from a page source",
+    worthShowing(captured, realMenu, "https://example.com/watch") === false);
 
   check("a single row that does name a resolution stands alone",
     worthShowing(captured, [{ height: 720, description: "720p" }], playlist) === false);

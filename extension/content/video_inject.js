@@ -1486,8 +1486,21 @@
   function capturesWorthShowing(captured, formats, source) {
     if (!captured || !captured.length) return false;
     if (!formats || !formats.length) return true;
-    const fromCapture = captured.some((entry) => entry.url === source);
-    if (!fromCapture) return false;
+    //: **Not gated on the extraction having come from a capture.**
+    //:
+    //: It was, and that hid the captures exactly where they were needed. On
+    //: Instagram the extraction runs against the *page* and scrapes one
+    //: useless format out of it, while the browser has already fetched both
+    //: halves of the clip from a CDN — so `source` was never one of the
+    //: captured addresses, this returned false, and the menu offered a single
+    //: row reading "Video · m4a": a video row carrying an audio container,
+    //: with the real video nowhere in it. Reported as "i cannot download the
+    //: video", and the Log showed both halves captured and correctly
+    //: classified the whole time.
+    //:
+    //: `standsAlone` below is what stops the wall of rows §303 was about, and
+    //: it does that job on its own: an extraction that names several formats
+    //: or any real resolution suppresses the captures whatever their source.
     const namesRealQualities = formats.some(
       (format) => Number(format.height || 0) > 0
         // No trailing \b: Twitch names its own renditions "1080p60" and
