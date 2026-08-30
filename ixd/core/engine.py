@@ -2275,7 +2275,16 @@ class DownloadTask:
                 self._chunks = bands
                 self._next_chunk_index = len(bands)
                 self.db.replace_chunks(download.id, bands)
-            self._log(f"Planned {len(bands)} segment band(s) over {total} segments")
+            encrypted = sum(1 for s in download.segments if s.key_url)
+            detail = ""
+            if encrypted:
+                from .crypto import aes_backend
+
+                key_url = next(s.key_url for s in download.segments if s.key_url)
+                detail = (f"; {encrypted} encrypted (AES-128, key {key_url}, "
+                          f"decrypting with {aes_backend()})")
+            self._log(f"Planned {len(bands)} segment band(s) over {total} "
+                      f"segments{detail}")
 
         parts_dir = Path(self._parts_dir())
         parts_dir.mkdir(parents=True, exist_ok=True)
@@ -2813,7 +2822,9 @@ class DownloadTask:
             while True:
                 self._check_stop()
                 try:
+                    started = time.monotonic()
                     payload = self._fetch_segment(segment, limiters)
+                    spent = time.monotonic() - started
                     temporary = target + ".tmp"
                     with open(temporary, "wb") as handle:
                         handle.write(payload)
@@ -2823,6 +2834,7 @@ class DownloadTask:
                     with self._chunk_lock:
                         band.downloaded += 1
                     self._estimate_segmented_total()
+                    self._note_segment(index, len(payload), spent)
                     break
                 except CancelledError:
                     raise
@@ -2842,6 +2854,30 @@ class DownloadTask:
                     )
                     if self._stop.wait(delay):
                         raise CancelledError("stopped")
+
+    #: A segment slower than this is worth a line on its own. Ordinary ones
+    #: are a second or two; the encrypted-HLS freeze made them minutes.
+    SLOW_SEGMENT_SECONDS = 20.0
+
+    #: How often a segmented transfer says where it has got to.
+    SEGMENT_LOG_EVERY = 50
+
+    def _note_segment(self, index: int, size: int, spent: float) -> None:
+        """Leave a trail through a segmented transfer.
+
+        A download that stalls used to leave an empty task log — the reporter
+        of the 2026-08-30 freeze had nothing to send but the next launch's
+        start-up lines. Progress every so often, and any segment slow enough
+        to be the one somebody is staring at.
+        """
+        total = len(self.download.segments)
+        if spent >= self.SLOW_SEGMENT_SECONDS:
+            self._log(
+                f"Segment {index + 1}/{total} took {spent:.0f}s "
+                f"({size:,} bytes)", "warning")
+        elif (index + 1) % self.SEGMENT_LOG_EVERY == 0 or index + 1 == total:
+            self._log(f"Segment {index + 1}/{total} — {self._bytes_done:,} "
+                      f"bytes so far")
 
     def _fetch_segment(self, segment: MediaSegment, limiters: CompositeLimiter) -> bytes:
         client = self._client()

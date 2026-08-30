@@ -611,6 +611,20 @@ class DownloadService:
         self.events.subscribe(self._on_download_completed, EventType.DOWNLOAD_COMPLETED)
         self.events.subscribe(self._on_download_failed, EventType.DOWNLOAD_FAILED)
         self.db.log_event("Service started")
+        # Which AES backend this build got, said out loud on every launch.
+        # A pure-Python one decrypts correctly and 580x too slowly, which is
+        # invisible in every offline test and freezes the window on a real
+        # encrypted-HLS site — the defect behind the 2026-08-30 report. A
+        # backend that was never reached and one that works look identical
+        # unless the working case is logged too (CLAUDE.md rule 8).
+        try:
+            from .core.crypto import aes_backend_report
+
+            level, message = aes_backend_report()
+            self.db.log_event(message, level=level)
+        except Exception as error:  # noqa: BLE001 - never block a launch
+            self.db.log_event(f"Could not determine the AES backend: {error}",
+                              level="warning")
 
         # Not on the start-up path: a check that has to answer before the
         # window appears is a check that delays the window when a network is

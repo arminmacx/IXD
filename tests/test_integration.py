@@ -7327,11 +7327,65 @@ def test_a_stream_says_how_big_it_is_before_it_starts() -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_a_freeze_writes_its_own_log() -> None:
+    print("\n[freeze] the stall recorder writes while the interpreter is wedged")
+    import tempfile
+    import time as _time
+
+    from ixd.watchdog import StallWatchdog
+
+    home = Path(tempfile.mkdtemp())
+    notes: list[str] = []
+    watchdog = StallWatchdog(
+        home, threshold=2.0,
+        describe=lambda: "downloads\n  #7 'film.ts' status=downloading segments=612",
+        on_report=notes.append)
+    armed = watchdog.start()
+    check("the C-level recorder armed", armed)
+    watchdog.beat()
+    _time.sleep(0.3)
+    watchdog.beat()
+
+    # Wedge the interpreter the way pure-Python AES did: a tight bytecode loop
+    # that yields to nothing. No Python thread runs during this, which is the
+    # whole difficulty — a recorder written in Python cannot record it.
+    deadline = _time.monotonic() + 5.0
+    spin = 0
+    while _time.monotonic() < deadline:
+        for _ in range(200_000):
+            spin += 1
+
+    watchdog.beat()
+    _time.sleep(1.2)
+    watchdog.beat()
+    _time.sleep(0.4)
+    watchdog.stop()
+
+    report = (home / "stalls.log").read_text()
+    check("a stall was recorded at all", "STALL" in report, report[:200])
+    check("it names how long the main thread was silent",
+          "main thread silent for" in report)
+    check("it carries the application's own state", "film.ts" in report)
+    check("it names the AES backend", "aes " in report)
+    # This is the part no Python-side recorder could have written: faulthandler
+    # dumps from C, without the GIL, so it fires during the wedge itself.
+    check("faulthandler dumped through the wedge",
+          "Timeout (" in report and "most recent call first" in report)
+    check("the recovery is noted too", "answered again" in report)
+    check("the ordinary log gets a pointer to the file",
+          any("stopped responding" in n and "stalls.log" in n for n in notes),
+          str(notes))
+
+    # A second run appends rather than replacing, and cannot grow forever.
+    check("the file is reused, not clobbered", (home / "stalls.log").exists())
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — integration test suite")
     print("=" * 68)
-    for test in (test_service_over_ipc, test_native_host_framing,
+    for test in (test_a_freeze_writes_its_own_log,
+                 test_service_over_ipc, test_native_host_framing,
                  test_sandbox_relay, test_sandbox_launcher_placement,
                  test_browser_discovery, test_quit_ends_the_process,
                  test_extension_assets, test_native_host_installer,

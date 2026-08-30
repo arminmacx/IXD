@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 import time
+from typing import Any
 
 from . import __version__, config
 
@@ -485,13 +486,87 @@ def run_gui(urls: list[str], media: bool, start_hidden: bool) -> int:
     if window.isVisible():
         _on_the_window(window, window.maybe_open_guide)
 
+    # A freeze cannot write its own log. The ordinary log is SQLite, written
+    # by the threads that stall, so the one event worth recording is the one
+    # that silences its own recorder — a field report arrived with nothing in
+    # it but the *next* launch's start-up lines. This watches the Qt thread
+    # from outside and writes stacks to `stalls.log` when it stops answering.
+    watchdog = _start_watchdog(service, window)
+
     def cleanup() -> None:
+        if watchdog is not None:
+            watchdog.stop()
         if server is not None:
             server.stop()
         service.shutdown()
 
     app.aboutToQuit.connect(cleanup)
     return app.exec()
+
+
+def _start_watchdog(service: Any, window: Any) -> Any:
+    """Arm the stall recorder and keep it fed from the Qt main thread."""
+    from PySide6.QtCore import QTimer
+
+    from .watchdog import BEAT_INTERVAL, StallWatchdog
+
+    def describe() -> str:
+        """What was running. Read without taking the engine's lock.
+
+        This is called while the application is wedged, and the thread that
+        wedged it may be holding that lock — waiting for it would silence the
+        recorder in exactly the case it exists for. A torn read of a dict is
+        an acceptable price for a diagnostic that cannot deadlock.
+        """
+        rows: list[str] = []
+        try:
+            tasks = list(service.engine._tasks.values())
+        except Exception:  # noqa: BLE001
+            return "downloads  (unreadable)"
+        for task in tasks:
+            if not getattr(task, "running", False):
+                continue
+            download = getattr(task, "download", None)
+            if download is None:
+                continue
+            segments = getattr(download, "segments", None) or ()
+            done = getattr(task, "_bytes_done", 0)
+            rows.append(
+                f"  #{getattr(download, 'id', '?')} "
+                f"{getattr(download, 'filename', '?')!r} "
+                f"status={getattr(getattr(download, 'status', None), 'value', '?')} "
+                f"segments={len(segments)} bytes={done}")
+        if not rows:
+            return "downloads  none running"
+        return "downloads\n" + "\n".join(rows)
+
+    def note(message: str) -> None:
+        try:
+            service.db.log_event(message, level="warning")
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        watchdog = StallWatchdog(config.DATA_DIR, describe=describe, on_report=note)
+        armed = watchdog.start()
+    except Exception as error:  # noqa: BLE001 - never block a launch on this
+        service.db.log_event(f"Freeze recorder could not start: {error}",
+                             level="warning")
+        return None
+
+    # Reported either way: a recorder that was never reached and one that
+    # believes it worked look identical otherwise (CLAUDE.md rule 8).
+    service.db.log_event(
+        f"Freeze recorder active — {watchdog.path}"
+        + ("" if armed else " (Python-side only; no usable descriptor)"))
+
+    timer = QTimer(window)
+    timer.setInterval(int(BEAT_INTERVAL * 1000))
+    timer.timeout.connect(watchdog.beat)
+    timer.start()
+    window._stall_watchdog = watchdog        # keep both alive with the window
+    window._stall_timer = timer
+    return watchdog
 
 
 def _on_the_window(window, work) -> None:

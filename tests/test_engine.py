@@ -3468,6 +3468,91 @@ def test_a_dead_pooled_connection_costs_seconds_not_a_timeout() -> None:
     listener.close()
 
 
+def test_encrypted_hls_decrypts_natively_and_leaves_the_ui_alive() -> None:
+    print("\n[41] AES-128 decryption is native, and does not hold the GIL")
+    import threading
+    import time as _time
+
+    from ixd.core import crypto
+    from ixd.core.crypto import aes_cbc_decrypt, aes_cbc_encrypt
+
+    # 1. Which backend did this build get? A pure-Python one still decrypts
+    #    correctly, which is why this went unnoticed: every offline test
+    #    passed while the shipped application froze on a real site.
+    backend = crypto.aes_backend()
+    check(f"a native AES backend was found ({backend})",
+          crypto.native_aes_available(), crypto.aes_backend_report()[1])
+
+    key, iv = os.urandom(16), os.urandom(16)
+
+    # 2. Whatever backend ran, it must agree with the reference implementation
+    #    in this file byte-for-byte. A fast wrong answer is worse than a slow
+    #    right one.
+    sample = bytes(range(256)) * 64
+    reference = crypto._cbc_encrypt_pure(key, iv, sample)
+    check("the native backend matches the pure-Python cipher exactly",
+          aes_cbc_encrypt(key, iv, sample, pad=False) == reference)
+    check("...and round-trips", aes_cbc_decrypt(key, iv, reference, unpad=False) == sample)
+
+    # 3. Speed. A film is a couple of gigabytes of encrypted segments, and the
+    #    pure-Python path measured 0.48 MiB/s -- 32 MiB would take it about a
+    #    minute. Native does it in hundredths of a second. Five seconds
+    #    separates them with room for the slowest machine anybody runs this on.
+    payload = aes_cbc_encrypt(key, iv, os.urandom(32 << 20), pad=False)
+    started = _time.perf_counter()
+    aes_cbc_decrypt(key, iv, payload, unpad=False)
+    elapsed = _time.perf_counter() - started
+    check(f"32 MiB decrypts in under 5 s ({elapsed:.2f} s, "
+          f"{32 / max(elapsed, 1e-9):.0f} MiB/s)", elapsed < 5.0)
+
+    # 4. The freeze itself. Pure-Python AES is bytecode, so it holds the GIL
+    #    and every other thread -- including the one drawing the window --
+    #    stops. A second thread counts here, once while nothing else runs and
+    #    once during decryption; the two rates are compared rather than the
+    #    raw counts, because `sleep(0.001)` is nearer 1.4 ms on a real
+    #    scheduler and an absolute threshold would be measuring that instead.
+    #
+    #    The segment is 2 MiB because that is what HLS actually ships. Size
+    #    matters to this measurement: the EVP call releases the GIL but
+    #    allocating and copying its output does not, and those are linear in
+    #    the segment, so a synthetic 32 MiB blob scores 42% while the sizes in
+    #    the wild score 85-88%. Measuring the wrong size here would have
+    #    condemned a working fix.
+    segment = aes_cbc_encrypt(key, iv, os.urandom(2 << 20), pad=False)
+    ticks = [0]
+    stop = threading.Event()
+
+    def counter() -> None:
+        while not stop.is_set():
+            ticks[0] += 1
+            _time.sleep(0.001)
+
+    ticker = threading.Thread(target=counter, daemon=True)
+    ticker.start()
+
+    def rate_while(work) -> float:
+        started = _time.perf_counter()
+        before = ticks[0]
+        deadline = started + 1.0
+        while _time.perf_counter() < deadline:
+            work()
+        return (ticks[0] - before) / (_time.perf_counter() - started)
+
+    try:
+        idle_rate = rate_while(lambda: _time.sleep(0.01))
+        busy_rate = rate_while(lambda: aes_cbc_decrypt(key, iv, segment, unpad=False))
+    finally:
+        stop.set()
+        ticker.join(timeout=2)
+
+    share = busy_rate / idle_rate if idle_rate else 0.0
+    # Pure Python scored 21% of the idle rate -- a thread that has all but
+    # stopped, which is the window not repainting. Native measures 85-88%.
+    check(f"another thread keeps its pace during decryption "
+          f"({share:.0%} of idle: {busy_rate:.0f}/s vs {idle_rate:.0f}/s)",
+          share >= 0.5, f"only {share:.0%} of the idle rate")
+
+
 def main() -> int:
     print("=" * 68)
     print("Internet Xtreme Downloader — engine test suite")
@@ -3510,6 +3595,7 @@ def main() -> int:
         test_a_range_lie_found_mid_transfer_restarts_as_one_stream,
         test_connections_are_reused_and_never_reused_unsafely,
         test_a_dead_pooled_connection_costs_seconds_not_a_timeout,
+        test_encrypted_hls_decrypts_natively_and_leaves_the_ui_alive,
     ):
         try:
             test()
