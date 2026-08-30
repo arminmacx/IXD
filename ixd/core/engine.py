@@ -412,6 +412,8 @@ class DownloadTask:
 
         self._meter = SpeedMeter()
         self._bytes_done = 0                    # byte counter (authoritative for segmented)
+        self._segments_done = 0                 # completed segments, across every band
+        self._segment_seconds = 0.0             # their total wall time, for the slow test
         self._had_success = False               # a byte has arrived on this URL
         #: One entry per live streaming worker, for the connection bars. Empty
         #: except while a parallel server-driven pass is running.
@@ -820,6 +822,10 @@ class DownloadTask:
             existing = []
             resuming = False
             self._bytes_done = 0
+            # The segment trail restarts with the transfer, or the average it
+            # judges "slow" against is carried over from an abandoned attempt.
+            self._segments_done = 0
+            self._segment_seconds = 0.0
             try:
                 if download.temp_path and os.path.exists(download.temp_path):
                     os.remove(download.temp_path)
@@ -2857,7 +2863,15 @@ class DownloadTask:
 
     #: A segment slower than this is worth a line on its own. Ordinary ones
     #: are a second or two; the encrypted-HLS freeze made them minutes.
-    SLOW_SEGMENT_SECONDS = 20.0
+    #: No segment is called slow until this many seconds, whatever the rest of
+    #: the download is doing. Below this it is not worth a line.
+    SLOW_SEGMENT_FLOOR = 60.0
+
+    #: ...and then only if it took this many times the running average. Sixteen
+    #: connections sharing one CDN make 20-30s per segment perfectly ordinary:
+    #: a fixed 20s threshold logged forty warnings on a download that finished
+    #: correctly, which is noise burying the signal it exists to carry.
+    SLOW_SEGMENT_FACTOR = 4.0
 
     #: How often a segmented transfer says where it has got to.
     SEGMENT_LOG_EVERY = 50
@@ -2867,17 +2881,27 @@ class DownloadTask:
 
         A download that stalls used to leave an empty task log — the reporter
         of the 2026-08-30 freeze had nothing to send but the next launch's
-        start-up lines. Progress every so often, and any segment slow enough
-        to be the one somebody is staring at.
+        start-up lines.
+
+        Both halves are counted across the *whole* transfer rather than per
+        segment. A segmented download runs many bands at once, so one band's
+        index is not progress: keying the periodic line on it printed 250/509
+        before 100/509 before 350/509, which reads as a defect.
         """
         total = len(self.download.segments)
-        if spent >= self.SLOW_SEGMENT_SECONDS:
+        with self._chunk_lock:
+            self._segments_done += 1
+            self._segment_seconds += spent
+            done = self._segments_done
+            average = self._segment_seconds / done
+
+        if spent >= max(self.SLOW_SEGMENT_FLOOR, average * self.SLOW_SEGMENT_FACTOR):
             self._log(
-                f"Segment {index + 1}/{total} took {spent:.0f}s "
-                f"({size:,} bytes)", "warning")
-        elif (index + 1) % self.SEGMENT_LOG_EVERY == 0 or index + 1 == total:
-            self._log(f"Segment {index + 1}/{total} — {self._bytes_done:,} "
-                      f"bytes so far")
+                f"Segment {index + 1} took {spent:.0f}s ({size:,} bytes) — "
+                f"{average:.0f}s is this download's average", "warning")
+        elif done % self.SEGMENT_LOG_EVERY == 0 or done == total:
+            self._log(f"{done}/{total} segments — {self._bytes_done:,} bytes "
+                      f"so far, {average:.0f}s per segment")
 
     def _fetch_segment(self, segment: MediaSegment, limiters: CompositeLimiter) -> bytes:
         client = self._client()
